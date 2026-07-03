@@ -20505,15 +20505,6 @@ index 5bb7b5356e2a4dac9c6ad983f2d636ff0594ab93..ea720db6f4fc118bbde72b1f706ffb01
      }
      // Paper end - optimize redstone (Alternate Current)
  
-@@ -2763,7 +2947,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
-     }
- 
-     public boolean isCommandBlockEnabled() {
--        return this.getGameRules().get(GameRules.COMMAND_BLOCKS_WORK);
-+        return false; // Canvas - region threading
-     }
- 
-     public boolean isSpawnerBlockEnabled() {
 @@ -2785,18 +2969,18 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
                  ServerLevel.this.getWaypointManager().untrackWaypoint(waypoint);
              }
@@ -21906,32 +21897,6 @@ index 4ea2718f48dbddd1a2343aad88873ad540eb4117..2dcfc4557ee75c802df8a1160bf88856
          } else if (!completions.isEmpty()) {
              final com.mojang.brigadier.suggestion.SuggestionsBuilder builder0 = new com.mojang.brigadier.suggestion.SuggestionsBuilder(packet.getCommand(), command.getTotalLength());
              final com.mojang.brigadier.suggestion.SuggestionsBuilder builder = builder0.createOffset(builder0.getInput().lastIndexOf(' ') + 1);
-@@ -940,6 +973,12 @@ public class ServerGamePacketListenerImpl
-     @Override
-     public void handleSetCommandBlock(final ServerboundSetCommandBlockPacket packet) {
-         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
-+        // Canvas start - region threading
-+        if (true) {
-+            this.player.sendSystemMessage(Component.literal("Command blocks are not enabled with region threading"));
-+            return;
-+        }
-+        // Canvas end - region threading
-         if (!this.player.canUseGameMasterBlocks() && (!this.player.isCreative() || !this.player.getBukkitEntity().hasPermission("minecraft.commandblock"))) { // Paper - command block permission
-             this.player.sendSystemMessage(Component.translatable("advMode.notAllowed"));
-         } else {
-@@ -1001,6 +1040,12 @@ public class ServerGamePacketListenerImpl
-     @Override
-     public void handleSetCommandMinecart(final ServerboundSetCommandMinecartPacket packet) {
-         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
-+        // Canvas start - region threading
-+        if (true) {
-+            this.player.sendSystemMessage(Component.literal("Command block minecarts are not enabled with region threading"));
-+            return;
-+        }
-+        // Canvas end - region threading
-         if (!this.player.canUseGameMasterBlocks() && (!this.player.isCreative() || !this.player.getBukkitEntity().hasPermission("minecraft.commandblock"))) { // Paper - command block permission
-             this.player.sendSystemMessage(Component.translatable("advMode.notAllowed"));
-         } else {
 @@ -1339,7 +1384,7 @@ public class ServerGamePacketListenerImpl
      public void handleEditBook(final ServerboundEditBookPacket packet) {
          // Paper start - Book size limits
@@ -26887,18 +26852,6 @@ diff --git a/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.ja
 index 912962e7ba35df57cbb157443fc8b7867a43d5dc..0be598cae2a7c0ec34b31d812b56780f3a983e8f 100644
 --- a/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java
 +++ b/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java
-@@ -87,6 +87,11 @@ public class MinecartCommandBlock extends AbstractMinecart {
- 
-     @Override
-     public InteractionResult interact(final Player player, final InteractionHand hand, final Vec3 location) {
-+        // Canvas start - region threading
-+        if (true) {
-+            return InteractionResult.FAIL;
-+        }
-+        // Canvas end - region threading
-         if (!player.canUseGameMasterBlocks() && (!player.isCreative() || !player.getBukkitEntity().hasPermission("minecraft.commandblock"))) { // Paper - command block permission
-             return InteractionResult.PASS;
-         }
 @@ -149,5 +154,11 @@ public class MinecartCommandBlock extends AbstractMinecart {
              return (ServerLevel) MinecartCommandBlock.this.level();
          }
@@ -27080,14 +27033,14 @@ diff --git a/net/minecraft/world/level/BaseCommandBlock.java b/net/minecraft/wor
 index fbe1cf1f02a27cbe0666fb83eb74c82df92785c9..afd2d882f91ce999bc2a4cd50ca5cd3421de6a94 100644
 --- a/net/minecraft/world/level/BaseCommandBlock.java
 +++ b/net/minecraft/world/level/BaseCommandBlock.java
-@@ -91,6 +91,7 @@ public abstract class BaseCommandBlock {
-     }
- 
-     public boolean performCommand(final ServerLevel level) {
-+        if (true) return false; // Folia - region threading
-         if (level.getGameTime() == this.lastExecution) {
-             return false;
-         }
+@@ -118,6 +118,6 @@
+                     if (!event.callEvent()) {
+                         return true;
+                     }
+-                    level.getServer().getCommands().performPrefixedCommand(commandSourceStack, event.getCommand());
++                    io.canvasmc.canvas.threadedregions.commands.AbstractCommandExecution.executeOnGlobal(() -> { level.getServer().getCommands().performPrefixedCommand(commandSourceStack, event.getCommand()); }, commandSourceStack); // Canvas - command blocks re-enabled
+                     // Paper end - ServerCommandEvent
+                 }
 @@ -172,10 +173,15 @@ public abstract class BaseCommandBlock {
      public abstract CommandSourceStack createCommandSourceStack(ServerLevel level, CommandSource source);
  
@@ -27828,34 +27781,6 @@ index 29f5182c8528bfdced6a3c2c145e58721e723777..423c45d7be8ac0c27fd3caa0aa8f15f2
              } else {
                  level.addFreshEntity(entity);
              }
-diff --git a/net/minecraft/world/level/block/CommandBlock.java b/net/minecraft/world/level/block/CommandBlock.java
-index 8cf4410a41ccd2f7e253e5400ca679a498aea4db..53507d88a14b788e096109cb6fec17de3fbaec4e 100644
---- a/net/minecraft/world/level/block/CommandBlock.java
-+++ b/net/minecraft/world/level/block/CommandBlock.java
-@@ -91,6 +91,11 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
- 
-     @Override
-     protected void tick(final BlockState state, final ServerLevel level, final BlockPos pos, final RandomSource random) {
-+        // Canvas start - region threading
-+        if (true) {
-+            return;
-+        }
-+        // Canvas end - region threading
-         if (level.getBlockEntity(pos) instanceof CommandBlockEntity commandBlock) {
-             BaseCommandBlock baseCommandBlock = commandBlock.getCommandBlock();
-             boolean commandSet = !StringUtil.isNullOrEmpty(baseCommandBlock.getCommand());
-@@ -133,6 +138,11 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
-     protected InteractionResult useWithoutItem(
-         final BlockState state, final Level level, final BlockPos pos, final Player player, final BlockHitResult hitResult
-     ) {
-+        // Canvas start - region threading
-+        if (true) {
-+            return InteractionResult.FAIL;
-+        }
-+        // Canvas end - region threading
-         if (level.getBlockEntity(pos) instanceof CommandBlockEntity commandBlockEntity && (player.canUseGameMasterBlocks() || (player.isCreative() && player.getBukkitEntity().hasPermission("minecraft.commandblock")))) { // Paper - command block permission
-             player.openCommandBlock(commandBlockEntity);
-             return InteractionResult.SUCCESS;
 diff --git a/net/minecraft/world/level/block/DaylightDetectorBlock.java b/net/minecraft/world/level/block/DaylightDetectorBlock.java
 index 6a8fce2a47d9b5e5689750955bda58638c50ed76..2ac6d2c8462d69f675c6b0bd457438a4eedded4c 100644
 --- a/net/minecraft/world/level/block/DaylightDetectorBlock.java
