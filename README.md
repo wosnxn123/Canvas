@@ -1,3 +1,32 @@
+## Fork 修改说明
+
+本 fork 基于 Canvas 26.2，针对上游 Canvas **硬编码禁用命令方块**的问题进行了修复。
+
+### 修改内容
+
+- **重新启用命令方块**：上游 Canvas 在 6 处代码中通过 `if(true) return false`、`return false`、抛出 `UnsupportedOperationException` 等方式硬编码禁用了命令方块，本 fork 删除了这 6 处禁用代码。
+- **跨区域安全执行**：命令方块执行的命令通过 ACE API 的 `AbstractCommandExecution.executeOnGlobal` 路由到 global region 线程，使命令方块可以跨区域安全执行命令（如 `/tp`、`/give`、`/scoreboard`）。
+- **已验证**：命令方块正常使用，跨区域 TP 无报错。
+
+### 兼容性
+
+| 服务端 | 兼容性 | 说明 |
+|--------|--------|------|
+| Canvas 26.2 | ✅ 完全兼容 | 命令方块可用，本 fork 的目标环境 |
+| 上游 Folia | 不适用 | 这是 Canvas fork，不是 Folia fork |
+| Paper/Purpur | 不适用 | 这是 Canvas fork，不是 Paper/Purpur fork |
+
+### 构建方式
+
+```bash
+./gradlew applyAllPatches
+./gradlew :canvas-server:createPaperclipJar
+```
+
+**Java 版本要求**：Java 25
+
+---
+
 ![title](./canvas_title.png)
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)  
