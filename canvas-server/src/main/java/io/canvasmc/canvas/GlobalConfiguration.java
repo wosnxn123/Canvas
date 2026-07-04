@@ -472,6 +472,26 @@ public class GlobalConfiguration extends Part {
         public boolean pearlDuplication = false;
     }
 
+    public VanillaLikeExperience vanillaLikeExperience = new VanillaLikeExperience();
+    public static class VanillaLikeExperience extends Part {
+
+        {
+            option("enabled")
+                .docs(
+                    Style.wrap(
+                        "Enables vanilla-like mechanics that Paper/Folia changed. Restores: tripwire hook placement",
+                        "validation bypass (string dup farms / 刷线机), TNT & sand duping via piston desync, permanent",
+                        "block break exploits (bedrock/end portal frames), headless pistons, vanilla mob spawning",
+                        "(count all mobs), unlimited entity collisions, player cramming damage, vanilla phantom/",
+                        "insomnia behavior, no TNT-per-tick limit, and vanilla hopper/bee/item-merge/end-portal",
+                        "teleport behavior. When false, Paper/Folia per-mechanic configs apply as normal."
+                    )
+                );
+        }
+
+        public boolean enabled = false;
+    }
+
     public Networking networking = new Networking();
     public static class Networking extends Part {
 
