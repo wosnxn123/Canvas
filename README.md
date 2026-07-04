@@ -4,18 +4,19 @@
 1. 上游 Canvas **硬编码禁用命令方块**；
 2. Paper/Folia **修改了大量原版机制**（刷线机、TNT 复制、永久破坏等）。
 
-### 1. 重新启用命令方块（始终启用）
+### 1. 重新启用命令方块（可通过配置开关）
 
-上游 Canvas 在 6 处代码中通过 `if(true) return false`、`return false`、抛出 `UnsupportedOperationException` 等方式硬编码禁用了命令方块。本 fork：
+上游 Canvas 在 6 处代码中通过 `if(true) return false`、`return false` 等方式硬编码禁用了命令方块。本 fork 在 feature patch 0003 中将这 6 处禁用改为受配置控制：
 
-- 删除了这 6 处禁用代码；
-- 通过 ACE API 的 `io.canvasmc.canvas.threadedregions.commands.AbstractCommandExecution.executeOnGlobal` 将命令方块执行路由到 **global region 线程**，使命令方块可以在区域化多线程环境下安全执行跨区域命令（如 `/tp`、`/give`、`/scoreboard`）。
+- 开关：`config/canvas-server.yml` → `vanilla-like-experience.command-blocks`（默认 `true`）
+- 开启时通过 ACE API 的 `io.canvasmc.canvas.command.execution.AbstractCommandExecution.executeOnGlobal` 将命令方块执行路由到 **global region 线程**，可安全执行跨区域命令（如 `/tp`、`/give`、`/scoreboard`）
+- 关闭时（`command-blocks: false`）保持上游 Canvas 的禁用行为
 
-**始终启用**，无需配置。已验证：命令方块正常使用，跨区域 TP 无报错。
+默认 `true`（保留原版命令方块行为）。已验证：命令方块正常使用，跨区域 TP 无报错。
 
 ### 2. Vanilla-like Experience 配置（原版机制还原）
 
-新增主开关：`config/canvas-server.yml` → `vanilla-like-experience.enabled`（默认 `false`）。开启后还原 Paper/Folia 修改过的原版机制（移植自 LuminolMC/Lophine 0048）：
+主开关：`config/canvas-server.yml` → `vanilla-like-experience.enabled`（默认 `false`）。开启后还原 Paper/Folia 修改过的原版机制（移植自 LuminolMC/Lophine 0048）：
 
 | 机制 | 说明 |
 |------|------|
@@ -39,7 +40,7 @@
 | `main` | 跟踪上游 Canvas main + 本 fork 改动 |
 | `pre-merger/26.2` | 26.2 线，**服务器实际运行**的分支 |
 
-命令方块修复位于基础 patch（`pre-merger/26.2` 的 `0004-Fixup-Region-Threading` / `main` 的 `0005-Region-Threading`）；Vanilla-like Experience 位于 feature patch `0003-Vanilla-like-experience.patch`。
+命令方块修复 + Vanilla-like Experience 都在 feature patch `0003-Vanilla-like-experience.patch`（一个补丁），配置都在 `config/canvas-server.yml` 的 `vanilla-like-experience` 段（`enabled` 控原版机制，`command-blocks` 控命令方块）。基础 patch（`0004`/`0005`）保持上游 Canvas 原样（命令方块禁用），由 0003 重新启用并受配置控制。
 
 ### 配置与热重载
 

@@ -256,3 +256,95 @@ index a468a10..4b972e4 100644
                      if (!this.level.getBlockState(mutable).isDestroyable()) {
                          return false;
                      }
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index f002715..0d0624b 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -2968,7 +2968,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     }
+ 
+     public boolean isCommandBlockEnabled() {
+-        return false; // Canvas - region threading
++        return io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.commandBlocks && this.getGameRules().get(GameRules.COMMAND_BLOCKS_WORK); // Canvas - vanilla-like experience
+     }
+ 
+     public boolean isSpawnerBlockEnabled() {
+diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+index 9616ee2..0871d80 100644
+--- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+@@ -974,7 +974,7 @@ public class ServerGamePacketListenerImpl
+     public void handleSetCommandBlock(final ServerboundSetCommandBlockPacket packet) {
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
+         // Canvas start - region threading
+-        if (true) {
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.commandBlocks) {
+             this.player.sendSystemMessage(Component.literal("Command blocks are not enabled with region threading"));
+             return;
+         }
+@@ -1041,7 +1041,7 @@ public class ServerGamePacketListenerImpl
+     public void handleSetCommandMinecart(final ServerboundSetCommandMinecartPacket packet) {
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
+         // Canvas start - region threading
+-        if (true) {
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.commandBlocks) {
+             this.player.sendSystemMessage(Component.literal("Command block minecarts are not enabled with region threading"));
+             return;
+         }
+diff --git a/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java b/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java
+index 0be598c..8a2cba8 100644
+--- a/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java
++++ b/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java
+@@ -88,7 +88,7 @@ public class MinecartCommandBlock extends AbstractMinecart {
+     @Override
+     public InteractionResult interact(final Player player, final InteractionHand hand, final Vec3 location) {
+         // Canvas start - region threading
+-        if (true) {
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.commandBlocks) {
+             return InteractionResult.FAIL;
+         }
+         // Canvas end - region threading
+diff --git a/net/minecraft/world/level/BaseCommandBlock.java b/net/minecraft/world/level/BaseCommandBlock.java
+index afd2d88..faa9c3c 100644
+--- a/net/minecraft/world/level/BaseCommandBlock.java
++++ b/net/minecraft/world/level/BaseCommandBlock.java
+@@ -91,7 +91,7 @@ public abstract class BaseCommandBlock {
+     }
+ 
+     public boolean performCommand(final ServerLevel level) {
+-        if (true) return false; // Folia - region threading
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.commandBlocks) return false; // Canvas - vanilla-like experience
+         if (level.getGameTime() == this.lastExecution) {
+             return false;
+         }
+@@ -119,7 +119,7 @@ public abstract class BaseCommandBlock {
+                     if (!event.callEvent()) {
+                         return true;
+                     }
+-                    level.getServer().getCommands().performPrefixedCommand(commandSourceStack, event.getCommand());
++                    io.canvasmc.canvas.threadedregions.commands.AbstractCommandExecution.executeOnGlobal(() -> { level.getServer().getCommands().performPrefixedCommand(commandSourceStack, event.getCommand()); }, commandSourceStack); // Canvas - vanilla-like experience
+                     // Paper end - ServerCommandEvent
+                 }
+             } catch (Throwable t) {
+diff --git a/net/minecraft/world/level/block/CommandBlock.java b/net/minecraft/world/level/block/CommandBlock.java
+index 53507d8..df432b7 100644
+--- a/net/minecraft/world/level/block/CommandBlock.java
++++ b/net/minecraft/world/level/block/CommandBlock.java
+@@ -92,7 +92,7 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+     @Override
+     protected void tick(final BlockState state, final ServerLevel level, final BlockPos pos, final RandomSource random) {
+         // Canvas start - region threading
+-        if (true) {
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.commandBlocks) {
+             return;
+         }
+         // Canvas end - region threading
+@@ -139,7 +139,7 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
+         final BlockState state, final Level level, final BlockPos pos, final Player player, final BlockHitResult hitResult
+     ) {
+         // Canvas start - region threading
+-        if (true) {
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.commandBlocks) {
+             return InteractionResult.FAIL;
+         }
+         // Canvas end - region threading
