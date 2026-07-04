@@ -487,9 +487,19 @@ public class GlobalConfiguration extends Part {
                         "teleport behavior. When false, Paper/Folia per-mechanic configs apply as normal."
                     )
                 );
+            option("commandBlocks")
+                .docs(
+                    Style.wrap(
+                        "Re-enables command blocks (which Canvas upstream hard-disables for region threading)",
+                        "by routing execution to the global region thread via ACE executeOnGlobal, so command",
+                        "blocks can safely run cross-region commands. Default true (preserves vanilla command-block",
+                        "behavior). Set false to keep command blocks disabled."
+                    )
+                );
         }
 
         public boolean enabled = false;
+        public boolean commandBlocks = true;
     }
 
     public Networking networking = new Networking();
