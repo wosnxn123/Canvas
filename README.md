@@ -35,12 +35,37 @@
 
 ### 分支
 
-| 分支 | 说明 |
-|------|------|
-| `main` | 跟踪上游 Canvas main + 本 fork 改动 |
-| `pre-merger/26.2` | 26.2 线，**服务器实际运行**的分支 |
+| 分支 | Canvas base | 说明 |
+|------|------------|------|
+| `pre-merger/26.2` | 上游 Canvas `pre-merger/26.2`（26.2 pre-merge，较新） | **服务器实际运行**的分支；命令执行包 `io.canvasmc.canvas.command.execution` |
+| `main` | 上游 Canvas `main`（stable main，较旧） | 跟踪上游 main；命令执行包 `io.canvasmc.canvas.threadedregions.commands` |
+
+> 两个分支的 Canvas base 不同：`pre-merger/26.2` 是 26.2 的 pre-merge 线（含 Canvas 上游对命令执行包的重构），`main` 是 stable main（还没收到该重构）。所以 0003 patch 在两个分支上用了不同的包路径，分别生成、都编译通过。**部署用 `pre-merger/26.2`。**
+
+### 补丁清单与来源
+
+**基础 patch**（`canvas-server/minecraft-patches/base/`，Canvas 上游维护，fork 不改）：
+`0001-Rebrand`、`0002-Remove-Vanilla-Profiler`、`0003-Remove-Dead-Old-Watchdog-Code`、`0004-Per-world-Canvas-configs` / `0004-Fixup-Region-Threading`、`0005-Region-Threading`、`0006-Canvas-RegionizedWorldData`、`0007-Replace-Moonrise-Executor`、`0008-Purpur-Ender-Chest-6-Rows-Config`
+
+**Feature patch**（`canvas-server/minecraft-patches/features/`）：
+
+| 补丁 | 来源 | 说明 |
+|------|------|------|
+| `0001-Purpur-Alternative-Keepalive` | Canvas 上游 | — |
+| `0002-Disable-Criterion-Trigger-Config` | Canvas 上游 | — |
+| `0003-Vanilla-like-experience` | **本 fork**（移植 + 原创） | 22 个 hunk：17 vanilla 机制移植自 [LuminolMC/Lophine](https://github.com/LuminolMC/Lophine) 的 `0048-Add-Vanilla-like-experience-Config.patch`（作者 Bacteriawa）；5 命令方块 gate 为本 fork 原创（用 Canvas ACE `AbstractCommandExecution.executeOnGlobal` 路由到 global region 线程） |
+
+**Canvas 自有源码改动**（`canvas-server/src/main/java/io/canvasmc/canvas/GlobalConfiguration.java`，非 patch）：新增 `VanillaLikeExperience` 配置段（`enabled` + `commandBlocks` 字段）。
 
 命令方块修复 + Vanilla-like Experience 都在 feature patch `0003-Vanilla-like-experience.patch`（一个补丁），配置都在 `config/canvas-server.yml` 的 `vanilla-like-experience` 段（`enabled` 控原版机制，`command-blocks` 控命令方块）。基础 patch（`0004`/`0005`）保持上游 Canvas 原样（命令方块禁用），由 0003 重新启用并受配置控制。
+
+### 上游更新须知
+
+合并上游 Canvas 后，本 fork 的 `0003` **可能需要重新适配**：
+- 17 个 vanilla 机制 hunk 依赖 Paper-config 代码行（如 `allowPlayerCrammingDamage`、`maxEntityCollisions`、`allowPistonDuplication`）。上游 Paper 重构这些行 → hunk context 变 → 应用失败，需重新生成。
+- 5 个命令方块 gate hunk 依赖 Canvas 上游的禁用点（`if(true) return false` 等）。上游改禁用方式 → 需重新适配。
+- 命令执行包路径（`command.execution` / `threadedregions.commands`）若上游再重构，两个分支都要跟着改。
+- 基础 patch + feature 0001/0002 随上游 merge 自动更新，无需手动处理。
 
 ### 配置与热重载
 
