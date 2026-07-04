@@ -1,6 +1,6 @@
 ## Fork 修改说明
 
-本 fork 基于 Canvas 26.2（Folia 下游），针对上游 Canvas 的两个问题进行了修改：
+本 fork 基于 Canvas（Folia 下游），针对上游 Canvas 的两个问题进行了修改：
 1. 上游 Canvas **硬编码禁用命令方块**；
 2. Paper/Folia **修改了大量原版机制**（刷线机、TNT 复制、永久破坏等）。
 
