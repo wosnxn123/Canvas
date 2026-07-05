@@ -512,6 +512,32 @@ public class GlobalConfiguration extends Part {
         public boolean commandBlocks = true;
     }
 
+    public OldFeature oldFeature = new OldFeature();
+    public static class OldFeature extends Part {
+
+        {
+            option("old-zombie-reinforcement")
+                .docs(
+                    Style.wrap(
+                        "Restores old zombie reinforcement behavior: spawned reinforcements are always plain",
+                        "ZOMBIE instead of the caller's type (Husk / Zombie Villager etc). Ported from",
+                        "LuminolMC/Lophine 0013. Default false; independent of vanilla-like-experience.enabled."
+                    )
+                );
+            option("old-leader-zombie-health")
+                .docs(
+                    Style.wrap(
+                        "Restores old leader zombie health logic: leader zombies do not get instantly healed",
+                        "to their bonus max health (skips setHealth(getMaxHealth())). Ported from",
+                        "LuminolMC/Lophine 0014. Default false; independent of vanilla-like-experience.enabled."
+                    )
+                );
+        }
+
+        public boolean oldZombieReinforcement = false;
+        public boolean oldLeaderZombieHealth = false;
+    }
+
     public Networking networking = new Networking();
     public static class Networking extends Part {
 

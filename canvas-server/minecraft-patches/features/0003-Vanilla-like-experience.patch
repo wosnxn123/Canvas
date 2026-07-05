@@ -1,19 +1,27 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: wosnxn123 <wosnxn123@users.noreply.github.com>
-Date: Mon, 6 Jul 2026 00:50:00 +0800
+Date: Mon, 6 Jul 2026 01:30:00 +0800
 Subject: [PATCH] Add Vanilla-like experience config
 
-Adds config/canvas-server.yml -> vanilla-like-experience.enabled master
-toggle restoring vanilla mechanics Paper/Folia changed (tripwire string
-farms, TNT/sand duping, permanent block break, headless pistons, vanilla
-mob spawning, unlimited entity collisions, player cramming, vanilla
-phantom behavior, no TNT limit, vanilla hopper/bee/item-merge/end-portal
-teleport, old zombie reinforcement, old leader zombie health). When
-disabled, Paper per-mechanic configs apply as normal.
-Ported from LuminolMC/Lophine 0048 (vanilla config) + 0013 (zombie
-reinforcement) + 0014 (leader zombie health), adapted to Canvas
-GlobalConfiguration + Canvas main NMS context. Patch regenerated via
-git diff on Canvas main applied source (correct blob index + context).
+Adds config/canvas-server.yml toggles restoring vanilla mechanics that
+Paper/Folia changed.
+
+vanilla-like-experience.enabled: master toggle for 17 vanilla mechanics
+(tripwire string farms, TNT/sand duping, permanent block break, headless
+pistons, vanilla mob spawning, unlimited entity collisions, player
+cramming, vanilla phantom/insomnia, no TNT limit, vanilla
+hopper/bee/item-merge/end-portal teleport). Ported from Lophine 0048.
+
+old-feature.old-zombie-reinforcement / old-leader-zombie-health:
+INDEPENDENT per-feature toggles (NOT tied to vanilla-like-experience),
+matching Lophine's OldFeatureConfig structure (separate config section
+with per-feature static booleans). Ported from Lophine 0013 (zombie
+reinforcement spawns plain ZOMBIE) + 0014 (skip leader zombie setHealth).
+Default false.
+
+Patch regenerated via git diff on Canvas main applied source (correct
+blob index + context). The OldFeature Part class itself lives in
+GlobalConfiguration.java (canvas-server/src/main/java), not in this patch.
 
 diff --git a/ca/spottedleaf/moonrise/paper/PaperHooks.java b/ca/spottedleaf/moonrise/paper/PaperHooks.java
 index 08e3c75..4a5fefe 100644
@@ -145,7 +153,7 @@ index 6130c47..7bb43ca 100644
                          return true;
                          } // Paper - Add phantom creative and insomniac controls
 diff --git a/net/minecraft/world/entity/monster/zombie/Zombie.java b/net/minecraft/world/entity/monster/zombie/Zombie.java
-index 6bde60f..b4c303d 100644
+index 6bde60f..878b869 100644
 --- a/net/minecraft/world/entity/monster/zombie/Zombie.java
 +++ b/net/minecraft/world/entity/monster/zombie/Zombie.java
 @@ -333,7 +333,7 @@ public class Zombie extends Monster {
@@ -153,7 +161,7 @@ index 6bde60f..b4c303d 100644
              int y = Mth.floor(this.getY());
              int z = Mth.floor(this.getZ());
 -            EntityType<? extends Zombie> type = this.getType();
-+            EntityType<? extends Zombie> type = io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.enabled ? EntityTypes.ZOMBIE : this.getType(); // Canvas - vanilla-like experience
++            EntityType<? extends Zombie> type = io.canvasmc.canvas.GlobalConfiguration.getInstance().oldFeature.oldZombieReinforcement ? EntityTypes.ZOMBIE : this.getType(); // Canvas - vanilla-like experience (old zombie reinforcement)
              Zombie reinforcement = type.create(level, EntitySpawnReason.REINFORCEMENT);
              if (reinforcement == null) {
                  return true;
@@ -162,7 +170,7 @@ index 6bde60f..b4c303d 100644
                      new AttributeModifier(LEADER_ZOMBIE_BONUS_ID, this.random.nextDouble() * 3.0 + 1.0, AttributeModifier.Operation.ADD_MULTIPLIED_TOTAL)
                  );
 -            if (spawnReason != EntitySpawnReason.CONVERSION && spawnReason != EntitySpawnReason.LOAD && spawnReason != EntitySpawnReason.DIMENSION_TRAVEL) {
-+            if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.enabled && spawnReason != EntitySpawnReason.CONVERSION && spawnReason != EntitySpawnReason.LOAD && spawnReason != EntitySpawnReason.DIMENSION_TRAVEL) { // Canvas - vanilla-like experience
++            if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().oldFeature.oldLeaderZombieHealth && spawnReason != EntitySpawnReason.CONVERSION && spawnReason != EntitySpawnReason.LOAD && spawnReason != EntitySpawnReason.DIMENSION_TRAVEL) { // Canvas - vanilla-like experience (old leader zombie health)
                  this.setHealth(this.getMaxHealth());
              }
  
