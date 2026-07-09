@@ -1631,10 +1631,10 @@ index 0000000000000000000000000000000000000000..ffe40224484e97fdcf53e9b6c073ac7f
 +}
 diff --git a/io/canvasmc/canvas/threadedregions/WorldShutdownThread.java b/io/canvasmc/canvas/threadedregions/WorldShutdownThread.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..61c39e78732c340f25fcc74c339512fbf6ef1938
+index 0000000000000000000000000000000000000000..ef4dc83432cca48149d5109c01e04843957b477f
 --- /dev/null
 +++ b/io/canvasmc/canvas/threadedregions/WorldShutdownThread.java
-@@ -0,0 +1,195 @@
+@@ -0,0 +1,199 @@
 +package io.canvasmc.canvas.threadedregions;
 +
 +import com.google.common.base.Preconditions;
@@ -1670,16 +1670,20 @@ index 0000000000000000000000000000000000000000..61c39e78732c340f25fcc74c339512fb
 +
 +        super(worldName + " shutdown thread");
 +        this.setUncaughtExceptionHandler((_, thrown) -> {
-+            LOGGER.error("Error shutting down world {}", worldName, thrown);
-+            MinecraftServer.getServer().stopServer();
++
++            // we have to schedule to the global tick for this, since this
++            // is a WORLD shutdown thread, not the server shutdown thread,
++            // and as such it will cause shutdown of the server to occur
++            // on this thread if not scheduled, so we schedule to the global
++            // tick to ensure shutdown is executed on the proper thread
++
++            LOGGER.error("Error shutting down world {}, alerting global tick to shutdown", worldName, thrown);
++            RegionizedServer.getInstance().addTask(MinecraftServer.getServer()::stopServer);
 +        });
 +
 +        this.debugName = worldName;
 +        this.level = level;
 +        this.theWaiter = theWaiter;
-+
-+        // we set this because frankly, we don't want to log everything
-+        // super.LOGGER = new SilentLogger(); // TODO - we just want errors only
 +    }
 +
 +    private String getWorldName() {
@@ -12289,6 +12293,41 @@ index 9a49c1577def2517db99dcc5d34c7a99f8981075..466c88f9465c427056eafecbb5efecf0
      }
  
      private void runSync(ServerPlayer player, java.util.Collection<String> bukkit, RootCommandNode<CommandSourceStack> root) {
+diff --git a/net/minecraft/commands/arguments/selector/EntitySelector.java b/net/minecraft/commands/arguments/selector/EntitySelector.java
+index 6c05b9276bdc267a36376f6c64592a50e4b2b36e..cfc1b480704bf47917f68abe4da2e59cc5019513 100644
+--- a/net/minecraft/commands/arguments/selector/EntitySelector.java
++++ b/net/minecraft/commands/arguments/selector/EntitySelector.java
+@@ -184,11 +184,25 @@ public class EntitySelector {
+     private void addEntities(final List<Entity> result, final ServerLevel level, final @Nullable AABB absoluteAABB, final Predicate<Entity> predicate) {
+         int limit = this.getResultLimit();
+         if (result.size() < limit) {
+-            if (absoluteAABB != null) {
+-                level.getEntities(this.type, absoluteAABB, predicate, result, limit);
+-            } else {
+-                level.getEntities(this.type, predicate, result, limit);
+-            }
++            // Canvas start - region threading
++
++            // people can use the params in the entity selector to create a bounding
++            // box large enough that it exceeds the region boundaries, so we modify
++            // the collecting of entities here to avoid the thread check, and we just
++            // check the entity is actually contained in the AABB
++
++            level.getEntities(this.type, (entity) -> {
++                // check AABB first, then check predicate
++                if (absoluteAABB != null && !entity.getBoundingBox().intersects(absoluteAABB)) {
++                    return false;
++                }
++
++                // if the AABB isn't null and intersects, the entity is contained within the box
++                // and should be ok for collection if the predicate passes
++
++                return predicate.test(entity);
++            }, result, limit);
++            // Canvas end - region threading
+         }
+     }
+ 
 diff --git a/net/minecraft/core/dispenser/DispenseItemBehavior.java b/net/minecraft/core/dispenser/DispenseItemBehavior.java
 index 162d7890f204315b0476467e757de5c9dd84aeca..930948aeeac68a6f844b8490f9ca9ad171135bf3 100644
 --- a/net/minecraft/core/dispenser/DispenseItemBehavior.java
@@ -23776,7 +23815,7 @@ index bb5f66c62c9541bb76a9faad9e9ee91c1466fc6a..66d7bb9418832638c220a08d06c01ef0
              return blockToFallLocation(blockState);
          } else {
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index 14978c122253dddf6ebd39694a38a8599ce9fcba..1c21b1f7c331426c07264f68580e9406c457dd82 100644
+index 14978c122253dddf6ebd39694a38a8599ce9fcba..97ba8df73d04f08b62fe899a0a899d92dd72aecf 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
 @@ -170,7 +170,7 @@ public abstract class Entity
@@ -23815,8 +23854,8 @@ index 14978c122253dddf6ebd39694a38a8599ce9fcba..1c21b1f7c331426c07264f68580e9406
          return this.dimensions.makeBoundingBox(x, y, z);
      }
      // Paper end
-+    public io.canvasmc.canvas.util.@Nullable ServerLocation canvas$lastTeleportOrigin = null; // Canvas - region threading
-+    public @Nullable ServerLevel canvas$teleportingToDimension = null; // Canvas - region threading
++    public volatile io.canvasmc.canvas.util.@Nullable ServerLocation canvas$lastTeleportOrigin = null; // Canvas - region threading
++    public volatile @Nullable ServerLevel canvas$teleportingToDimension = null; // Canvas - region threading
      // Paper start - rewrite chunk system
      private final boolean isHardColliding = this.moonrise$isHardCollidingUncached();
      private net.minecraft.server.level.FullChunkStatus chunkStatus;
@@ -24034,7 +24073,7 @@ index 14978c122253dddf6ebd39694a38a8599ce9fcba..1c21b1f7c331426c07264f68580e9406
      }
  
      public int getDimensionChangingDelay() {
-@@ -4042,7 +4101,1009 @@ public abstract class Entity
+@@ -4042,7 +4101,1032 @@ public abstract class Entity
          this.portalProcess = oldEntity.portalProcess;
      }
  
@@ -24603,14 +24642,37 @@ index 14978c122253dddf6ebd39694a38a8599ce9fcba..1c21b1f7c331426c07264f68580e9406
 +        final Vec3 finalPos = pos;
 +        final Float finalYaw = yaw;
 +        final Float finalPitch = pitch;
++
 +        passengerTree.root.placeInAsync(originWorld, destination, teleportFlags, passengerTree, (entity) -> {
++            // reset the teleporting fields, we finished the teleport
 +            this.canvas$teleportingToDimension = null;
 +            this.canvas$lastTeleportOrigin = null;
-+            if (entity instanceof ServerPlayer serverPlayer && displayedScreen.isTrue()) serverPlayer.refresh(false);
-+            if (teleportComplete != null) teleportComplete.accept(entity);
++
++            // we need to check if the entity displayed the loading screen
++            if (entity instanceof ServerPlayer serverPlayer && displayedScreen.isTrue()) {
++                serverPlayer.refresh(false);
++            }
++
++            // now we need to run teleport completion for the teleport call
++            if (teleportComplete != null) {
++                teleportComplete.accept(entity);
++            }
++
++            // we run post event afterward because the event can call another
++            // teleport, which could cause the teleport complete to fail
 +            if (callEvents && io.canvasmc.canvas.event.EntityPostTeleportAsyncEvent.getHandlerList().getRegisteredListeners().length > 0) {
-+                org.bukkit.Location bukkitFrom = new org.bukkit.Location(originWorld.getWorld(), currPos.x, currPos.y, currPos.z, this.getYRot(), this.getXRot());
-+                org.bukkit.Location bukkitTo = new org.bukkit.Location(finalLevelDest.getWorld(), finalPos.x, finalPos.y, finalPos.z, finalYaw == null ? 0 : finalYaw, finalPitch == null ? 0 : finalPitch);
++                final org.bukkit.Location bukkitFrom = new org.bukkit.Location(
++                    originWorld.getWorld(),
++                    currPos.x, currPos.y, currPos.z,
++                    this.getYRot(),
++                    this.getXRot()
++                );
++                final org.bukkit.Location bukkitTo = new org.bukkit.Location(
++                    finalLevelDest.getWorld(),
++                    finalPos.x, finalPos.y, finalPos.z,
++                    finalYaw == null ? 0 : finalYaw,
++                    finalPitch == null ? 0 : finalPitch
++                );
 +                new io.canvasmc.canvas.event.EntityPostTeleportAsyncEvent(
 +                    this.getBukkitEntity(), bukkitFrom, bukkitTo, cause, teleportType
 +                ).callEvent();
@@ -25044,7 +25106,7 @@ index 14978c122253dddf6ebd39694a38a8599ce9fcba..1c21b1f7c331426c07264f68580e9406
          // Paper start - Fix item duplication and teleport issues
          if ((!this.isAlive() || !this.valid) && (transition.newLevel() != this.level)) {
              LOGGER.warn("Illegal Entity Teleport {} to {}:{}", this, transition.newLevel(), transition.position(), new Throwable());
-@@ -4237,6 +5298,12 @@ public abstract class Entity
+@@ -4237,6 +5321,12 @@ public abstract class Entity
          }
      }
  
@@ -25057,7 +25119,7 @@ index 14978c122253dddf6ebd39694a38a8599ce9fcba..1c21b1f7c331426c07264f68580e9406
      protected void removeAfterChangingDimensions() {
          this.setRemoved(Entity.RemovalReason.CHANGED_DIMENSION, null); // CraftBukkit - add Bukkit remove cause
          if (this instanceof Leashable leashable && leashable.isLeashed()) { // Paper - only call if it is leashed
-@@ -4570,6 +5637,12 @@ public abstract class Entity
+@@ -4570,6 +5660,12 @@ public abstract class Entity
      }
  
      public void startSeenByPlayer(final ServerPlayer player) {
@@ -25070,7 +25132,7 @@ index 14978c122253dddf6ebd39694a38a8599ce9fcba..1c21b1f7c331426c07264f68580e9406
      }
  
      public void stopSeenByPlayer(final ServerPlayer player) {
-@@ -4579,6 +5652,12 @@ public abstract class Entity
+@@ -4579,6 +5675,12 @@ public abstract class Entity
              new io.papermc.paper.event.player.PlayerUntrackEntityEvent(player.getBukkitEntity(), this.getBukkitEntity()).callEvent();
          }
          // Paper end - entity tracking events
@@ -25083,7 +25145,7 @@ index 14978c122253dddf6ebd39694a38a8599ce9fcba..1c21b1f7c331426c07264f68580e9406
      }
  
      public float rotate(final Rotation rotation) {
-@@ -4986,7 +6065,10 @@ public abstract class Entity
+@@ -4986,7 +6088,10 @@ public abstract class Entity
              return;
          }
          // Paper end - Block invalid positions and bounding box
@@ -25095,7 +25157,7 @@ index 14978c122253dddf6ebd39694a38a8599ce9fcba..1c21b1f7c331426c07264f68580e9406
              this.position = new Vec3(x, y, z);
              int fx = Mth.floor(x);
              int fy = Mth.floor(y);
-@@ -5017,7 +6099,7 @@ public abstract class Entity
+@@ -5017,7 +6122,7 @@ public abstract class Entity
          }
          // Paper start - Block invalid positions and bounding box; don't allow desync of pos and AABB
          // hanging has its own special logic
@@ -25104,7 +25166,7 @@ index 14978c122253dddf6ebd39694a38a8599ce9fcba..1c21b1f7c331426c07264f68580e9406
              this.setBoundingBox(this.makeBoundingBox());
          }
          // Paper end - Block invalid positions and bounding box
-@@ -5092,6 +6174,7 @@ public abstract class Entity
+@@ -5092,6 +6197,7 @@ public abstract class Entity
              Util.logAndPauseIfInIde("Invalid entity rotation: " + yRot + ", discarding.");
          } else {
              this.yRot = yRot;
@@ -25112,7 +25174,7 @@ index 14978c122253dddf6ebd39694a38a8599ce9fcba..1c21b1f7c331426c07264f68580e9406
          }
      }
  
-@@ -5104,6 +6187,7 @@ public abstract class Entity
+@@ -5104,6 +6210,7 @@ public abstract class Entity
              Util.logAndPauseIfInIde("Invalid entity rotation: " + xRot + ", discarding.");
          } else {
              this.xRot = Math.clamp(xRot % 360.0F, -90.0F, 90.0F);
@@ -25120,7 +25182,7 @@ index 14978c122253dddf6ebd39694a38a8599ce9fcba..1c21b1f7c331426c07264f68580e9406
          }
      }
  
-@@ -5123,6 +6207,12 @@ public abstract class Entity
+@@ -5123,6 +6230,12 @@ public abstract class Entity
          return this.removalReason != null;
      }
  
@@ -25133,7 +25195,7 @@ index 14978c122253dddf6ebd39694a38a8599ce9fcba..1c21b1f7c331426c07264f68580e9406
      public Entity.@Nullable RemovalReason getRemovalReason() {
          return this.removalReason;
      }
-@@ -5137,6 +6227,7 @@ public abstract class Entity
+@@ -5137,6 +6250,7 @@ public abstract class Entity
          // Paper end - rewrite chunk system
          org.bukkit.craftbukkit.event.CraftEventFactory.callEntityRemoveEvent(this, cause); // CraftBukkit
          final boolean alreadyRemoved = this.removalReason != null; // Paper - Folia schedulers
@@ -25141,7 +25203,7 @@ index 14978c122253dddf6ebd39694a38a8599ce9fcba..1c21b1f7c331426c07264f68580e9406
          if (this.removalReason == null) {
              this.removalReason = reason;
          }
-@@ -5160,6 +6251,10 @@ public abstract class Entity
+@@ -5160,6 +6274,10 @@ public abstract class Entity
          this.removalReason = null;
      }
  
@@ -25152,7 +25214,7 @@ index 14978c122253dddf6ebd39694a38a8599ce9fcba..1c21b1f7c331426c07264f68580e9406
      // Paper start - Folia schedulers
      /**
       * Invoked only when the entity is truly removed from the server, never to be added to any world.
-@@ -5171,7 +6266,7 @@ public abstract class Entity
+@@ -5171,7 +6289,7 @@ public abstract class Entity
      // Paper end - Folia schedulers
      // Paper start - optimise Folia entity scheduler
      public final void registerScheduler() {
@@ -30687,10 +30749,10 @@ index 2bdbb8451974f0b8d6e94d390ac735f4ccffd954..6b4f07fa571fc7105af3d351aff99e3e
  
      @Retention(RetentionPolicy.CLASS)
 diff --git a/net/minecraft/world/scores/Scoreboard.java b/net/minecraft/world/scores/Scoreboard.java
-index 4a15851bda30c918c58c96d2cb98b74f30db396c..86f2162041543226ae42908806559b5b45635653 100644
+index 4a15851bda30c918c58c96d2cb98b74f30db396c..30fd9a85094e36455f5afb7756f10db6eca90779 100644
 --- a/net/minecraft/world/scores/Scoreboard.java
 +++ b/net/minecraft/world/scores/Scoreboard.java
-@@ -30,17 +30,47 @@ import org.slf4j.Logger;
+@@ -30,17 +30,54 @@ import org.slf4j.Logger;
  public class Scoreboard {
      public static final String HIDDEN_SCORE_PREFIX = "#";
      private static final Logger LOGGER = LogUtils.getLogger();
@@ -30733,6 +30795,13 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..86f2162041543226ae42908806559b5b
 +            throw new IllegalStateException(reason);
 +        }
 +    }
++
++    private static void tryThreadCheckScoreHolder(final ScoreHolder scoreHolder, final String reason) {
++        // global tick can own players on disconnect, this must pass
++        if (scoreHolder instanceof Entity entity && (!(entity instanceof net.minecraft.server.level.ServerPlayer) || !io.papermc.paper.threadedregions.RegionizedServer.isGlobalTickThread())) {
++            ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(entity, reason);
++        }
++    }
 +    // Canvas end - region threading
  
      public @Nullable Objective getObjective(final @Nullable String name) {
@@ -30744,7 +30813,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..86f2162041543226ae42908806559b5b
      public Objective addObjective(
          final String name,
          final ObjectiveCriteria criteria,
-@@ -53,19 +83,30 @@ public class Scoreboard {
+@@ -53,19 +90,28 @@ public class Scoreboard {
              throw new IllegalArgumentException("An objective with the name '" + name + "' already exists!");
          }
  
@@ -30760,9 +30829,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..86f2162041543226ae42908806559b5b
      public final void forAllObjectives(final ObjectiveCriteria criteria, final ScoreHolder name, final Consumer<ScoreAccess> operation) {
 -        this.objectivesByCriteria.getOrDefault(criteria, Collections.emptyList()).forEach(o -> operation.accept(this.getOrCreatePlayerScore(name, o, true)));
 +        // Canvas start - region threading
-+        if (name instanceof Entity entity) {
-+            ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(entity, "Cannot iterate over objectives for entity async");
-+        }
++        tryThreadCheckScoreHolder(name, "Cannot iterate over objectives for entity async");
 +        // this basically is just for each objective that has a certain criteria instance
 +        for (final Objective objective : this.objectivesByName.values()) {
 +            if (objective.getCriteria() == criteria) {
@@ -30778,15 +30845,11 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..86f2162041543226ae42908806559b5b
      }
  
      public ScoreAccess getOrCreatePlayerScore(final ScoreHolder holder, final Objective objective) {
-@@ -73,18 +114,36 @@ public class Scoreboard {
+@@ -73,18 +119,32 @@ public class Scoreboard {
      }
  
      public ScoreAccess getOrCreatePlayerScore(final ScoreHolder scoreHolder, final Objective objective, final boolean forceWritable) {
-+        // Canvas start - region threading
-+        if (scoreHolder instanceof Entity entity) {
-+            ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(entity, "Cannot get or create score for entity async");
-+        }
-+        // Canvas end - region threading
++        tryThreadCheckScoreHolder(scoreHolder, "Cannot get or create score for entity async"); // Canvas - region threading
          final boolean canModify = forceWritable || !objective.getCriteria().isReadOnly();
          PlayerScores playerScore = this.getOrCreatePlayerInfo(scoreHolder.getScoreboardName());
          final MutableBoolean requiresSync = new MutableBoolean();
@@ -30794,13 +30857,13 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..86f2162041543226ae42908806559b5b
          return new ScoreAccess() {
 +            // Canvas start - region threading
 +
-+            @Override
+             @Override
+-            public int get() {
 +            public synchronized int add(final int count) {
 +                return ScoreAccess.super.add(count);
 +            }
 +
-             @Override
--            public int get() {
++            @Override
 +            public synchronized int increment() {
 +                return ScoreAccess.super.increment();
 +            }
@@ -30817,7 +30880,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..86f2162041543226ae42908806559b5b
                  if (!canModify) {
                      throw new IllegalStateException("Cannot modify read-only score");
                  }
-@@ -109,12 +168,12 @@ public class Scoreboard {
+@@ -109,12 +169,12 @@ public class Scoreboard {
              }
  
              @Override
@@ -30832,7 +30895,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..86f2162041543226ae42908806559b5b
                  if (requiresSync.isTrue() || !Objects.equals(display, score.display())) {
                      score.display(display);
                      this.sendScoreToPlayers();
-@@ -122,13 +181,13 @@ public class Scoreboard {
+@@ -122,13 +182,13 @@ public class Scoreboard {
              }
  
              @Override
@@ -30848,7 +30911,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..86f2162041543226ae42908806559b5b
                  return score.isLocked();
              }
  
-@@ -142,7 +201,7 @@ public class Scoreboard {
+@@ -142,7 +202,7 @@ public class Scoreboard {
                  this.setLocked(true);
              }
  
@@ -30857,7 +30920,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..86f2162041543226ae42908806559b5b
                  score.setLocked(locked);
                  if (requiresSync.isTrue()) {
                      this.sendScoreToPlayers();
-@@ -158,14 +217,19 @@ public class Scoreboard {
+@@ -158,14 +218,19 @@ public class Scoreboard {
          };
      }
  
@@ -30880,7 +30943,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..86f2162041543226ae42908806559b5b
              Score score = scores.get(objective);
              if (score != null) {
                  result.add(new PlayerScoreEntry(player, score.value(), score.display(), score.numberFormat()));
-@@ -183,22 +247,32 @@ public class Scoreboard {
+@@ -183,22 +248,28 @@ public class Scoreboard {
      }
  
      public Collection<ScoreHolder> getTrackedPlayers() {
@@ -30891,9 +30954,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..86f2162041543226ae42908806559b5b
      public void resetAllPlayerScores(final ScoreHolder player) {
 -        PlayerScores removed = this.playerScores.remove(player.getScoreboardName());
 +        // Canvas start - region threading
-+        if (player instanceof Entity entity) {
-+            ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(entity, "Cannot reset all scores for score holder async");
-+        }
++        tryThreadCheckScoreHolder(player, "Cannot reset all scores for score holder async");
 +        PlayerScores removed = this.scoresByName.remove(player.getScoreboardName());
 +        // Canvas end - region threading
          if (removed != null) {
@@ -30904,9 +30965,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..86f2162041543226ae42908806559b5b
      public void resetSinglePlayerScore(final ScoreHolder player, final Objective objective) {
 -        PlayerScores scores = this.playerScores.get(player.getScoreboardName());
 +        // Canvas start - region threading
-+        if (player instanceof Entity entity) {
-+            ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(entity, "Cannot reset single score for score holder async");
-+        }
++        tryThreadCheckScoreHolder(player, "Cannot reset single score for score holder async");
 +        PlayerScores scores = this.scoresByName.get(player.getScoreboardName());
 +        // Canvas end - region threading
          if (scores != null) {
@@ -30917,15 +30976,13 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..86f2162041543226ae42908806559b5b
                  if (removedPlayer != null) {
                      this.onPlayerRemoved(player);
                  }
-@@ -209,83 +283,141 @@ public class Scoreboard {
+@@ -209,83 +280,139 @@ public class Scoreboard {
      }
  
      public Object2IntMap<Objective> listPlayerScores(final ScoreHolder player) {
 -        PlayerScores scores = this.playerScores.get(player.getScoreboardName());
 +        // Canvas start - region threading
-+        if (player instanceof Entity entity) {
-+            ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(entity, "Cannot reset single score for score holder async");
-+        }
++        tryThreadCheckScoreHolder(player, "Cannot reset single score for score holder async");
 +        PlayerScores scores = this.scoresByName.get(player.getScoreboardName());
 +        // Canvas end - region threading
          return scores != null ? scores.listScores() : Object2IntMaps.emptyMap();
@@ -31095,7 +31152,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..86f2162041543226ae42908806559b5b
      }
  
      public void removePlayerFromTeam(final String player, final PlayerTeam team) {
-@@ -293,20 +425,32 @@ public class Scoreboard {
+@@ -293,20 +420,32 @@ public class Scoreboard {
              throw new IllegalStateException("Player is either on another team or not on any team. Cannot remove from team '" + team.getName() + "'.");
          }
  
@@ -31133,7 +31190,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..86f2162041543226ae42908806559b5b
      }
  
      public void onObjectiveAdded(final Objective objective) {
-@@ -339,15 +483,16 @@ public class Scoreboard {
+@@ -339,15 +478,16 @@ public class Scoreboard {
      public void onTeamRemoved(final PlayerTeam team) {
      }
  
@@ -31155,7 +31212,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..86f2162041543226ae42908806559b5b
              .entrySet()
              .stream()
              .flatMap(
-@@ -363,7 +508,9 @@ public class Scoreboard {
+@@ -363,7 +503,9 @@ public class Scoreboard {
              .toList();
      }
  
@@ -31165,7 +31222,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..86f2162041543226ae42908806559b5b
          Objective objective = this.getObjective(score.objective);
          if (objective == null) {
              LOGGER.error("Unknown objective {} for name {}, ignoring", score.objective, score.owner);
-@@ -373,10 +520,13 @@ public class Scoreboard {
+@@ -373,10 +515,13 @@ public class Scoreboard {
      }
  
      protected List<PlayerTeam.Packed> packPlayerTeams() {
@@ -31179,7 +31236,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..86f2162041543226ae42908806559b5b
          PlayerTeam team = this.addPlayerTeam(packed.name());
          packed.displayName().ifPresent(team::setDisplayName);
          team.setColor(packed.color());
-@@ -394,10 +544,13 @@ public class Scoreboard {
+@@ -394,10 +539,13 @@ public class Scoreboard {
      }
  
      protected List<Objective.Packed> packObjectives() {
@@ -31193,7 +31250,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..86f2162041543226ae42908806559b5b
          this.addObjective(
              objective.name(),
              objective.criteria(),
-@@ -409,6 +562,7 @@ public class Scoreboard {
+@@ -409,6 +557,7 @@ public class Scoreboard {
      }
  
      protected Map<DisplaySlot, String> packDisplaySlots() {
