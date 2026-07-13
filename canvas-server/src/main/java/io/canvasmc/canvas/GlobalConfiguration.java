@@ -1,12 +1,18 @@
 package io.canvasmc.canvas;
 
 import ca.spottedleaf.moonrise.common.util.SimpleThreadUnsafeRandom;
+import io.canvasmc.canvas.commands.CanvasCommands;
 import io.canvasmc.canvas.configuration.ConfigurationProvider;
 import io.canvasmc.canvas.configuration.Part;
 import io.canvasmc.canvas.configuration.Resolver;
 import io.canvasmc.canvas.configuration.Style;
 import io.canvasmc.canvas.configuration.Validator;
 import io.canvasmc.canvas.simd.SIMDDetection;
+import io.canvasmc.canvas.subcommands.RegionBarSubCommand;
+import io.canvasmc.canvas.subcommands.RegionTickSubCommand;
+import io.canvasmc.canvas.subcommands.ReloadSubCommand;
+import io.canvasmc.canvas.subcommands.SetMaxPlayersSubCommand;
+import io.canvasmc.canvas.subcommands.WorldDistanceSubCommand;
 import io.canvasmc.canvas.threadedregions.scheduler.AffinitySchedulerThreadPool;
 import io.canvasmc.canvas.util.FasterRandomSource;
 import io.canvasmc.canvas.util.LockedReference;
@@ -232,6 +238,18 @@ public class GlobalConfiguration extends Part {
                     broadcast("Log cleaner removed " + amountRemoved.intValue() + " old log files", INFO);
                 }
             }
+
+            // register our commands to the Canvas command tree
+            CanvasCommands.register(
+                SetMaxPlayersSubCommand.class,
+                RegionBarSubCommand.class,
+                WorldDistanceSubCommand.class,
+                ReloadSubCommand.class,
+                RegionTickSubCommand.class // TODO - merge this into regiondata command
+                // RegionDataCommand.class // TODO - regiondata command
+            );
+
+            broadcast("Registered all Canvas commands", INFO);
         }
 
         // we do not want to allow larger unit values, nobody should autosave in units larger than
@@ -537,7 +555,7 @@ public class GlobalConfiguration extends Part {
                     Style.wrap(
                         "Restores old zombie reinforcement behavior: spawned reinforcements are always plain",
                         "ZOMBIE instead of the caller's type (Husk / Zombie Villager etc). Ported from",
-                        "LuminolMC/Lophine 0013. Default false; independent of vanilla-like-experience.enabled."
+                        "LophineCraft/Lophine 0013. Default false; independent of vanilla-like-experience.enabled."
                     )
                 );
             option("oldLeaderZombieHealth")
@@ -545,7 +563,7 @@ public class GlobalConfiguration extends Part {
                     Style.wrap(
                         "Restores old leader zombie health logic: leader zombies do not get instantly healed",
                         "to their bonus max health (skips setHealth(getMaxHealth())). Ported from",
-                        "LuminolMC/Lophine 0014. Default false; independent of vanilla-like-experience.enabled."
+                        "LophineCraft/Lophine 0014. Default false; independent of vanilla-like-experience.enabled."
                     )
                 );
         }
@@ -572,18 +590,12 @@ public class GlobalConfiguration extends Part {
                     "If alternative playerlist tick is enabled, this is the interval in ticks for how often",
                     "each bucket will be ticked"
                 ).greaterThan(0.0F);
-            option("asyncProtocolSwitch")
-                .docs(
-                    "This makes protocol switching asynchronous during login, which reduces global region blocking",
-                    "and can improve login and configuration phase performance during player join"
-                );
         }
 
         public boolean filterVelocityPacket = false;
         public boolean filterMovePackets = false;
         public boolean alternativePlayerListTick = false;
         public int playerInfoSendInterval = 600;
-        public boolean asyncProtocolSwitch = false;
         public boolean purpurAlternativeKeepalive = false;
     }
 
