@@ -1,0 +1,45 @@
+Lophine source and license notice
+=================================
+
+Canonical repository: https://github.com/LophineCraft/Lophine
+Revision used by this fork: f4aea025c11c598f285d3c47198c62397a0daba8
+Upstream license file:
+https://github.com/LophineCraft/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/LICENSE.md
+
+Lophine inherits its licensing from the included upstream projects.
+
+As such, Lophine is licensed under the GNU General Public License version 3;
+it inherits that license from Luminol, which in turn inherits it from Folia,
+Paper, Spigot, Bukkit, and CraftBukkit.
+
+Any author who is not listed below is presumed by the Lophine license notice to
+have released their work under GPL-3.0.
+
+The following author chose to release their code under the MIT License:
+
+Helvetica Volubi <suisuroru@blue-millennium.fun>
+
+The complete GPL-3.0 terms are available in the root LICENSE file of this
+distribution. The MIT license terms applicable to the author above are:
+
+MIT License
+
+Copyright (c) the applicable author
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

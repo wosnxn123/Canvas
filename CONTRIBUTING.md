@@ -24,6 +24,36 @@ Make sure your description includes the following:
 - [If fixing something] Describe what the issue is you are trying to fix
 - [If fixing something] Describe why your PR fixes this
 
+## Source provenance and licensing
+
+Read [`PROVENANCE.md`](PROVENANCE.md) before submitting code or patches. Source
+provenance is a merge requirement.
+
+If you consulted, copied, translated, backported, or manually reapplied a
+concrete implementation from another project, classify the change as derived
+or ported and provide all of the following:
+
+- Canonical project and repository URL
+- Full immutable source commit SHA
+- Exact source file or patch path
+- Original author or authors
+- Applicable license
+- Porting author and a description of every material adaptation
+
+Do not use vague descriptions such as "inspired by" when a concrete
+implementation was reviewed. Do not replace upstream source comments with
+`// Canvas` markers. Patch regeneration, rebasing, and squashing must retain the
+record above.
+
+For an independently developed fix that resembles another project, include
+dated evidence of independent development, such as the original issue,
+sanitized crash report, design notes, and tests. If the source or license is
+uncertain, stop and raise the question in the PR; do not submit the work as
+original.
+
+PRs with incomplete or ambiguous provenance will not be merged. Use the
+repository PR template as the required checklist.
+
 Make sure all patches are neat and tidy, no unnecessary diff is there, and make
 sure to try and follow the code-style of the surrounding source. That way the
 code we are patching/adding is a lot more clean rather than a random sharp

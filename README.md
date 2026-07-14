@@ -4,6 +4,16 @@
 1. 上游 Canvas **硬编码禁用命令方块**；
 2. Paper/Folia **修改了大量原版机制**（刷线机、TNT 复制、永久破坏等）。
 
+### 来源与许可证政策
+
+本 fork 将补丁来源、原作者和许可证视为合并与发布的硬性条件，而不是发生争议后再补写的说明。完整规则、固定 commit 链接和当前自定义补丁来源台账见 [`PROVENANCE.md`](PROVENANCE.md)。
+
+- 手工移植、重生成或 rebase 补丁时，不得删除或改写原作者、来源项目及许可证信息；
+- 参考过其他项目的具体实现时，默认按“派生/移植”记录，不能只写“受启发”；
+- 仅有 `META-INF/licenses` 中的许可证文件不足以替代逐补丁来源记录；
+- 来源不明或许可证未核实的改动不得合并或发布；
+- 收到来源或许可证质疑时，先核查并公布受影响文件、证据和修复，不以主观意图、代码量、沟通渠道或快速修复作为免责理由。
+
 ### 1. 重新启用命令方块（可通过配置开关）
 
 上游 Canvas 在多处代码中硬编码禁用了命令方块。本 fork 在 feature patch 0003 中将 5 处禁用点改为受配置控制：
@@ -48,7 +58,7 @@
 |------|------|------|
 | `0001-Purpur-Alternative-Keepalive` | Canvas 上游 | — |
 | `0002-Disable-Criterion-Trigger-Config` | Canvas 上游 | — |
-| `0003-Vanilla-like-experience` | **本 fork**（移植 + 原创） | 22 个 hunk：17 vanilla 机制移植自 [LophineCraft/Lophine](https://github.com/LophineCraft/Lophine) 的 `0048-Add-Vanilla-like-experience-Config.patch`（作者 Bacteriawa）；5 命令方块 gate 为本 fork 原创（用 Canvas ACE `AbstractCommandExecution.executeOnGlobal` 路由到 global region 线程） |
+| `0003-Vanilla-like-experience` | **本 fork**（移植 + 原创） | 17 项 vanilla 机制移植自 [Lophine 0048 固定版本](https://github.com/LophineCraft/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0048-Add-Vanilla-like-experience-Config.patch)（作者 Bacteriawa，GPL-3.0）；2 项旧版僵尸机制移植自 [Lophine 0013](https://github.com/LophineCraft/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0013-Old-zombie-reinforcement.patch) / [0014](https://github.com/LophineCraft/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0014-Old-leader-zombie-health-logic.patch)（作者 Helvetica Volubi，MIT）；5 个命令方块 gate 为本 fork 原创。完整适配说明见 [`PROVENANCE.md`](PROVENANCE.md)。 |
 
 2026-07-14 已与 `LophineCraft/Lophine` `dev/26.2@f4aea025` 复核：0048 仍覆盖相同的 17 个原版机制；0013 和已更名的 `0014-Old-leader-zombie-health-logic.patch` 与本 fork 的两个 OldFeature 选项语义一致。
 
@@ -201,6 +211,13 @@ team unless stated otherwise within the patch itself.
 Canvas incorporates patches inspired by or derived from other Minecraft projects (e.g. **Lithium**, **Leaf**,
 **Luminol**, etc) alongside our own patch sets. Canvas includes a full set of licenses from these sources available in
 the `/canvas-server/src/main/resources/META-INF/licenses/` directory of our repository.
+
+This fork does not claim authorship over inherited or derived work merely
+because a patch was manually reapplied, regenerated, or adapted. Its mandatory
+per-patch source ledger and review requirements are documented in
+[`PROVENANCE.md`](PROVENANCE.md). The ledger includes immutable source commits,
+original authors, licenses, and local adaptation notes for this fork's custom
+patches.
 
 Canvas is also dedicated to trying to showcase our contributors in our software. From a "Contributor" role on our
 Discord to being mentioned by name inside our own software in our version command, we at CanvasMC are always trying to
