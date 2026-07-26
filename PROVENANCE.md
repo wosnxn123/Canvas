@@ -87,6 +87,37 @@ The patch contains three separately attributed groups:
 | Old zombie reinforcement | Derived/ported | [Lophine 0013 at `f4aea025`](https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0013-Old-zombie-reinforcement.patch) | Helvetica Volubi `<suisuroru@blue-millennium.fun>` | MIT, as explicitly listed in the [Lophine license](https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/LICENSE.md) | Added an independent Canvas YAML option under `old-feature`. |
 | Old leader zombie health | Derived/ported | [Lophine 0014 at `f4aea025`](https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0014-Old-leader-zombie-health-logic.patch) | Helvetica Volubi `<suisuroru@blue-millennium.fun>` | MIT, as explicitly listed in the [Lophine license](https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/LICENSE.md) | Added an independent Canvas YAML option under `old-feature`. |
 | Five command-block gates and global-region execution route | Original to this fork | No external implementation used | wosnxn123 | GPL-3.0 | Uses Canvas `AbstractCommandExecution.executeOnGlobal` to restore command blocks without bypassing Folia ownership rules. |
+| Spawn invulnerable time | Derived/ported | [Lophine `Spawn-invulnerable-time` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0096-Spawn-invulnerable-time.patch) | Helvetica Volubi `<suisuroru@blue-millennium.fun>` | MIT, as explicitly listed in the [Lophine license](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/LICENSE.md) | Replaced the Lophine TOML config read with Canvas `GlobalConfiguration.oldFeature.spawnInvulnerableTime`; hunk contexts unchanged. |
+| Old explosion damage calculator | Derived/ported | [LeavesMC/Leaves `0134-Old-wet-tnt-explode-behavior.patch` at `3e96b237`](https://github.com/LeavesMC/Leaves/blob/3e96b237749a960f297f211d439ffc9ea7fd2381/leaves-server/minecraft-patches/features/0134-Old-wet-tnt-explode-behavior.patch), reached via [Lophine `Leaves-Old-Explosion-Damage-Calculator` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0104-Leaves-Old-Explosion-Damage-Calculator.patch) | MC_XiaoHei `<xor7xiaohei@gmail.com>`, relayed by Helvetica Volubi `<suisuroru@blue-millennium.fun>` | **GPL-3.0**, as declared in the patch body — the Lophine MIT opt-in does **not** apply to this patch | Replaced the Lophine TOML config read with Canvas `GlobalConfiguration.oldFeature.oldExplosionDamageCalculator`; retained the `// Leaves` source marker. |
+| Old raid behavior | Derived/ported | [LeavesMC/Leaves `0114-Old-raid-behavior.patch` at `bda7e406`](https://github.com/LeavesMC/Leaves/blob/bda7e406b995290234e33283a181e33467ceda38/leaves-server/minecraft-patches/features/0114-Old-raid-behavior.patch), reached via [Lophine `Leaves-Old-raid-behavior` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0098-Leaves-Old-raid-behavior.patch) | huanli233 `<392352840@qq.com>`, relayed by Helvetica Volubi `<suisuroru@blue-millennium.fun>` | **GPL-3.0**, as declared in the patch body — the Lophine MIT opt-in does **not** apply to this patch | Replaced four TOML config reads with `GlobalConfiguration.oldFeature.oldRaidBehavior`; used Canvas's existing `RAVAGER_SPAWN_PLACEMENT_TYPE` constant instead of re-resolving `SpawnPlacements.getPlacementType` inside the added `getRavagerSpawnLocation`; retained all `// Leaves` source markers. |
+| Villager void trade | Derived/ported | [LeavesMC/Leaves `0088-Configurable-trading-with-the-void.patch` at `9d2bd3f7`](https://github.com/LeavesMC/Leaves/blob/9d2bd3f7b0a48f00df7bc8c74292338ed9c3a458/leaves-server/minecraft-patches/features/0088-Configurable-trading-with-the-void.patch), reached via [Lophine `Leaves-Configurable-trading-with-the-void` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0101-Leaves-Configurable-trading-with-the-void.patch) | violetc `<58360096+s-yh-china@users.noreply.github.com>`, relayed by Helvetica Volubi `<suisuroru@blue-millennium.fun>` | **GPL-3.0**, as declared in the patch body — the Lophine MIT opt-in does **not** apply to this patch | Replaced three TOML config reads with `GlobalConfiguration.oldFeature.villagerVoidTrade`; retained the `// Leaves` source markers. See the risk note below. |
+
+### MIT opt-in is personal, not transitive
+
+Four of the seven derived groups above name Helvetica Volubi
+`<suisuroru@blue-millennium.fun>` in their `From:` header, and that author is the
+only MIT opt-in listed in the Lophine license. **Three of them are still
+GPL-3.0.** `Leaves-Old-Explosion-Damage-Calculator`,
+`Leaves-Old-raid-behavior`, and `Leaves-Configurable-trading-with-the-void` each
+carry a `Co-authored by:` line naming a different author and an explicit
+`Licensed under: GPL-3.0 (https://www.gnu.org/licenses/gpl-3.0.html)` line in the
+patch body, and each points at a pinned LeavesMC/Leaves commit as its real
+origin. The author of a relaying commit cannot relicense a co-author's work, so
+the declared GPL-3.0 governs and the immutable source recorded above is the
+Leaves commit, not the Lophine one.
+
+Only `Spawn-invulnerable-time` carries no Leaves attribution and no in-body
+license declaration, so the MIT opt-in applies to it.
+
+### `villager-void-trade` risk note
+
+This option is not a bug fix. Enabling it deliberately disables two Paper
+security fixes — the villager boat exploit fix in `PlayerList` and the
+"merchant inventory not closing on entity removal" fix in `ServerLevel` — and
+relaxes `MerchantMenu.stillValid` from a reach check to an identity comparison
+on the trading player. Under Canvas region threading the retained menu can read
+a villager owned by a different region, or one already unloaded. It defaults to
+`false` and must stay opt-in.
 
 The related `VanillaLikeExperience` and `OldFeature` entries in
 `canvas-server/src/main/java/io/canvasmc/canvas/GlobalConfiguration.java` are

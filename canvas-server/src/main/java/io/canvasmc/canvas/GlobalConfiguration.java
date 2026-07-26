@@ -583,10 +583,52 @@ public class GlobalConfiguration extends Part {
                         "LophineCraft/Lophine 0014. Default false; independent of vanilla-like-experience.enabled."
                     )
                 );
+            option("spawnInvulnerableTime")
+                .docs(
+                    Style.wrap(
+                        "Grants a freshly spawned player 60 ticks (3 seconds) of damage immunity. Damage types",
+                        "tagged BYPASSES_INVULNERABILITY (void, /kill, generic kill) still apply. Ported from",
+                        "LophineLabs/Lophine 'Spawn invulnerable time'. Default false."
+                    )
+                );
+            option("oldExplosionDamageCalculator")
+                .docs(
+                    Style.wrap(
+                        "Restores the pre-1.21 wet-TNT behavior: an explosion whose source entity is in water no",
+                        "longer destroys block-like entities (boats, item frames, armour stands). Ported from",
+                        "LophineLabs/Lophine, originally from LeavesMC/Leaves. Default false."
+                    )
+                );
+            option("oldRaidBehavior")
+                .docs(
+                    Style.wrap(
+                        "Restores pre-1.21 raid mechanics: BAD_OMEN triggers a raid directly instead of being",
+                        "converted to RAID_OMEN on village entry, raid wave spawn positions use the old ravager",
+                        "search (3 attempts, no 96-block Y limit), and killing a patrol leader outside a raid",
+                        "grants stacking BAD_OMEN again. Ported from LophineLabs/Lophine, originally from",
+                        "LeavesMC/Leaves. Default false."
+                    )
+                );
+            option("villagerVoidTrade")
+                .docs(
+                    Style.wrap(
+                        "Allows a trade GUI to stay open after the villager is unloaded or removed, restoring",
+                        "'trading with the void'. WARNING: this deliberately disables two Paper security fixes",
+                        "(villager boat exploit, merchant inventory not closing on entity removal) and relaxes",
+                        "MerchantMenu reach validation to an identity check on the trading player. Under region",
+                        "threading the held menu may read a villager owned by another region. Enable only if you",
+                        "want the old exploit back. Ported from LophineLabs/Lophine, originally from",
+                        "LeavesMC/Leaves. Default false."
+                    )
+                );
         }
 
         public boolean oldZombieReinforcement = false;
         public boolean oldLeaderZombieHealth = false;
+        public boolean spawnInvulnerableTime = false;
+        public boolean oldExplosionDamageCalculator = false;
+        public boolean oldRaidBehavior = false;
+        public boolean villagerVoidTrade = false;
     }
 
     public Networking networking = new Networking();

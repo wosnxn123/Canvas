@@ -12,16 +12,64 @@ pistons, vanilla mob spawning, unlimited entity collisions, player
 cramming, vanilla phantom/insomnia, no TNT limit, vanilla
 hopper/bee/item-merge/end-portal teleport). Ported from Lophine 0048.
 
-old-feature.old-zombie-reinforcement / old-leader-zombie-health:
-INDEPENDENT per-feature toggles (NOT tied to vanilla-like-experience),
-matching Lophine's OldFeatureConfig structure (separate config section
-with per-feature static booleans). Ported from Lophine 0013 (zombie
-reinforcement spawns plain ZOMBIE) + 0014 (skip leader zombie setHealth).
-Default false.
+old-feature.*: INDEPENDENT per-feature toggles (NOT tied to
+vanilla-like-experience), matching Lophine's OldFeatureConfig structure
+(separate config section with per-feature static booleans). All default
+false. The section now covers all six Lophine OldFeatureConfig fields:
+
+- old-zombie-reinforcement: reinforcements spawn plain ZOMBIE.
+  Ported from Lophine 0013 (MIT, Helvetica Volubi).
+- old-leader-zombie-health: skip leader zombie setHealth(getMaxHealth()).
+  Ported from Lophine 0014 (MIT, Helvetica Volubi).
+- spawn-invulnerable-time: 60 ticks of spawn immunity, respecting
+  BYPASSES_INVULNERABILITY. Ported from Lophine Spawn-invulnerable-time
+  (MIT, Helvetica Volubi).
+- old-explosion-damage-calculator: wet TNT does not destroy block-like
+  entities. Originates in LeavesMC/Leaves 0134 (GPL-3.0, MC_XiaoHei).
+- old-raid-behavior: BAD_OMEN triggers raids directly, old ravager wave
+  spawn search, patrol-leader BAD_OMEN stacking. Originates in
+  LeavesMC/Leaves 0114 (GPL-3.0, huanli233).
+- villager-void-trade: keeps the trade GUI open across villager removal.
+  Originates in LeavesMC/Leaves 0088 (GPL-3.0, violetc). Re-opens two
+  exploits Paper fixed; opt-in only.
+
+The Lophine MIT opt-in is personal and does not cover the three
+Leaves-derived mechanics, which declare GPL-3.0 in their patch bodies.
+Full source, author and license records are in PROVENANCE.md.
 
 Patch regenerated via git diff on Canvas main applied source (correct
 blob index + context). The OldFeature Part class itself lives in
 GlobalConfiguration.java (canvas-server/src/main/java), not in this patch.
+---
+ ca/spottedleaf/moonrise/paper/PaperHooks.java |  5 ++
+ net/minecraft/server/level/ServerLevel.java   |  4 +-
+ net/minecraft/server/level/ServerPlayer.java  | 11 +++-
+ .../network/ServerGamePacketListenerImpl.java |  4 +-
+ net/minecraft/server/players/PlayerList.java  |  2 +-
+ .../world/effect/BadOmenMobEffect.java        |  5 ++
+ net/minecraft/world/entity/LivingEntity.java  |  2 +-
+ .../world/entity/item/FallingBlockEntity.java |  2 +-
+ .../world/entity/item/ItemEntity.java         |  2 +-
+ .../world/entity/item/PrimedTnt.java          |  2 +-
+ .../world/entity/monster/Phantom.java         |  2 +-
+ .../world/entity/monster/zombie/Zombie.java   |  4 +-
+ net/minecraft/world/entity/raid/Raid.java     | 60 +++++++++++++++++--
+ net/minecraft/world/entity/raid/Raider.java   | 36 +++++++++++
+ .../minecart/MinecartCommandBlock.java        |  2 +-
+ .../world/inventory/MerchantMenu.java         |  1 +
+ .../world/level/BaseCommandBlock.java         |  4 +-
+ net/minecraft/world/level/NaturalSpawner.java |  3 +-
+ .../world/level/ServerExplosion.java          |  3 +-
+ net/minecraft/world/level/block/Block.java    |  2 +-
+ .../world/level/block/CommandBlock.java       |  4 +-
+ .../world/level/block/TripWireHookBlock.java  |  2 +-
+ .../block/entity/BeehiveBlockEntity.java      |  2 +-
+ .../level/block/entity/HopperBlockEntity.java |  2 +-
+ .../level/block/piston/PistonBaseBlock.java   |  6 +-
+ .../block/piston/PistonMovingBlockEntity.java |  2 +-
+ .../world/level/levelgen/PhantomSpawner.java  |  2 +-
+ .../world/level/portal/PortalForcer.java      |  2 +-
+ 28 files changed, 143 insertions(+), 35 deletions(-)
 
 diff --git a/ca/spottedleaf/moonrise/paper/PaperHooks.java b/ca/spottedleaf/moonrise/paper/PaperHooks.java
 index 08e3c75..4a5fefe 100644
@@ -40,10 +88,10 @@ index 08e3c75..4a5fefe 100644
      }
  
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index 33971e0..c8a9e60 100644
+index 59e75e3..c703cfa 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -2948,7 +2948,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -2949,7 +2949,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      }
  
      public boolean isCommandBlockEnabled() {
@@ -52,11 +100,50 @@ index 33971e0..c8a9e60 100644
      }
  
      public boolean isSpawnerBlockEnabled() {
+@@ -3066,7 +3066,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+             // Spigot start
+             if (entity.getBukkitEntity() instanceof org.bukkit.inventory.InventoryHolder && (!(entity instanceof ServerPlayer) || entity.getRemovalReason() != Entity.RemovalReason.KILLED)) { // SPIGOT-6876: closeInventory clears death message
+                 // Paper start - Fix merchant inventory not closing on entity removal
+-                if (entity.getBukkitEntity() instanceof org.bukkit.inventory.Merchant merchant && merchant.getTrader() != null) {
++                if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().oldFeature.villagerVoidTrade && entity.getBukkitEntity() instanceof org.bukkit.inventory.Merchant merchant && merchant.getTrader() != null) { // Leaves - Configurable trading with the void
+                     merchant.getTrader().closeInventory(org.bukkit.event.inventory.InventoryCloseEvent.Reason.UNLOADED);
+                 }
+                 // Paper end - Fix merchant inventory not closing on entity removal
 diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
-index 9478cdf..c8ca303 100644
+index 9478cdf..0a0c6e7 100644
 --- a/net/minecraft/server/level/ServerPlayer.java
 +++ b/net/minecraft/server/level/ServerPlayer.java
-@@ -2416,7 +2416,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -243,6 +243,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+     private int lastSentFood = -99999999;
+     private boolean lastFoodSaturationZero = true;
+     public int lastSentExp = -99999999;
++    protected int spawnInvulnerableTime = 60; // Lophine - spawn invulnerable time
+     private ChatVisiblity chatVisibility = ChatVisiblity.FULL;
+     public ParticleStatus particleStatus = ParticleStatus.ALL;
+     private boolean canChatColor = true;
+@@ -950,6 +951,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+         this.connection.tickClientLoadTimeout();
+         this.gameMode.tick();
+         this.wardenSpawnTracker.tick();
++        if (this.spawnInvulnerableTime > 0) --this.spawnInvulnerableTime; // Lophine - spawn invulnerable time
+         if (this.invulnerableTime > 0) {
+             this.invulnerableTime--;
+         }
+@@ -1530,6 +1532,13 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+             return false;
+         }
+ 
++        // Lophine start - spawn invulnerable time
++        if (io.canvasmc.canvas.GlobalConfiguration.getInstance().oldFeature.spawnInvulnerableTime) {
++            if (this.spawnInvulnerableTime > 0 && !source.is(net.minecraft.tags.DamageTypeTags.BYPASSES_INVULNERABILITY)) {
++                return false;
++            }
++        }
++        // Lophine end - spawn invulnerable time
+         Entity entity = source.getEntity();
+         if (!( // Paper - split the if statement. If below statement is false, hurtServer would not have been evaluated. Return false.
+             !(entity instanceof Player player && !this.canHarmPlayer(player))
+@@ -2416,7 +2425,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
      public boolean isInvulnerableTo(final ServerLevel level, final DamageSource source) {
          // Paper start - disable player cramming
          return (super.isInvulnerableTo(level, source) || this.isChangingDimension() && !source.is(DamageTypes.ENDER_PEARL) || !this.connection.hasClientLoaded())
@@ -66,7 +153,7 @@ index 9478cdf..c8ca303 100644
      }
  
 diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
-index 9616ee2..0871d80 100644
+index b01fd3d..e81d074 100644
 --- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
 +++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
 @@ -974,7 +974,7 @@ public class ServerGamePacketListenerImpl
@@ -87,6 +174,35 @@ index 9616ee2..0871d80 100644
              this.player.sendSystemMessage(Component.literal("Command block minecarts are not enabled with region threading"));
              return;
          }
+diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
+index d6fc6f4..f18f494 100644
+--- a/net/minecraft/server/players/PlayerList.java
++++ b/net/minecraft/server/players/PlayerList.java
+@@ -545,7 +545,7 @@ public abstract class PlayerList {
+                 player.stopRiding();
+                 vehicle.getPassengersAndSelf().forEach(e -> {
+                     // Paper start - Fix villager boat exploit
+-                    if (e instanceof net.minecraft.world.entity.npc.villager.AbstractVillager villager) {
++                    if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().oldFeature.villagerVoidTrade && e instanceof net.minecraft.world.entity.npc.villager.AbstractVillager villager) { // Leaves - Configurable trading with the void
+                         final net.minecraft.world.entity.player.Player human = villager.getTradingPlayer();
+                         if (human != null) {
+                             villager.setTradingPlayer(null);
+diff --git a/net/minecraft/world/effect/BadOmenMobEffect.java b/net/minecraft/world/effect/BadOmenMobEffect.java
+index f58b10c..8fafdab 100644
+--- a/net/minecraft/world/effect/BadOmenMobEffect.java
++++ b/net/minecraft/world/effect/BadOmenMobEffect.java
+@@ -22,6 +22,11 @@ class BadOmenMobEffect extends MobEffect {
+             && !player.isSpectator()
+             && level.getDifficulty() != Difficulty.PEACEFUL
+             && level.isVillage(player.blockPosition())) {
++            // Leaves start - Revert raid changes
++            if (io.canvasmc.canvas.GlobalConfiguration.getInstance().oldFeature.oldRaidBehavior) {
++                return level.getRaids().createOrExtendRaid(player, player.blockPosition()) == null;
++            }
++            // Leaves end - Revert raid changes
+             Raid raid = level.getRaidAt(player.blockPosition());
+             if (raid == null || raid.getRaidOmenLevel() < raid.getMaxRaidOmenLevel()) {
+                 player.addEffect(new MobEffectInstance(MobEffects.RAID_OMEN, 600, amplification));
 diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
 index 124941a..4ae3c5d 100644
 --- a/net/minecraft/world/entity/LivingEntity.java
@@ -174,6 +290,157 @@ index 6bde60f..878b869 100644
                  this.setHealth(this.getMaxHealth());
              }
  
+diff --git a/net/minecraft/world/entity/raid/Raid.java b/net/minecraft/world/entity/raid/Raid.java
+index d1265df..7c8fb93 100644
+--- a/net/minecraft/world/entity/raid/Raid.java
++++ b/net/minecraft/world/entity/raid/Raid.java
+@@ -269,7 +269,7 @@ public class Raid {
+     }
+ 
+     public boolean absorbRaidOmen(final ServerPlayer player) {
+-        MobEffectInstance effect = player.getEffect(MobEffects.RAID_OMEN);
++        MobEffectInstance effect = player.getEffect(io.canvasmc.canvas.GlobalConfiguration.getInstance().oldFeature.oldRaidBehavior ? MobEffects.BAD_OMEN : MobEffects.RAID_OMEN); // Leaves - old Raid Behavior
+         if (effect == null) {
+             return false;
+         }
+@@ -346,7 +346,13 @@ public class Raid {
+                         }
+ 
+                         if (shouldTryToFindSpawnPos) {
+-                            this.waveSpawnPos = this.getValidSpawnPos(level);
++                            // Leaves Start - old FindSpawnPosition
++                            if (io.canvasmc.canvas.GlobalConfiguration.getInstance().oldFeature.oldRaidBehavior) {
++                                this.waveSpawnPos = this.preCalcRavagerSpawnLocation(level, this.raidCooldownTicks < 100 ? 1 : 0);
++                            } else {
++                                this.waveSpawnPos = this.getValidSpawnPos(level);
++                            }
++                            // Leaves End - old FindSpawnPosition
+                         }
+ 
+                         if (this.raidCooldownTicks == 300 || this.raidCooldownTicks % 20 == 0) {
+@@ -401,7 +407,14 @@ public class Raid {
+                 int attempt = 0;
+ 
+                 while (this.shouldSpawnGroup()) {
+-                    BlockPos spawnPos = this.waveSpawnPos.orElseGet(() -> this.findRandomSpawnPos(level, 20));
++                    // Leaves Start - old FindSpawnPosition
++                    BlockPos spawnPos;
++                    if (io.canvasmc.canvas.GlobalConfiguration.getInstance().oldFeature.oldRaidBehavior) {
++                        spawnPos = this.getRavagerSpawnLocation(level, attempt, 20);
++                    } else {
++                        spawnPos = this.waveSpawnPos.orElseGet(() -> this.findRandomSpawnPos(level, 20));
++                    }
++                    // Leaves End - old FindSpawnPosition
+                     if (spawnPos != null) {
+                         this.started = true;
+                         this.spawnGroup(level, spawnPos);
+@@ -413,7 +426,7 @@ public class Raid {
+                         attempt++;
+                     }
+ 
+-                    if (attempt > 5) {
++                    if (attempt > (io.canvasmc.canvas.GlobalConfiguration.getInstance().oldFeature.oldRaidBehavior ? 3 : 5)) { // Leaves - old FindSpawnPosition
+                         org.bukkit.craftbukkit.event.CraftEventFactory.callRaidStopEvent(level, this, org.bukkit.event.raid.RaidStopEvent.Reason.UNSPAWNABLE); // CraftBukkit
+                         this.stop();
+                         break;
+@@ -717,7 +730,7 @@ public class Raid {
+             int spawnX = this.center.getX() + Mth.floor(Mth.cos(angle) * 32.0F * howFar) + this.random.nextInt(3) * Mth.floor(howFar);
+             int spawnZ = this.center.getZ() + Mth.floor(Mth.sin(angle) * 32.0F * howFar) + this.random.nextInt(3) * Mth.floor(howFar);
+             int spawnY = level.getHeight(Heightmap.Types.WORLD_SURFACE, spawnX, spawnZ);
+-            if (Mth.abs(spawnY - this.center.getY()) <= 96) {
++            if (io.canvasmc.canvas.GlobalConfiguration.getInstance().oldFeature.oldRaidBehavior || Mth.abs(spawnY - this.center.getY()) <= 96) { // Leaves - skippable
+                 spawnPos.set(spawnX, spawnY, spawnZ);
+                 if (!level.isVillage(spawnPos) || secondsRemaining <= 7) {
+                     int delta = 10;
+@@ -900,4 +913,41 @@ public class Raid {
+             this.spawnsPerWaveBeforeBonus = spawnsPerWaveBeforeBonus;
+         }
+     }
++
++    // Leaves start - old FindSpawnPosition
++    @Nullable
++    private BlockPos getRavagerSpawnLocation(final ServerLevel serverWorld, final int proximity, final int tries) {
++        int i = proximity == 0 ? 2 : 2 - proximity;
++        BlockPos.MutableBlockPos mutable = new BlockPos.MutableBlockPos();
++        for (int j = 0; j < tries; j++) {
++            float f = serverWorld.getRandom().nextFloat() * (float) (Math.PI * 2);
++            int k = this.center.getX() + Mth.floor(Mth.cos(f) * 32.0F * (float) i + serverWorld.getRandom().nextInt(5));
++            int l = this.center.getZ() + Mth.floor(Mth.sin(f) * 32.0F * (float) i + serverWorld.getRandom().nextInt(5));
++            int m = serverWorld.getHeight(Heightmap.Types.WORLD_SURFACE, k, l);
++            mutable.set(k, m, l);
++            if (serverWorld.isVillage(mutable) && proximity < 2) {
++                continue;
++            }
++            if (serverWorld.hasChunksAt(mutable.getX() - 10, mutable.getZ() - 10, mutable.getX() + 10, mutable.getZ() + 10)
++                && serverWorld.isPositionEntityTicking(mutable)
++                && (RAVAGER_SPAWN_PLACEMENT_TYPE.isSpawnPositionOk(serverWorld, mutable, EntityTypes.RAVAGER)
++                    || serverWorld.getBlockState(mutable.below()).is(Blocks.SNOW)
++                    && serverWorld.getBlockState(mutable).isAir())
++            ) {
++                return mutable.immutable();
++            }
++        }
++        return null;
++    }
++
++    private Optional<BlockPos> preCalcRavagerSpawnLocation(final ServerLevel serverWorld, final int proximity) {
++        for (int i = 0; i < 3; i++) {
++            BlockPos blockPos = this.getRavagerSpawnLocation(serverWorld, proximity, 1);
++            if (blockPos != null) {
++                return Optional.of(blockPos);
++            }
++        }
++        return Optional.empty();
++    }
++    // Leaves end - old FindSpawnPosition
+ }
+diff --git a/net/minecraft/world/entity/raid/Raider.java b/net/minecraft/world/entity/raid/Raider.java
+index 7e969cd..260cbec 100644
+--- a/net/minecraft/world/entity/raid/Raider.java
++++ b/net/minecraft/world/entity/raid/Raider.java
+@@ -129,6 +129,42 @@ public abstract class Raider extends PatrollingMonster {
+ 
+                 raidWhenKilled.removeFromRaid(serverLevel, this, false);
+             }
++
++            // Leaves start - Revert raid changes
++            Entity killerEntity = source.getEntity();
++            if (io.canvasmc.canvas.GlobalConfiguration.getInstance().oldFeature.oldRaidBehavior && !this.hasActiveRaid()) {
++                ItemStack itemstack = this.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.HEAD);
++                net.minecraft.world.entity.player.Player entityhuman = null;
++                if (killerEntity instanceof net.minecraft.world.entity.player.Player player) {
++                    entityhuman = player;
++                } else if (killerEntity instanceof net.minecraft.world.entity.animal.wolf.Wolf wolf) {
++                    LivingEntity entityliving = wolf.getOwner();
++                    if (wolf.isTame() && entityliving instanceof net.minecraft.world.entity.player.Player player) {
++                        entityhuman = player;
++                    }
++                }
++
++                if (entityhuman != null && !itemstack.isEmpty() && this.isPatrolLeader()) {
++                    net.minecraft.world.effect.MobEffectInstance mobeffect = entityhuman.getEffect(net.minecraft.world.effect.MobEffects.BAD_OMEN);
++                    int amp = 1;
++
++                    if (mobeffect != null) {
++                        amp += mobeffect.getAmplifier();
++                        entityhuman.removeEffectNoUpdate(net.minecraft.world.effect.MobEffects.BAD_OMEN);
++                    } else {
++                        --amp;
++                    }
++
++                    amp = net.minecraft.util.Mth.clamp(amp, 0, 4);
++                    net.minecraft.world.effect.MobEffectInstance mobeffect1 = new net.minecraft.world.effect.MobEffectInstance(net.minecraft.world.effect.MobEffects.BAD_OMEN, 120000, amp, false, false, true);
++
++                    if (serverLevel.getGameRules().get(net.minecraft.world.level.gamerules.GameRules.RAIDS)) {
++                        entityhuman.addEffect(mobeffect1, org.bukkit.event.entity.EntityPotionEffectEvent.Cause.PATROL_CAPTAIN); // CraftBukkit
++                    }
++                    this.setPatrolLeader(false);
++                }
++            }
++            // Leaves end - Revert raid changes
+         }
+ 
+         super.die(source);
 diff --git a/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java b/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java
 index 0be598c..8a2cba8 100644
 --- a/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java
@@ -187,6 +454,18 @@ index 0be598c..8a2cba8 100644
              return InteractionResult.FAIL;
          }
          // Canvas end - region threading
+diff --git a/net/minecraft/world/inventory/MerchantMenu.java b/net/minecraft/world/inventory/MerchantMenu.java
+index 5979e38..55f6392 100644
+--- a/net/minecraft/world/inventory/MerchantMenu.java
++++ b/net/minecraft/world/inventory/MerchantMenu.java
+@@ -74,6 +74,7 @@ public class MerchantMenu extends AbstractContainerMenu {
+ 
+     @Override
+     public boolean stillValid(final Player player) {
++        if (io.canvasmc.canvas.GlobalConfiguration.getInstance().oldFeature.villagerVoidTrade) return this.trader.getTradingPlayer() == player; // Leaves - Configurable trading with the void
+         if (!checkReachable) return true; // Paper - checkReachable
+         return this.trader.stillValid(player);
+     }
 diff --git a/net/minecraft/world/level/BaseCommandBlock.java b/net/minecraft/world/level/BaseCommandBlock.java
 index afd2d88..faa9c3c 100644
 --- a/net/minecraft/world/level/BaseCommandBlock.java
@@ -224,7 +503,7 @@ index 3795ad9..8a32717 100644
                              entity.spawnReason == org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason.CHUNK_GEN)) {
                          continue;
 diff --git a/net/minecraft/world/level/ServerExplosion.java b/net/minecraft/world/level/ServerExplosion.java
-index 8d2047d..2389029 100644
+index 8d2047d..f46a834 100644
 --- a/net/minecraft/world/level/ServerExplosion.java
 +++ b/net/minecraft/world/level/ServerExplosion.java
 @@ -443,7 +443,7 @@ public class ServerExplosion implements Explosion {
@@ -236,6 +515,14 @@ index 8d2047d..2389029 100644
                                  net.minecraft.world.level.block.entity.BlockEntity extension = this.level.getBlockEntity(cachedBlock.immutablePos); // Paper - optimise collisions
                                  if (extension instanceof net.minecraft.world.level.block.piston.PistonMovingBlockEntity blockEntity && blockEntity.isSourcePiston()) {
                                      net.minecraft.core.Direction direction = iblockdata.getValue(net.minecraft.world.level.block.piston.PistonHeadBlock.FACING);
+@@ -764,6 +764,7 @@ public class ServerExplosion implements Explosion {
+     public boolean shouldAffectBlocklikeEntities() {
+         boolean mobGriefingEnabled = this.level.getGameRules().get(GameRules.MOB_GRIEFING);
+         boolean isNotWindCharge = this.source == null || !this.source.is(EntityTypes.BREEZE_WIND_CHARGE) && !this.source.is(EntityTypes.WIND_CHARGE);
++        if (io.canvasmc.canvas.GlobalConfiguration.getInstance().oldFeature.oldExplosionDamageCalculator) isNotWindCharge = isNotWindCharge && (this.source == null || !this.source.isInWater()); // Leaves - Old MC TNT wet explosion no item damage
+         return mobGriefingEnabled ? isNotWindCharge : this.blockInteraction.shouldAffectBlocklikeEntities() && isNotWindCharge;
+     }
+ 
 diff --git a/net/minecraft/world/level/block/Block.java b/net/minecraft/world/level/block/Block.java
 index 423c45d..b5fe7bb 100644
 --- a/net/minecraft/world/level/block/Block.java
