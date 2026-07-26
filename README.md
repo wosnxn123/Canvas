@@ -43,6 +43,21 @@
 
 当 `enabled: false` 时，Paper/Folia 的各项 per-mechanic 配置照常生效。
 
+### 3. Old Feature 配置（旧版机制逐项还原）
+
+`config/canvas-server.yml` → `old-feature` 段。**独立于** `vanilla-like-experience.enabled`，逐特性单独开关，全部默认 `false`。已与 Lophine 上游 `OldFeatureConfig` 的 6 个字段完全对齐。
+
+| 选项 | 说明 | 来源 / 许可证 |
+|------|------|------|
+| `old-zombie-reinforcement` | 僵尸增援固定生成普通僵尸，而非呼叫者的类型（尸壳 / 僵尸村民等） | Lophine，MIT |
+| `old-leader-zombie-health` | 队长僵尸不再被立即治疗到加成后的最大生命值 | Lophine，MIT |
+| `spawn-invulnerable-time` | 出生后 60 tick（3 秒）免伤；带 `BYPASSES_INVULNERABILITY` 标签的伤害（虚空、`/kill`）仍然生效 | Lophine，MIT |
+| `old-explosion-damage-calculator` | 爆炸源实体处于水中时不再破坏方块类实体（船、展示框、盔甲架） | Leaves → Lophine，GPL-3.0 |
+| `old-raid-behavior` | 还原 1.21 前袭击机制：`BAD_OMEN` 直接触发袭击而非在进村时转成 `RAID_OMEN`；波次生成位置改用旧版掠夺兽搜索（3 次尝试、无 96 格 Y 轴限制）；在袭击外击杀巡逻队长重新给予可叠加的 `BAD_OMEN` | Leaves → Lophine，GPL-3.0 |
+| `villager-void-trade` | 村民被卸载 / 移除后交易界面仍可使用（「对虚空交易」）。**⚠ 这不是 bug 修复**：开启会关掉 Paper 的村民船 exploit 修复和「实体移除时关闭 merchant 界面」修复，并把 `MerchantMenu.stillValid` 从可达性检查降级为交易者身份比对；region threading 下持有的界面可能读到属于其他 region 或已卸载的村民。仅在明确想要这个旧 exploit 时开启 | Leaves → Lophine，GPL-3.0 |
+
+许可证要点：上表六项的补丁 `From:` 都是 Lophine 的 MIT opt-in 作者，但其中三个在补丁体内显式声明 `Licensed under: GPL-3.0` 且各有不同 co-author，真实来源是 LeavesMC/Leaves 的固定提交——**MIT opt-in 属于作者个人，不可传递**。逐项来源、作者与许可证见 [`PROVENANCE.md`](PROVENANCE.md)。
+
 ### 分支
 
 `main` 跟踪 Canvas 上游 `main`，也是服务器构建和部署使用的分支。旧的 `pre-merger/26.2` 说明已经过时，不再作为当前维护基线。
@@ -63,6 +78,8 @@
 2026-07-14 已与 `LophineCraft/Lophine` `dev/26.2@f4aea025` 复核：0048 仍覆盖相同的 17 个原版机制；0013 和已更名的 `0014-Old-leader-zombie-health-logic.patch` 与本 fork 的两个 OldFeature 选项语义一致。
 
 2026-07-26 复核（来源仓库已改组 + 硬分叉）：组织更名为 `LophineLabs/Lophine`（旧地址 301 重定向，`f4aea025` 仍可达）；2026-07-17 从 Luminol 硬分叉，默认分支变为 `dev/26.2-hardfork`，feature 补丁由 49 个增至 130 个，三个来源补丁因此被重新编号为 `0129` / `0094` / `0095`——但**内容与 `f4aea025` 逐字节相同**，本 fork 的 0003 无需重新移植。因 Lophine 会随补丁集变动重新编号，后续复核请按文件名关键词定位来源，不要按编号。详见 [`PROVENANCE.md`](PROVENANCE.md)。
+
+同日补齐 `old-feature` 段剩余 4 个字段（`spawn-invulnerable-time` / `old-explosion-damage-calculator` / `old-raid-behavior` / `villager-void-trade`），至此与 Lophine `OldFeatureConfig` 的 6 字段完全对齐；0003 由 23 个文件扩到 28 个。同时复核确认 0129 未把任何机制拆分到硬分叉新增的其他补丁里——0129 触碰的 17 个文件全部仍在 0003 覆盖范围内，本 fork 没有漏移植。
 
 **Canvas 自有源码改动**（`canvas-server/src/main/java/io/canvasmc/canvas/GlobalConfiguration.java`，非 patch）：新增 `VanillaLikeExperience` 配置段（`enabled` + `commandBlocks` 字段）。
 
