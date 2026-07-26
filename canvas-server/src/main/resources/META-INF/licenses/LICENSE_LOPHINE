@@ -1,10 +1,12 @@
 Lophine source and license notice
 =================================
 
-Canonical repository: https://github.com/LophineCraft/Lophine
+Canonical repository: https://github.com/LophineLabs/Lophine
+  (formerly https://github.com/LophineCraft/Lophine; the organisation was
+  renamed and GitHub redirects the old URLs)
 Revision used by this fork: f4aea025c11c598f285d3c47198c62397a0daba8
 Upstream license file:
-https://github.com/LophineCraft/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/LICENSE.md
+https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/LICENSE.md
 
 Lophine inherits its licensing from the included upstream projects.
 
@@ -18,6 +20,12 @@ have released their work under GPL-3.0.
 The following author chose to release their code under the MIT License:
 
 Helvetica Volubi <suisuroru@blue-millennium.fun>
+
+This notice describes the revision listed above. Lophine hard-forked from
+Luminol on 2026-07-17; its default branch is now dev/26.2-hardfork and the
+current license file splits the full terms into licenses/GPL.md and
+licenses/MIT.md. The GPL-3.0 default and the MIT opt-in above were both
+re-verified against that branch on 2026-07-26 and are unchanged.
 
 The complete GPL-3.0 terms are available in the root LICENSE file of this
 distribution. The MIT license terms applicable to the author above are:

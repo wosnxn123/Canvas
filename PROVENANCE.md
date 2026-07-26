@@ -83,9 +83,9 @@ The patch contains three separately attributed groups:
 
 | Local work | Classification | Immutable source | Original author | License | Local adaptation |
 | --- | --- | --- | --- | --- | --- |
-| 17 vanilla-like mechanics | Derived/ported | [Lophine 0048 at `f4aea025`](https://github.com/LophineCraft/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0048-Add-Vanilla-like-experience-Config.patch) | Bacteriawa `<A3167717663@hotmail.com>` | GPL-3.0 under the Lophine repository license | Replaced Lophine TOML config access with Canvas `GlobalConfiguration`; adapted contexts to Canvas/Paper 26.2. |
-| Old zombie reinforcement | Derived/ported | [Lophine 0013 at `f4aea025`](https://github.com/LophineCraft/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0013-Old-zombie-reinforcement.patch) | Helvetica Volubi `<suisuroru@blue-millennium.fun>` | MIT, as explicitly listed in the [Lophine license](https://github.com/LophineCraft/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/LICENSE.md) | Added an independent Canvas YAML option under `old-feature`. |
-| Old leader zombie health | Derived/ported | [Lophine 0014 at `f4aea025`](https://github.com/LophineCraft/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0014-Old-leader-zombie-health-logic.patch) | Helvetica Volubi `<suisuroru@blue-millennium.fun>` | MIT, as explicitly listed in the [Lophine license](https://github.com/LophineCraft/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/LICENSE.md) | Added an independent Canvas YAML option under `old-feature`. |
+| 17 vanilla-like mechanics | Derived/ported | [Lophine 0048 at `f4aea025`](https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0048-Add-Vanilla-like-experience-Config.patch) | Bacteriawa `<A3167717663@hotmail.com>` | GPL-3.0 under the Lophine repository license | Replaced Lophine TOML config access with Canvas `GlobalConfiguration`; adapted contexts to Canvas/Paper 26.2. |
+| Old zombie reinforcement | Derived/ported | [Lophine 0013 at `f4aea025`](https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0013-Old-zombie-reinforcement.patch) | Helvetica Volubi `<suisuroru@blue-millennium.fun>` | MIT, as explicitly listed in the [Lophine license](https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/LICENSE.md) | Added an independent Canvas YAML option under `old-feature`. |
+| Old leader zombie health | Derived/ported | [Lophine 0014 at `f4aea025`](https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0014-Old-leader-zombie-health-logic.patch) | Helvetica Volubi `<suisuroru@blue-millennium.fun>` | MIT, as explicitly listed in the [Lophine license](https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/LICENSE.md) | Added an independent Canvas YAML option under `old-feature`. |
 | Five command-block gates and global-region execution route | Original to this fork | No external implementation used | wosnxn123 | GPL-3.0 | Uses Canvas `AbstractCommandExecution.executeOnGlobal` to restore command blocks without bypassing Folia ownership rules. |
 
 The related `VanillaLikeExperience` and `OldFeature` entries in
@@ -93,6 +93,45 @@ The related `VanillaLikeExperience` and `OldFeature` entries in
 Canvas configuration adaptations for the groups above. Their relationship to
 the Lophine configuration structure is part of this provenance record and must
 not be removed during future patch rebuilds.
+
+#### Source repository moved: `LophineCraft` → `LophineLabs`
+
+Recorded 2026-07-26. The links above are pinned to the immutable commit
+`f4aea025c11c598f285d3c47198c62397a0daba8`, which is the revision this fork
+actually ported from, so they remain the authoritative provenance record. Only
+the organisation segment of each URL was rewritten to the current name; the
+commit, paths, content, authors, and licenses are unchanged.
+
+Two upstream changes affect how a reviewer locates these sources today:
+
+1. **Organisation rename.** `LophineCraft/Lophine` is now
+   [`LophineLabs/Lophine`](https://github.com/LophineLabs/Lophine). GitHub still
+   serves the old URLs via HTTP 301, and `f4aea025` remains reachable under the
+   new organisation. Old links in git history must not be rewritten.
+2. **Hard fork and patch renumbering.** On 2026-07-17 Lophine hard-forked from
+   Luminol. The default branch became `dev/26.2-hardfork` and the feature patch
+   set grew from 49 to 130 files, which renumbered all three sources. The patch
+   contents at the new numbers are byte-identical to the revisions ported here
+   (verified 2026-07-26 against `dev/26.2-hardfork@0724ba3f`):
+
+   | Ported source at `f4aea025` | Same patch on `dev/26.2-hardfork` | Content delta |
+   | --- | --- | --- |
+   | `0048-Add-Vanilla-like-experience-Config.patch` | `0129-Add-Vanilla-like-experience-Config.patch` | none (identical) |
+   | `0013-Old-zombie-reinforcement.patch` | `0094-Old-zombie-reinforcement.patch` | none (identical) |
+   | `0014-Old-leader-zombie-health-logic.patch` | `0095-Old-leader-zombie-health-logic.patch` | none (identical) |
+
+Because Lophine renumbers patches when its patch set changes, a future
+re-verification must locate these sources **by file-name keyword**
+(`Vanilla-like-experience-Config`, `Old-zombie-reinforcement`,
+`Old-leader-zombie-health-logic`) rather than by patch number.
+
+The MIT opt-in for Helvetica Volubi `<suisuroru@blue-millennium.fun>` is still
+listed in the current
+[`LICENSE.md`](https://github.com/LophineLabs/Lophine/blob/dev/26.2-hardfork/LICENSE.md),
+whose full license texts now live in
+[`licenses/GPL.md`](https://github.com/LophineLabs/Lophine/blob/dev/26.2-hardfork/licenses/GPL.md)
+and
+[`licenses/MIT.md`](https://github.com/LophineLabs/Lophine/blob/dev/26.2-hardfork/licenses/MIT.md).
 
 ### License notices
 

@@ -26,7 +26,7 @@
 
 ### 2. Vanilla-like Experience 配置（原版机制还原）
 
-主开关：`config/canvas-server.yml` → `vanilla-like-experience.enabled`（默认 `false`）。开启后还原 Paper/Folia 修改过的原版机制（移植自 LophineCraft/Lophine 0048）：
+主开关：`config/canvas-server.yml` → `vanilla-like-experience.enabled`（默认 `false`）。开启后还原 Paper/Folia 修改过的原版机制（移植自 LophineLabs/Lophine 0048）：
 
 | 机制 | 说明 |
 |------|------|
@@ -58,9 +58,11 @@
 |------|------|------|
 | `0001-Purpur-Alternative-Keepalive` | Canvas 上游 | — |
 | `0002-Disable-Criterion-Trigger-Config` | Canvas 上游 | — |
-| `0003-Vanilla-like-experience` | **本 fork**（移植 + 原创） | 17 项 vanilla 机制移植自 [Lophine 0048 固定版本](https://github.com/LophineCraft/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0048-Add-Vanilla-like-experience-Config.patch)（作者 Bacteriawa，GPL-3.0）；2 项旧版僵尸机制移植自 [Lophine 0013](https://github.com/LophineCraft/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0013-Old-zombie-reinforcement.patch) / [0014](https://github.com/LophineCraft/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0014-Old-leader-zombie-health-logic.patch)（作者 Helvetica Volubi，MIT）；5 个命令方块 gate 为本 fork 原创。完整适配说明见 [`PROVENANCE.md`](PROVENANCE.md)。 |
+| `0003-Vanilla-like-experience` | **本 fork**（移植 + 原创） | 17 项 vanilla 机制移植自 [Lophine 0048 固定版本](https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0048-Add-Vanilla-like-experience-Config.patch)（作者 Bacteriawa，GPL-3.0）；2 项旧版僵尸机制移植自 [Lophine 0013](https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0013-Old-zombie-reinforcement.patch) / [0014](https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0014-Old-leader-zombie-health-logic.patch)（作者 Helvetica Volubi，MIT）；5 个命令方块 gate 为本 fork 原创。完整适配说明见 [`PROVENANCE.md`](PROVENANCE.md)。 |
 
 2026-07-14 已与 `LophineCraft/Lophine` `dev/26.2@f4aea025` 复核：0048 仍覆盖相同的 17 个原版机制；0013 和已更名的 `0014-Old-leader-zombie-health-logic.patch` 与本 fork 的两个 OldFeature 选项语义一致。
+
+2026-07-26 复核（来源仓库已改组 + 硬分叉）：组织更名为 `LophineLabs/Lophine`（旧地址 301 重定向，`f4aea025` 仍可达）；2026-07-17 从 Luminol 硬分叉，默认分支变为 `dev/26.2-hardfork`，feature 补丁由 49 个增至 130 个，三个来源补丁因此被重新编号为 `0129` / `0094` / `0095`——但**内容与 `f4aea025` 逐字节相同**，本 fork 的 0003 无需重新移植。因 Lophine 会随补丁集变动重新编号，后续复核请按文件名关键词定位来源，不要按编号。详见 [`PROVENANCE.md`](PROVENANCE.md)。
 
 **Canvas 自有源码改动**（`canvas-server/src/main/java/io/canvasmc/canvas/GlobalConfiguration.java`，非 patch）：新增 `VanillaLikeExperience` 配置段（`enabled` + `commandBlocks` 字段）。
 
