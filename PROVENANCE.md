@@ -86,7 +86,7 @@ The patch contains three separately attributed groups:
 | 17 vanilla-like mechanics | Derived/ported | [Lophine 0048 at `f4aea025`](https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0048-Add-Vanilla-like-experience-Config.patch) | Bacteriawa `<A3167717663@hotmail.com>` | GPL-3.0 under the Lophine repository license | Replaced Lophine TOML config access with Canvas `GlobalConfiguration`; adapted contexts to Canvas/Paper 26.2. |
 | Old zombie reinforcement | Derived/ported | [Lophine 0013 at `f4aea025`](https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0013-Old-zombie-reinforcement.patch) | Helvetica Volubi `<suisuroru@blue-millennium.fun>` | MIT, as explicitly listed in the [Lophine license](https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/LICENSE.md) | Added an independent Canvas YAML option under `old-feature`. |
 | Old leader zombie health | Derived/ported | [Lophine 0014 at `f4aea025`](https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0014-Old-leader-zombie-health-logic.patch) | Helvetica Volubi `<suisuroru@blue-millennium.fun>` | MIT, as explicitly listed in the [Lophine license](https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/LICENSE.md) | Added an independent Canvas YAML option under `old-feature`. |
-| Five command-block gates and global-region execution route | Original to this fork | No external implementation used | wosnxn123 | GPL-3.0 | Uses Canvas `AbstractCommandExecution.executeOnGlobal` to restore command blocks without bypassing Folia ownership rules. |
+| Six command-block gates, global-region execution route, and owning-region output hop | Original to this fork | No external implementation used | wosnxn123 | GPL-3.0 | Uses Canvas `AbstractCommandExecution.executeOnGlobal` to restore command blocks without bypassing Folia ownership rules, and hops command output back to the command block's owning region via `RegionizedTaskQueue.queueOrExecuteTickTask`. |
 | Spawn invulnerable time | Derived/ported | [Lophine `Spawn-invulnerable-time` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0096-Spawn-invulnerable-time.patch) | Helvetica Volubi `<suisuroru@blue-millennium.fun>` | MIT, as explicitly listed in the [Lophine license](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/LICENSE.md) | Replaced the Lophine TOML config read with Canvas `GlobalConfiguration.oldFeature.spawnInvulnerableTime`; hunk contexts unchanged. |
 | Old explosion damage calculator | Derived/ported | [LeavesMC/Leaves `0134-Old-wet-tnt-explode-behavior.patch` at `3e96b237`](https://github.com/LeavesMC/Leaves/blob/3e96b237749a960f297f211d439ffc9ea7fd2381/leaves-server/minecraft-patches/features/0134-Old-wet-tnt-explode-behavior.patch), reached via [Lophine `Leaves-Old-Explosion-Damage-Calculator` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0104-Leaves-Old-Explosion-Damage-Calculator.patch) | MC_XiaoHei `<xor7xiaohei@gmail.com>`, relayed by Helvetica Volubi `<suisuroru@blue-millennium.fun>` | **GPL-3.0**, as declared in the patch body — the Lophine MIT opt-in does **not** apply to this patch | Replaced the Lophine TOML config read with Canvas `GlobalConfiguration.oldFeature.oldExplosionDamageCalculator`; retained the `// Leaves` source marker. |
 | Old raid behavior | Derived/ported | [LeavesMC/Leaves `0114-Old-raid-behavior.patch` at `bda7e406`](https://github.com/LeavesMC/Leaves/blob/bda7e406b995290234e33283a181e33467ceda38/leaves-server/minecraft-patches/features/0114-Old-raid-behavior.patch), reached via [Lophine `Leaves-Old-raid-behavior` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0098-Leaves-Old-raid-behavior.patch) | huanli233 `<392352840@qq.com>`, relayed by Helvetica Volubi `<suisuroru@blue-millennium.fun>` | **GPL-3.0**, as declared in the patch body — the Lophine MIT opt-in does **not** apply to this patch | Replaced four TOML config reads with `GlobalConfiguration.oldFeature.oldRaidBehavior`; used Canvas's existing `RAVAGER_SPAWN_PLACEMENT_TYPE` constant instead of re-resolving `SpawnPlacements.getPlacementType` inside the added `getRavagerSpawnLocation`; retained all `// Leaves` source markers. |
@@ -108,6 +108,40 @@ Leaves commit, not the Lophine one.
 
 Only `Spawn-invulnerable-time` carries no Leaves attribution and no in-body
 license declaration, so the MIT opt-in applies to it.
+
+### Command-block output must be applied on the owning region
+
+Recorded 2026-07-26 after fixing a defect in this fork's own command-block work.
+
+The gates route command execution through
+`AbstractCommandExecution.executeOnGlobal`, which runs the command inline only
+when the caller already is the global tick thread. A command block is ticked by
+the region that owns its chunk, so in practice the command is queued and runs on
+a later global tick. That has two consequences any future change here must
+preserve:
+
+1. **The command source outlives `performCommand`.** It must not be closed in a
+   `try`-with-resources block. `CloseableCommandBlockSource#closed` gates
+   `acceptsSuccess`, `acceptsFailure`, `shouldInformAdmins` and the
+   `sendSystemMessage` body, so closing it before the queued command runs
+   discards all output silently.
+2. **Output application is region-owned work.** `sendSystemMessage` writes
+   `lastOutput` and calls `onUpdated`, which reads the block state and re-sends a
+   block update. Both `CommandBlockEntity` and `MinecartCommandBlock` override
+   `threadCheck()` with `TickThread.ensureTickThread`, so doing this from the
+   global tick thread would throw. It is therefore wrapped in
+   `BaseCommandBlock#runOnOwningRegion`, which each subclass implements with
+   `RegionizedTaskQueue#queueOrExecuteTickTask` against its own chunk. That call
+   runs inline when the thread already owns the chunk, so a command that stays
+   within one region keeps vanilla's same-tick behaviour.
+
+`successCount` and `lastOutput` are `volatile` because they are written from the
+region that ran the command and read by comparators and the block GUI.
+`successCount` is reset to 0 before dispatch and incremented inside the hop, so
+for a command whose execution is genuinely deferred, comparators and conditional
+chain blocks observe the result one tick late. That latency is inherent to
+running cross-region commands off the ticking region and cannot be removed
+without blocking the region thread.
 
 ### `villager-void-trade` risk note
 
