@@ -40,7 +40,7 @@
              try (Reader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
                  JsonElement element = StrictJsonParser.parse(reader);
                  this.parse(server.getFixerUpper(), element);
-@@ -88,8 +104,22 @@
+@@ -88,7 +104,21 @@
          // Paper end - Moved after stat fetching for player state file
      }
  
