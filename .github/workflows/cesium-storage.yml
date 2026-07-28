@@ -43,10 +43,10 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Apply all patches
-        run: ./gradlew applyAllPatches --stacktrace --no-configuration-cache
+        run: ./gradlew applyAllPatches --stacktrace --no-configuration-cache --info --warning-mode all
 
       - name: Build paperclip jar
-        run: ./gradlew :canvas-server:createPaperclipJar --stacktrace --no-configuration-cache
+        run: ./gradlew :canvas-server:createPaperclipJar --stacktrace --no-configuration-cache --info --warning-mode all
 
       - name: Upload server artifact
         uses: actions/upload-artifact@v4

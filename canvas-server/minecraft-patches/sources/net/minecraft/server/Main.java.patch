@@ -90,7 +90,7 @@
                  return;
              }
  
-@@ -370,6 +_,15 @@
+@@ -370,5 +_,14 @@
              */ // CraftBukkit end
          } catch (Throwable t) {
              LOGGER.error(LogUtils.FATAL_MARKER, "Failed to start the minecraft server", t);

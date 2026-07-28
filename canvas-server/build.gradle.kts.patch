@@ -76,7 +76,8 @@
 +val runtimeConfiguration = configurations.consumable("runtimeConfiguration") {
      attributes.attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage.JAVA_RUNTIME))
      extendsFrom(configurations.getByName(sourceSets.main.get().runtimeElementsConfigurationName))
- }
+-}
++}.get()
 @@ -109,12 +_,14 @@
  }
  

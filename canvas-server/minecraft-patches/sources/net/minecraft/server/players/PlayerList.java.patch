@@ -202,7 +202,7 @@
          }
      }
  
-@@ -1358,7 +_,12 @@
+@@ -1358,6 +_,11 @@
          //this.broadcastAll(new ClientboundSetSimulationDistancePacket(simulationDistance)); // Paper - rewrite chunk system
  
          for (ServerLevel level : this.server.getAllLevels()) {
@@ -215,7 +215,7 @@
 +            // Canvas end - per world distance
          }
      }
-@@ -1384,7 +_,7 @@
+@@ -1384,6 +_,6 @@
      }
      public ServerStatsCounter getPlayerStats(final GameProfile gameProfile) {
              Path targetFile = this.locateStatsFile(gameProfile);
