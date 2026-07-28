@@ -215,7 +215,7 @@
 +            // Canvas end - per world distance
          }
      }
-@@ -1384,7 +1384,7 @@
+@@ -1384,7 +_,7 @@
      }
      public ServerStatsCounter getPlayerStats(final GameProfile gameProfile) {
              Path targetFile = this.locateStatsFile(gameProfile);
