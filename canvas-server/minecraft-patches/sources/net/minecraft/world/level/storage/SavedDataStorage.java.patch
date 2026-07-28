@@ -1,0 +1,132 @@
+--- a/net/minecraft/world/level/storage/SavedDataStorage.java
++++ b/net/minecraft/world/level/storage/SavedDataStorage.java
+@@ -5,6 +5,8 @@
+ import com.mojang.logging.LogUtils;
+ import com.mojang.serialization.Codec;
+ import it.unimi.dsi.fastutil.objects.Object2ObjectArrayMap;
++import java.io.ByteArrayInputStream;
++import java.io.ByteArrayOutputStream;
+ import java.io.DataInputStream;
+ import java.io.IOException;
+ import java.io.InputStream;
+@@ -27,6 +29,7 @@
+ import net.minecraft.nbt.NbtUtils;
+ import net.minecraft.nbt.Tag;
+ import net.minecraft.resources.Identifier;
++import net.minecraft.resources.ResourceKey;
+ import net.minecraft.resources.RegistryOps;
+ import net.minecraft.util.FastBufferedInputStream;
+ import net.minecraft.util.FileUtil;
+@@ -44,13 +47,25 @@
+     private final DataFixer fixerUpper;
+     private final HolderLookup.Provider registries;
+     private final Path dataFolder;
++    private final ResourceKey<net.minecraft.world.level.Level> cesiumDimension;
+     private CompletableFuture<?> pendingWriteFuture = CompletableFuture.completedFuture(null);
+     private boolean closed;
+ 
+     public SavedDataStorage(final Path dataFolder, final DataFixer fixerUpper, final HolderLookup.Provider registries) {
++        this(dataFolder, fixerUpper, registries, null);
++    }
++
++    public SavedDataStorage(final Path dataFolder, final DataFixer fixerUpper, final HolderLookup.Provider registries,
++                            final @Nullable ResourceKey<net.minecraft.world.level.Level> cesiumDimension) {
+         this.fixerUpper = fixerUpper;
+         this.dataFolder = dataFolder;
+         this.registries = registries;
++        this.cesiumDimension = cesiumDimension;
++    }
++
++    public SavedDataStorage(final Path dataFolder, final ResourceKey<net.minecraft.world.level.Level> cesiumDimension,
++                            final DataFixer fixerUpper, final HolderLookup.Provider registries) {
++        this(dataFolder, fixerUpper, registries, cesiumDimension);
+     }
+ 
+     private Path getDataFile(final Identifier id) {
+@@ -122,21 +137,37 @@
+     }
+ 
+     private <T extends SavedData> @Nullable T readSavedData(final SavedDataType<T> type) {
++        final boolean usingCesium = io.canvasmc.canvas.storage.cesium.CesiumStorageManager.current().enabled();
+         try {
+-            Path file = this.getDataFile(type.id());
+-            if (Files.exists(file)) {
+-                CompoundTag tag = this.readTagFromDisk(file, type.dataFixType(), SharedConstants.getCurrentVersion().dataVersion().version());
+-                RegistryOps<Tag> ops = this.registries.createSerializationContext(NbtOps.INSTANCE);
+-                return type.codec()
+-                    .parse(ops, tag.get("data"))
+-                    .resultOrPartial(error -> LOGGER.error("Failed to parse saved data for '{}': {}", type, error))
+-                    .orElse(null);
+-            }
++            final CompoundTag updated;
++            final io.canvasmc.canvas.storage.cesium.CesiumStorageManager.SavedDataStore cesium = this.cesiumStore();
++            if (cesium != null) {
++                final Optional<byte[]> serialized = cesium.read(type.id().toString());
++                if (serialized.isEmpty()) return null;
++                final CompoundTag tag;
++                try (ByteArrayInputStream input = new ByteArrayInputStream(serialized.get())) {
++                    tag = NbtIo.readCompressed(input, NbtAccounter.unlimitedHeap());
++                }
++                final int version = NbtUtils.getDataVersion(tag, 1343);
++                updated = type.dataFixType().update(this.fixerUpper, tag, version,
++                    SharedConstants.getCurrentVersion().dataVersion().version());
++            } else {
++                Path file = this.getDataFile(type.id());
++                if (!Files.exists(file)) return null;
++                updated = this.readTagFromDisk(file, type.dataFixType(), SharedConstants.getCurrentVersion().dataVersion().version());
++            }
++            RegistryOps<Tag> ops = this.registries.createSerializationContext(NbtOps.INSTANCE);
++            return type.codec()
++                .parse(ops, updated.get("data"))
++                .resultOrPartial(error -> LOGGER.error("Failed to parse saved data for '{}': {}", type, error))
++                .orElse(null);
+         } catch (Exception e) {
+             LOGGER.error("Error loading saved data: {}", type, e);
+-        }
+-
+-        return null;
++            if (usingCesium) {
++                throw new IllegalStateException("Failed to decode Cesium saved data " + type.id(), e);
++            }
++            return null;
++        }
+     }
+ 
+     public <T extends SavedData> void set(final SavedDataType<T> type, final T data) {
+@@ -304,8 +335,19 @@
+     }
+ 
+     private void tryWrite(final SavedDataType<?> type, final CompoundTag tag) {
++        final io.canvasmc.canvas.storage.cesium.CesiumStorageManager.SavedDataStore cesium = this.cesiumStore();
++        if (cesium != null) {
++            try {
++                final ByteArrayOutputStream serialized = new ByteArrayOutputStream();
++                NbtIo.writeCompressed(tag, serialized);
++                cesium.write(type.id().toString(), serialized.toByteArray()).toCompletableFuture().join();
++            } catch (final IOException failure) {
++                throw new java.util.concurrent.CompletionException(failure);
++            }
++            return;
++        }
++
+         Path path = this.getDataFile(type.id());
+-
+         try {
+             FileUtil.createDirectoriesSafe(path.getParent());
+             NbtIo.writeCompressed(tag, path);
+@@ -314,6 +356,15 @@
+         }
+     }
+ 
++    private io.canvasmc.canvas.storage.cesium.CesiumStorageManager.@Nullable SavedDataStore cesiumStore() {
++        final io.canvasmc.canvas.storage.cesium.CesiumStorageManager manager = io.canvasmc.canvas.storage.cesium.CesiumStorageManager.current();
++        if (!manager.enabled()) return null;
++        if (this.cesiumDimension == null) {
++            throw new IllegalStateException("Cesium saved-data storage requires a dimension-qualified key");
++        }
++        return manager.savedData(this.cesiumDimension);
++    }
++
+     public void saveAndJoin() {
+         this.scheduleSave().join();
+     }

@@ -1,0 +1,64 @@
+--- a/net/minecraft/stats/ServerStatsCounter.java
++++ b/net/minecraft/stats/ServerStatsCounter.java
+@@ -23,6 +23,7 @@
+ import java.nio.file.Path;
+ import java.util.HashMap;
+ import java.util.Map;
++import java.util.UUID;
+ import java.util.Set;
+ import java.util.stream.Collectors;
+ import net.minecraft.SharedConstants;
+@@ -50,6 +51,7 @@
+             return stats;
+         }, map -> map.entrySet().stream().collect(Collectors.groupingBy(entry -> entry.getKey().getType(), Util.toMap())));
+     private final Path file;
++    private final UUID playerId;
+     private final Set<Stat<?>> dirty = Sets.newHashSet();
+ 
+     private static <T> Codec<Map<Stat<?>, Integer>> createTypedStatsCodec(final StatType<T> type) {
+@@ -64,8 +66,22 @@
+     }
+ 
+     public ServerStatsCounter(final MinecraftServer server, final Path file) {
++        this(server, file, playerIdFromFile(file));
++    }
++
++    public ServerStatsCounter(final MinecraftServer server, final Path file, final UUID playerId) {
+         this.file = file;
+-        if (Files.isRegularFile(file)) {
++        this.playerId = playerId;
++        final io.canvasmc.canvas.storage.cesium.CesiumStorageManager cesium = io.canvasmc.canvas.storage.cesium.CesiumStorageManager.current();
++        if (cesium.enabled()) {
++            cesium.readStatistics(playerId).ifPresent(serialized -> {
++                try {
++                    this.parse(server.getFixerUpper(), StrictJsonParser.parse(new String(serialized, StandardCharsets.UTF_8)));
++                } catch (final RuntimeException failure) {
++                    throw new IllegalStateException("Failed to decode Cesium statistics for " + playerId, failure);
++                }
++            });
++        } else if (Files.isRegularFile(file)) {
+             try (Reader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
+                 JsonElement element = StrictJsonParser.parse(reader);
+                 this.parse(server.getFixerUpper(), element);
+@@ -88,8 +104,22 @@
+         // Paper end - Moved after stat fetching for player state file
+     }
+ 
++    private static UUID playerIdFromFile(final Path file) {
++        final String name = file.getFileName().toString().replaceFirst("\\.json$", "");
++        try {
++            return UUID.fromString(name);
++        } catch (final IllegalArgumentException ignored) {
++            return Util.NIL_UUID;
++        }
++    }
++
+     public void save() {
+         if (org.spigotmc.SpigotConfig.disableStatSaving) return; // Spigot
++        final io.canvasmc.canvas.storage.cesium.CesiumStorageManager cesium = io.canvasmc.canvas.storage.cesium.CesiumStorageManager.current();
++        if (cesium.enabled()) {
++            cesium.writeStatistics(this.playerId, GSON.toJson(this.toJson()).getBytes(StandardCharsets.UTF_8));
++            return;
++        }
+         try {
+             FileUtil.createDirectoriesSafe(this.file.getParent());

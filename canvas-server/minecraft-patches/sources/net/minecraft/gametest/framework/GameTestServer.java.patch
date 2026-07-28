@@ -1,0 +1,10 @@
+--- a/net/minecraft/gametest/framework/GameTestServer.java
++++ b/net/minecraft/gametest/framework/GameTestServer.java
+@@ -177,6 +177,7 @@
+ 
+     @Override
+     protected boolean initServer() {
++        this.initializePersistentStorage(false);
+         // Paper start
+         this.setPlayerList(new PlayerList(this, this.registries(), this.playerDataStorage, new EmptyNotificationService()) {
+             @Override

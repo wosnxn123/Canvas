@@ -44,6 +44,11 @@ for (name in listOf("canvas-api", "canvas-server")) {
     findProject(":$projName")!!.projectDir = file(name)
 }
 
+for (name in listOf("storage-core", "storage-lmdb", "folia-integration")) {
+    include(name)
+    findProject(":$name")!!.projectDir = file("cesium-folia/$name")
+}
+
 rootDir.listFiles()
     ?.filter { it.isDirectory && (it.name.endsWith("-debug", ignoreCase = true) || it.name.endsWith("-plugin", ignoreCase = true)) }
     ?.forEach { dir ->

@@ -1,0 +1,75 @@
+--- a/net/minecraft/world/level/storage/PlayerDataStorage.java
++++ b/net/minecraft/world/level/storage/PlayerDataStorage.java
+@@ -2,6 +2,8 @@
+ 
+ import com.mojang.datafixers.DataFixer;
+ import com.mojang.logging.LogUtils;
++import java.io.ByteArrayInputStream;
++import java.io.ByteArrayOutputStream;
+ import java.io.File;
+ import java.nio.file.Files;
+ import java.nio.file.Path;
+@@ -9,6 +11,7 @@
+ import java.time.ZonedDateTime;
+ import java.util.Optional;
+ import net.minecraft.nbt.CompoundTag;
++import java.util.UUID;
+ import net.minecraft.nbt.NbtAccounter;
+ import net.minecraft.nbt.NbtIo;
+ import net.minecraft.nbt.NbtUtils;
+@@ -35,13 +38,20 @@
+         try (ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(player.problemPath(), LOGGER)) {
+             TagValueOutput output = TagValueOutput.createWithContext(reporter, player.registryAccess());
+             player.saveWithoutId(output);
+-            Path playerDirPath = this.playerDir.toPath();
+-            Path tmpFile = Files.createTempFile(playerDirPath, player.getStringUUID() + "-", ".dat");
+             CompoundTag dataToStore = output.buildResult();
+-            NbtIo.writeCompressed(dataToStore, tmpFile);
+-            Path realFile = playerDirPath.resolve(player.getStringUUID() + ".dat");
+-            Path oldFile = playerDirPath.resolve(player.getStringUUID() + ".dat_old");
+-            Util.safeReplaceFile(realFile, tmpFile, oldFile);
++            final io.canvasmc.canvas.storage.cesium.CesiumStorageManager cesium = io.canvasmc.canvas.storage.cesium.CesiumStorageManager.current();
++            if (cesium.enabled()) {
++                final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
++                NbtIo.writeCompressed(dataToStore, bytes);
++                cesium.writePlayer(player.getUUID(), bytes.toByteArray());
++            } else {
++                Path playerDirPath = this.playerDir.toPath();
++                Path tmpFile = Files.createTempFile(playerDirPath, player.getStringUUID() + "-", ".dat");
++                NbtIo.writeCompressed(dataToStore, tmpFile);
++                Path realFile = playerDirPath.resolve(player.getStringUUID() + ".dat");
++                Path oldFile = playerDirPath.resolve(player.getStringUUID() + ".dat_old");
++                Util.safeReplaceFile(realFile, tmpFile, oldFile);
++            }
+         } catch (Exception ignored) {
+             LOGGER.warn("Failed to save player data for {}", player.getPlainTextName(), ignored); // Paper - Print exception
+         }
+@@ -91,6 +101,28 @@
+     }
+ 
+     public Optional<CompoundTag> load(final NameAndId nameAndId) {
++        final io.canvasmc.canvas.storage.cesium.CesiumStorageManager cesium = io.canvasmc.canvas.storage.cesium.CesiumStorageManager.current();
++        if (cesium.enabled()) {
++            Optional<byte[]> serialized = cesium.readPlayer(nameAndId.id());
++            if (serialized.isEmpty() && org.bukkit.Bukkit.getOnlineMode()) {
++                final UUID offlineId = net.minecraft.core.UUIDUtil.createOfflinePlayerUUID(nameAndId.name());
++                serialized = cesium.readPlayer(offlineId);
++                if (serialized.isPresent()) {
++                    LOGGER.warn("Using offline mode UUID data for player {} as it is the only copy we can find.", nameAndId.name());
++                }
++            }
++            return serialized.map(bytes -> {
++                try {
++                    return NbtIo.readCompressed(new ByteArrayInputStream(bytes), NbtAccounter.unlimitedHeap());
++                } catch (final Exception failure) {
++                    throw new IllegalStateException("Failed to decode Cesium player data for " + nameAndId.name(), failure);
++                }
++            }).map(tag -> {
++                int version = NbtUtils.getDataVersion(tag);
++                return ca.spottedleaf.dataconverter.minecraft.MCDataConverter.convertTag(ca.spottedleaf.dataconverter.minecraft.datatypes.MCTypeRegistry.PLAYER, tag, version, ca.spottedleaf.dataconverter.minecraft.util.Version.getCurrentVersion());
++            });
++        }
++
+         Optional<CompoundTag> optTag = this.load(nameAndId, ".dat");
+         if (optTag.isEmpty()) {
+             this.backup(nameAndId, ".dat");

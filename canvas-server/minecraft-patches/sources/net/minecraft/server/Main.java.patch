@@ -49,3 +49,59 @@
  
              // Paper start - Detect headless JRE
              String awtException = io.papermc.paper.util.ServerEnvironment.awtDependencyCheck();
+@@ -198,6 +198,11 @@
+             String levelName = Optional.ofNullable((String) options.valueOf("world")).orElse(settings.getProperties().levelName); // CraftBukkit
+             LevelStorageSource levelStorageSource = LevelStorageSource.createDefault(universePath.toPath());
+             LevelStorageSource.LevelStorageAccess access = levelStorageSource.validateAndCreateAccess(levelName);
++            io.canvasmc.canvas.storage.cesium.CesiumStorageManager.open(
++                access.getLevelDirectory().path(),
++                Files.isRegularFile(access.getLevelDirectory().dataFile())
++                    || Files.isRegularFile(access.getLevelDirectory().oldDataFile())
++            );
+             Dynamic<?> levelDataTag;
+             if (access.hasWorldData()) {
+                 Dynamic<?> levelDataUnfixed;
+@@ -205,17 +210,20 @@
+                     levelDataUnfixed = access.getUnfixedDataTagWithFallback();
+                 } catch (IOException | NbtException | ReportedNbtException ex) {
+                     LOGGER.error("Failed to load world data. World files may be corrupted. Shutting down.", ex);
++                    closeBootstrapStorage();
+                     return;
+                 }
+ 
+                 LevelSummary summary = access.fixAndGetSummaryFromTag(levelDataUnfixed);
+                 if (summary.requiresManualConversion()) {
+                     LOGGER.info("This world must be opened in an older version (like 1.6.4) to be safely converted");
++                    closeBootstrapStorage();
+                     return;
+                 }
+ 
+                 if (!summary.isCompatible()) {
+                     LOGGER.info("This world was created by an incompatible version.");
++                    closeBootstrapStorage();
+                     return;
+                 }
+ 
+@@ -300,6 +308,7 @@
+                 LOGGER.warn(
+                     "Failed to load datapacks, can't proceed with server load. You can either fix your datapacks or reset to vanilla with --safeMode", e
+                 );
++                closeBootstrapStorage();
+                 return;
+             }
+ 
+@@ -370,6 +379,15 @@
+             */ // CraftBukkit end
+         } catch (Throwable t) {
+             LOGGER.error(LogUtils.FATAL_MARKER, "Failed to start the minecraft server", t);
++            closeBootstrapStorage();
++        }
++    }
++
++    private static void closeBootstrapStorage() {
++        try {
++            io.canvasmc.canvas.storage.cesium.CesiumStorageManager.current().flushAndClose(true);
++        } catch (final RuntimeException failure) {
++            LOGGER.error("Failed to close Cesium storage after bootstrap failure", failure);
+         }
+     }

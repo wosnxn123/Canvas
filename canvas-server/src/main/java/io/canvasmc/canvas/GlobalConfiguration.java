@@ -8,6 +8,7 @@ import io.canvasmc.canvas.configuration.Resolver;
 import io.canvasmc.canvas.configuration.Style;
 import io.canvasmc.canvas.configuration.Validator;
 import io.canvasmc.canvas.simd.SIMDDetection;
+import io.canvasmc.canvas.subcommands.CesiumStatusSubCommand;
 import io.canvasmc.canvas.subcommands.RegionBarSubCommand;
 import io.canvasmc.canvas.subcommands.RegionTickSubCommand;
 import io.canvasmc.canvas.subcommands.ReloadSubCommand;
@@ -163,6 +164,8 @@ public class GlobalConfiguration extends Part {
 
         // validate the configuration so users don't end up doing a stupid
         Validator.validateObject(configuration);
+        validateCesiumStorage(configuration.cesiumStorage);
+
 
         if (TickRegions.hasStarted()) {
 
@@ -181,6 +184,8 @@ public class GlobalConfiguration extends Part {
             }
 
             server.rebuildServerStatus();
+            io.canvasmc.canvas.storage.cesium.CesiumStorageManager.current().configurationReloaded(configuration.cesiumStorage);
+
         }
         else {
 
@@ -241,6 +246,7 @@ public class GlobalConfiguration extends Part {
 
             // register our commands to the Canvas command tree
             CanvasCommands.register(
+                CesiumStatusSubCommand.class,
                 SetMaxPlayersSubCommand.class,
                 RegionBarSubCommand.class,
                 WorldDistanceSubCommand.class,
@@ -258,6 +264,36 @@ public class GlobalConfiguration extends Part {
 
         broadcast("Server will autosave enabled selection every " + configuration.autosave.autosaveFrequency, INFO);
         broadcast("Using " + configuration.regionScheduler.defaultTickRate + " as default tick rate", INFO);
+    }
+
+    private static void validateCesiumStorage(final CesiumStorage configuration) {
+        if (!"lmdb".equalsIgnoreCase(configuration.backend)) {
+            throw new IllegalArgumentException("cesiumStorage.backend must be lmdb");
+        }
+        if (configuration.rootDirectory == null || configuration.rootDirectory.isBlank()) {
+            throw new IllegalArgumentException("cesiumStorage.rootDirectory must not be blank");
+        }
+        if (configuration.initialMapSizeBytes < 1024L * 1024L) {
+            throw new IllegalArgumentException("cesiumStorage.initialMapSizeBytes must be at least 1 MiB");
+        }
+        if (configuration.maximumMapSizeBytes < configuration.initialMapSizeBytes) {
+            throw new IllegalArgumentException("cesiumStorage.maximumMapSizeBytes must not be smaller than initialMapSizeBytes");
+        }
+        if (configuration.maximumReaders <= 0 || configuration.maximumValueBytes <= 0
+            || configuration.maximumCommitAttempts <= 0 || configuration.maxBatchOperations <= 0
+            || configuration.backpressureOperationThreshold <= 0L || configuration.backpressureByteThreshold <= 0L) {
+            throw new IllegalArgumentException("Cesium reader, value, commit, batch, and backpressure limits must be positive");
+        }
+        if (configuration.compressionLevel < 1 || configuration.compressionLevel > 22) {
+            throw new IllegalArgumentException("cesiumStorage.compressionLevel must be between 1 and 22");
+        }
+        if (configuration.initialRetryDelayMillis <= 0L
+            || configuration.maximumRetryDelayMillis < configuration.initialRetryDelayMillis) {
+            throw new IllegalArgumentException("Cesium retry delays must be positive and maximum must be at least initial");
+        }
+        if (configuration.closeTimeoutSeconds <= 0L || configuration.closeTimeoutSeconds > 86_400L) {
+            throw new IllegalArgumentException("cesiumStorage.closeTimeoutSeconds must be between 1 and 86400");
+        }
     }
 
     public static GlobalConfiguration getInstance() {
@@ -304,6 +340,7 @@ public class GlobalConfiguration extends Part {
     public void save() {
         save(CONFIG_PATH);
     }
+
 
     public RegionScheduler regionScheduler = new RegionScheduler();
     public static class RegionScheduler extends Part {
@@ -641,6 +678,54 @@ public class GlobalConfiguration extends Part {
         public boolean oldExplosionDamageCalculator = false;
         public boolean oldRaidBehavior = false;
         public boolean villagerVoidTrade = false;
+    }
+
+    public CesiumStorage cesiumStorage = new CesiumStorage();
+    public static class CesiumStorage extends Part {
+
+        {
+            option("enabled").docs(
+                "Enables Cesium-Folia as the exclusive live storage engine. This is an experimental, incompatible",
+                "storage format. Existing worlds must be prepared with both global and all-dimensions manifests before enabling."
+            );
+            option("allowUncleanRecovery").docs(
+                "Allows opening Cesium storage whose last shutdown was not clean. Keep disabled unless recovery has",
+                "been explicitly reviewed; enabling this does not fall back to Anvil."
+            );
+            option("backend").docs("Cesium storage backend. The only supported value is lmdb.");
+            option("rootDirectory").docs(
+                "World-relative directory containing both Cesium scopes. Absolute paths and paths escaping the world are rejected."
+            );
+            option("initialMapSizeBytes").docs("Initial sparse LMDB map size in bytes.");
+            option("maximumMapSizeBytes").docs("Maximum sparse LMDB map size in bytes. LMDB grows the map as needed.");
+            option("maximumReaders").docs("Maximum concurrent LMDB reader slots.");
+            option("maximumValueBytes").docs("Maximum uncompressed value size accepted by Cesium storage.");
+            option("compressionLevel").docs("Zstandard compression level used for stored values.");
+            option("maximumCommitAttempts").docs("Maximum immediate LMDB commit attempts before terminal failure.");
+            option("maxBatchOperations").docs("Maximum writes included in one Cesium commit batch.");
+            option("backpressureOperationThreshold").docs("Outstanding write count that activates bounded backpressure.");
+            option("backpressureByteThreshold").docs("Outstanding uncompressed bytes that activate bounded backpressure.");
+            option("initialRetryDelayMillis").docs("Initial delay before retrying a transient commit failure.");
+            option("maximumRetryDelayMillis").docs("Maximum delay between transient commit failure retries.");
+            option("closeTimeoutSeconds").docs("Maximum time allowed for each Cesium flush/close operation.");
+        }
+
+        public String backend = "lmdb";
+        public String rootDirectory = "cesium";
+        public boolean enabled = false;
+        public boolean allowUncleanRecovery = false;
+        public long initialMapSizeBytes = 256L * 1024L * 1024L;
+        public long maximumMapSizeBytes = 1L * 1024L * 1024L * 1024L * 1024L;
+        public int maximumReaders = 256;
+        public int maximumValueBytes = 64 * 1024 * 1024;
+        public int compressionLevel = 3;
+        public int maximumCommitAttempts = 3;
+        public int maxBatchOperations = 4_096;
+        public long backpressureOperationThreshold = 16_384L;
+        public long backpressureByteThreshold = 256L * 1024L * 1024L;
+        public long initialRetryDelayMillis = 10L;
+        public long maximumRetryDelayMillis = 5_000L;
+        public long closeTimeoutSeconds = 30L;
     }
 
     public Networking networking = new Networking();

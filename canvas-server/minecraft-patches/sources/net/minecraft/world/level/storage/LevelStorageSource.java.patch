@@ -1,0 +1,75 @@
+--- a/net/minecraft/world/level/storage/LevelStorageSource.java
++++ b/net/minecraft/world/level/storage/LevelStorageSource.java
+@@ -10,6 +10,8 @@
+ import com.mojang.serialization.Lifecycle;
+ import java.io.BufferedOutputStream;
+ import java.io.BufferedReader;
++import java.io.ByteArrayInputStream;
++import java.io.ByteArrayOutputStream;
+ import java.io.IOException;
+ import java.io.UncheckedIOException;
+ import java.nio.file.FileVisitResult;
+@@ -276,6 +278,14 @@
+     }
+ 
+     private static CompoundTag readLevelDataTagRaw(final Path dataFile) throws IOException {
++        final io.canvasmc.canvas.storage.cesium.CesiumStorageManager cesium = io.canvasmc.canvas.storage.cesium.CesiumStorageManager.current();
++        if (cesium.enabled()) {
++            final byte[] serialized = cesium.readWorldData()
++                .orElseThrow(() -> new IOException("Cesium world metadata is missing"));
++            try (ByteArrayInputStream input = new ByteArrayInputStream(serialized)) {
++                return NbtIo.readCompressed(input, NbtAccounter.uncompressedQuota());
++            }
++        }
+         return NbtIo.readCompressed(dataFile, NbtAccounter.uncompressedQuota());
+     }
+ 
+@@ -460,7 +470,7 @@
+         private DirectoryLock lock;
+         private final LevelStorageSource.LevelDirectory levelDirectory;
+         private final String levelId;
+-        private final Map<LevelResource, Path> resources = Maps.newHashMap();
++        private final Map<LevelResource, Path> resources = Maps.newConcurrentMap(); // Canvas - region threading - accessed by multiple threads, use concurrent equivalent
+ 
+         private LevelStorageAccess(final String levelId, final Path path) throws IOException {
+             this.levelId = levelId;
+@@ -554,6 +564,9 @@
+         }
+ 
+         public Dynamic<?> getUnfixedDataTagWithFallback() throws IOException {
++            if (io.canvasmc.canvas.storage.cesium.CesiumStorageManager.current().enabled()) {
++                return this.getUnfixedDataTag(false);
++            }
+             Dynamic<?> unfixedDataTag;
+             try {
+                 unfixedDataTag = this.getUnfixedDataTag(false);
+@@ -598,6 +611,18 @@
+ 
+         private void saveLevelData(final CompoundTag root) {
+             Path worldDir = this.levelDirectory.path();
++            final io.canvasmc.canvas.storage.cesium.CesiumStorageManager cesium = io.canvasmc.canvas.storage.cesium.CesiumStorageManager.current();
++            if (cesium.enabled()) {
++                try {
++                    final ByteArrayOutputStream serialized = new ByteArrayOutputStream();
++                    NbtIo.writeCompressed(root, serialized);
++                    cesium.writeWorldData(serialized.toByteArray()).toCompletableFuture().join();
++                } catch (final Exception failure) {
++                    LevelStorageSource.LOGGER.error("Failed to save Cesium level {}", worldDir, failure);
++                    throw new IllegalStateException("Failed to save Cesium level metadata", failure);
++                }
++                return;
++            }
+ 
+             try {
+                 Path dataFile = Files.createTempFile(worldDir, "level", ".dat");
+@@ -719,7 +744,9 @@
+         }
+ 
+         public boolean hasWorldData() {
+-            return Files.exists(this.levelDirectory.dataFile()) || Files.exists(this.levelDirectory.oldDataFile());
++            final io.canvasmc.canvas.storage.cesium.CesiumStorageManager cesium = io.canvasmc.canvas.storage.cesium.CesiumStorageManager.current();
++            return cesium.enabled() ? cesium.readWorldData().isPresent()
++                : Files.exists(this.levelDirectory.dataFile()) || Files.exists(this.levelDirectory.oldDataFile());
+         }
+ 
+         @Override

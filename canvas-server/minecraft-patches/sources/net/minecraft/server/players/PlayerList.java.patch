@@ -215,4 +215,11 @@
 +            // Canvas end - per world distance
          }
      }
- 
+@@ -1384,7 +1384,7 @@
+     }
+     public ServerStatsCounter getPlayerStats(final GameProfile gameProfile) {
+             Path targetFile = this.locateStatsFile(gameProfile);
+-            return new ServerStatsCounter(this.server, targetFile);
++            return new ServerStatsCounter(this.server, targetFile, gameProfile.id());
+     }
+     // CraftBukkit end

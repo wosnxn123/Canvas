@@ -4,6 +4,7 @@
          // Paper start - initialize global and world-defaults configuration
          this.paperConfigurations.initializeGlobalConfiguration(this.registryAccess());
          this.paperConfigurations.initializeWorldDefaultsConfiguration(this.registryAccess());
++        this.initializePersistentStorage(true); // Cesium-Folia storage
 +        // Canvas start - pre start server config hook
 +        // we have this here as a per-file patch since we might add more here
 +        io.canvasmc.canvas.GlobalConfiguration.PurpurContainers containers = io.canvasmc.canvas.GlobalConfiguration.getInstance().purpurContainers;

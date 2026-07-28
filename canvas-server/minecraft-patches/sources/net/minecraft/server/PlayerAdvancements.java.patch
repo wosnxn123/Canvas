@@ -1,0 +1,50 @@
+--- a/net/minecraft/server/PlayerAdvancements.java
++++ b/net/minecraft/server/PlayerAdvancements.java
+@@ -110,7 +110,18 @@
+     }
+ 
+     private void load(final ServerAdvancementManager manager) {
+-        if (Files.isRegularFile(this.playerSavePath)) {
++        final io.canvasmc.canvas.storage.cesium.CesiumStorageManager cesium = io.canvasmc.canvas.storage.cesium.CesiumStorageManager.current();
++        if (cesium.enabled()) {
++            cesium.readAdvancement(this.player.getUUID()).ifPresent(serialized -> {
++                try {
++                    JsonElement json = StrictJsonParser.parse(new String(serialized, StandardCharsets.UTF_8));
++                    PlayerAdvancements.Data data = this.codec.parse(JsonOps.INSTANCE, json).getOrThrow(JsonParseException::new);
++                    this.applyFrom(manager, data);
++                } catch (final RuntimeException failure) {
++                    throw new IllegalStateException("Failed to decode Cesium advancements for " + this.player.getUUID(), failure);
++                }
++            });
++        } else if (Files.isRegularFile(this.playerSavePath)) {
+             try (Reader reader = Files.newBufferedReader(this.playerSavePath, StandardCharsets.UTF_8)) {
+                 JsonElement json = StrictJsonParser.parse(reader);
+                 PlayerAdvancements.Data data = this.codec.parse(JsonOps.INSTANCE, json).getOrThrow(JsonParseException::new);
+@@ -129,6 +140,11 @@
+     public void save() {
+         if (org.spigotmc.SpigotConfig.disableAdvancementSaving) return; // Spigot
+         JsonElement json = this.codec.encodeStart(JsonOps.INSTANCE, this.asData()).getOrThrow();
++        final io.canvasmc.canvas.storage.cesium.CesiumStorageManager cesium = io.canvasmc.canvas.storage.cesium.CesiumStorageManager.current();
++        if (cesium.enabled()) {
++            cesium.writeAdvancement(this.player.getUUID(), GSON.toJson(json).getBytes(StandardCharsets.UTF_8));
++            return;
++        }
+ 
+         try {
+             FileUtil.createDirectoriesSafe(this.playerSavePath.getParent());
+@@ -166,6 +182,7 @@
+     }
+ 
+     public boolean award(final AdvancementHolder holder, final String criterion) {
++        ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(this.player, "Cannot award advancement async"); // Canvas - region threading
+         boolean result = false;
+         AdvancementProgress progress = this.getOrStartProgress(holder);
+         boolean wasDone = progress.isDone();
+@@ -208,6 +225,7 @@
+     }
+ 
+     public boolean revoke(final AdvancementHolder advancement, final String criterion) {
++        ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(this.player, "Cannot revoke advancement async"); // Canvas - region threading
+         boolean result = false;
+         AdvancementProgress progress = this.getOrStartProgress(advancement);
+         boolean wasDone = progress.isDone();

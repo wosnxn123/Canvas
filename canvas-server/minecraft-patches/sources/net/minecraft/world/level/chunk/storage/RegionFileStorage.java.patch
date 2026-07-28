@@ -1,0 +1,220 @@
+--- a/net/minecraft/world/level/chunk/storage/RegionFileStorage.java
++++ b/net/minecraft/world/level/chunk/storage/RegionFileStorage.java
+@@ -2,12 +2,15 @@
+ 
+ import it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap;
+ import java.io.DataInputStream;
++import java.io.ByteArrayInputStream;
++import java.io.ByteArrayOutputStream;
+ import java.io.DataOutputStream;
+ import java.io.IOException;
+ import java.nio.file.Path;
+ import net.minecraft.SharedConstants;
+ import net.minecraft.nbt.CompoundTag;
+ import net.minecraft.nbt.NbtAccounter;
++import java.util.Optional;
+ import net.minecraft.nbt.NbtIo;
+ import net.minecraft.nbt.StreamTagVisitor;
+ import net.minecraft.util.ExceptionCollector;
+@@ -23,6 +26,7 @@
+     private final RegionStorageInfo info;
+     private final Path folder;
+     private final boolean sync;
++    private final io.canvasmc.canvas.storage.cesium.CesiumStorageManager.@Nullable RegionStore cesiumStore;
+ 
+     // Paper start - recalculate region file headers
+     private final boolean isChunkData;
+@@ -86,16 +90,20 @@
+ 
+     @Override
+     public final boolean moonrise$doesRegionFileNotExistNoIO(final int chunkX, final int chunkZ) {
+-        return !this.doesRegionFilePossiblyExist(ChunkPos.pack(chunkX >> REGION_SHIFT, chunkZ >> REGION_SHIFT));
++        return this.cesiumStore == null
++            ? !this.doesRegionFilePossiblyExist(ChunkPos.pack(chunkX >> REGION_SHIFT, chunkZ >> REGION_SHIFT))
++            : false;
+     }
+ 
+     @Override
+     public synchronized final RegionFile moonrise$getRegionFileIfLoaded(final int chunkX, final int chunkZ) {
++        if (this.cesiumStore != null) return null;
+         return this.regionCache.getAndMoveToFirst(ChunkPos.pack(chunkX >> REGION_SHIFT, chunkZ >> REGION_SHIFT));
+     }
+ 
+     @Override
+     public synchronized final RegionFile moonrise$getRegionFileIfExists(final int chunkX, final int chunkZ) throws IOException {
++        if (this.cesiumStore != null) return null;
+         final long key = ChunkPos.pack(chunkX >> REGION_SHIFT, chunkZ >> REGION_SHIFT);
+ 
+         RegionFile ret = this.regionCache.getAndMoveToFirst(key);
+@@ -135,6 +143,20 @@
+     public final ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.WriteData moonrise$startWrite(
+         final int chunkX, final int chunkZ, final CompoundTag compound
+     ) throws IOException {
++        if (this.cesiumStore != null) {
++            if (compound == null) {
++                return new ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.WriteData(
++                    null, ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.WriteData.WriteResult.DELETE,
++                    null, null
++                );
++            }
++            final byte[] serialized = serializeCesium(compound);
++            return new ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.WriteData(
++                compound, ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.WriteData.WriteResult.WRITE,
++                null, ignored -> this.cesiumStore.write(chunkX, chunkZ, serialized)
++            );
++        }
++
+         if (compound == null) {
+             return new ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.WriteData(
+                 compound, ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.WriteData.WriteResult.DELETE,
+@@ -175,6 +197,15 @@
+     public final void moonrise$finishWrite(
+         final int chunkX, final int chunkZ, final ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.WriteData writeData
+     ) throws IOException {
++        if (this.cesiumStore != null) {
++            if (writeData.result() == ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.WriteData.WriteResult.DELETE) {
++                this.cesiumStore.write(chunkX, chunkZ, null);
++            } else {
++                writeData.write().run(null);
++            }
++            return;
++        }
++
+         final ChunkPos pos = new ChunkPos(chunkX, chunkZ);
+         if (writeData.result() == ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.WriteData.WriteResult.DELETE) {
+             final RegionFile regionFile = this.moonrise$getRegionFileIfExists(chunkX, chunkZ);
+@@ -192,6 +223,20 @@
+     public final ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.ReadData moonrise$readData(
+         final int chunkX, final int chunkZ
+     ) throws IOException {
++        if (this.cesiumStore != null) {
++            final Optional<byte[]> serialized = this.cesiumStore.read(chunkX, chunkZ);
++            if (serialized.isEmpty()) {
++                return new ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.ReadData(
++                    ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.ReadData.ReadResult.NO_DATA,
++                    null, null, 0
++                );
++            }
++            return new ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.ReadData(
++                ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.ReadData.ReadResult.HAS_DATA,
++                new DataInputStream(new ByteArrayInputStream(serialized.get())), null, 0
++            );
++        }
++
+         final RegionFile regionFile = this.moonrise$getRegionFileIfExists(chunkX, chunkZ);
+ 
+         final DataInputStream input = regionFile == null ? null : regionFile.getChunkDataInputStream(new ChunkPos(chunkX, chunkZ));
+@@ -228,6 +273,22 @@
+     public final CompoundTag moonrise$finishRead(
+         final int chunkX, final int chunkZ, final ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.ReadData readData
+     ) throws IOException {
++        if (this.cesiumStore != null) {
++            try {
++                final CompoundTag ret = NbtIo.read(readData.input());
++                if (this.isChunkData) {
++                    final ChunkPos expected = new ChunkPos(chunkX, chunkZ);
++                    final ChunkPos actual = SerializableChunkData.getChunkCoordinate(ret);
++                    if (!expected.equals(actual)) {
++                        throw new IOException("Cesium chunk coordinate mismatch: requested " + expected + ", stored " + actual);
++                    }
++                }
++                return ret;
++            } finally {
++                readData.input().close();
++            }
++        }
++
+         try {
+             // Paper start - Attempt to recalculate regionfile header if it is corrupt
+             final CompoundTag ret = NbtIo.read(readData.input());
+@@ -271,6 +332,7 @@
+         this.sync = sync;
+         this.info = info;
+         this.isChunkData = info.dfuType()[0] == net.minecraft.util.datafix.DataFixTypes.CHUNK; // Paper - recalculate region file headers
++        this.cesiumStore = io.canvasmc.canvas.storage.cesium.CesiumStorageManager.current().regionStore(info);
+     }
+ 
+     @org.jetbrains.annotations.Contract("_, false -> !null") private @Nullable RegionFile getRegionFile(final ChunkPos pos, boolean existingOnly) throws IOException { // CraftBukkit
+@@ -309,7 +371,7 @@
+ 
+     // Paper start
+     private static void printOversizedLog(String msg, Path file, int x, int z) {
+-        LOGGER.error("{} ({} - {},{}) Go clean it up to remove this message. /minecraft:tp {} 128 {} - DO NOT REPORT THIS TO PAPER - You may ask for help on Discord, but do not file an issue. These error messages can not be removed.", msg, file.toString().replaceAll(".+[\\\\/]", ""), x, z, x << 4, z << 4);
++        LOGGER.error("{} ({} - {},{}) Go clean it up to remove this message. /minecraft:tp {} 128 {} - DO NOT REPORT THIS TO {} - You may ask for help on Discord, but do not file an issue. These error messages can not be removed.", msg, file.toString().replaceAll(".+[\\\\/]", ""), x, z, x << 4, z << 4, io.papermc.paper.ServerBuildInfo.buildInfo().brandName().toUpperCase()); // Canvas - Rebrand
+     }
+ 
+     private static CompoundTag readOversizedChunk(RegionFile regionfile, ChunkPos chunkCoordinate) throws IOException {
+@@ -345,6 +407,11 @@
+     // Paper end
+ 
+     public @Nullable CompoundTag read(final ChunkPos pos) throws IOException {
++        if (this.cesiumStore != null) {
++            final Optional<byte[]> serialized = this.cesiumStore.read(pos.x(), pos.z());
++            return serialized.isEmpty() ? null : deserializeCesium(serialized.get());
++        }
++
+         // CraftBukkit start - SPIGOT-5680: There's no good reason to preemptively create files on read, save that for writing
+         RegionFile region = this.getRegionFile(pos, true);
+         if (region == null) {
+@@ -382,6 +449,16 @@
+     }
+ 
+     public void scanChunk(final ChunkPos pos, final StreamTagVisitor scanner) throws IOException {
++        if (this.cesiumStore != null) {
++            final Optional<byte[]> serialized = this.cesiumStore.read(pos.x(), pos.z());
++            if (serialized.isPresent()) {
++                try (DataInputStream input = new DataInputStream(new ByteArrayInputStream(serialized.get()))) {
++                    NbtIo.parse(input, scanner, NbtAccounter.unlimitedHeap());
++                }
++            }
++            return;
++        }
++
+         // CraftBukkit start - SPIGOT-5680: There's no good reason to preemptively create files on read, save that for writing
+         RegionFile region = this.getRegionFile(pos, true);
+         if (region == null) {
+@@ -397,6 +474,11 @@
+     }
+ 
+     public void write(final ChunkPos pos, final @Nullable CompoundTag value) throws IOException {
++        if (this.cesiumStore != null) {
++            this.cesiumStore.write(pos.x(), pos.z(), value == null ? null : serializeCesium(value));
++            return;
++        }
++
+         if (!SharedConstants.DEBUG_DONT_SAVE_WORLD) {
+             RegionFile region = this.getRegionFile(pos, value == null); // CraftBukkit // Paper - rewrite chunk system
+             // Paper start - rewrite chunk system
+@@ -443,6 +525,11 @@
+     }
+ 
+     public void flush() throws IOException {
++        if (this.cesiumStore != null) {
++            this.cesiumStore.flush();
++            return;
++        }
++
+         // Paper start - rewrite chunk system
+         synchronized (this) {
+             final ExceptionCollector<IOException> exceptionCollector = new ExceptionCollector<>();
+@@ -459,6 +546,20 @@
+         // Paper end - rewrite chunk system
+     }
+ 
++    private static byte[] serializeCesium(final CompoundTag value) throws IOException {
++        final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
++        try (DataOutputStream output = new DataOutputStream(bytes)) {
++            NbtIo.write(value, output);
++        }
++        return bytes.toByteArray();
++    }
++
++    private static CompoundTag deserializeCesium(final byte[] value) throws IOException {
++        try (DataInputStream input = new DataInputStream(new ByteArrayInputStream(value))) {
++            return NbtIo.read(input);
++        }
++    }
++
+     public RegionStorageInfo info() {
+         return this.info;
+     }

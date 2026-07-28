@@ -45,3 +45,88 @@
      public boolean enforceSecureProfile() {
          return false;
      }
+@@ -545,7 +545,7 @@
+             throw new IllegalStateException("Missing Overworld dimension data");
+         }
+ 
+-        this.savedDataStorage = new SavedDataStorage(storageSource.getLevelPath(LevelResource.ROOT).resolve(LevelResource.DATA.id()), fixerUpper, this.registries.compositeAccess()); // Paper - save in level storage
++        this.savedDataStorage = new SavedDataStorage(storageSource.getLevelPath(LevelResource.ROOT).resolve(LevelResource.DATA.id()), fixerUpper, this.registries.compositeAccess(), Level.OVERWORLD); // Paper - save in level storage
+         this.worldData = worldStem.worldDataAndGenSettings().data();
+         this.worldGenSettings = worldStem.worldDataAndGenSettings().genSettings();
+         // this.savedDataStorage.set(WorldGenSettings.TYPE, this.worldGenSettings); // Paper - save in level storage
+@@ -558,7 +558,6 @@
+         // Paper - per-level load listener - move LevelLoadListener to ServerLevel
+         this.storageSource = storageSource;
+         this.playerDataStorage = storageSource.createPlayerStorage();
+-        this.randomSequences = this.savedDataStorage.computeIfAbsent(RandomSequences.TYPE);
+         // Paper - per-level WeatherData
+         // Paper - per-level GameRules
+         this.fixerUpper = fixerUpper;
+@@ -574,10 +573,6 @@
+         this.notificationManager = notificationManager;
+         this.serverActivityMonitor = new ServerActivityMonitor(notificationManager, 30);
+         this.packetProcessor = null; // Folia - region threading
+-        this.clockManager = this.getDataStorage().computeIfAbsent(ServerClockManager.TYPE);
+-        this.clockManager.init(this);
+-        this.customBossEvents = this.savedDataStorage.computeIfAbsent(CustomBossEvents.TYPE);
+-        this.pearls = this.savedDataStorage.computeIfAbsent(io.canvasmc.canvas.threadedregions.entities.EnderPearls.TYPE); // Canvas - region threading
+         // Paper - per-level scheduledEvents
+         // CraftBukkit start
+         this.options = options;
+@@ -586,6 +581,22 @@
+         Runtime.getRuntime().addShutdownHook(new org.bukkit.craftbukkit.util.ServerShutdownThread(this));
+         // CraftBukkit end
+         this.paperConfigurations = services.paper().configurations(); // Paper - add paper configuration files
++    }
++
++    protected final void initializePersistentStorage(final boolean configureCesium) {
++        if (this.randomSequences != null) {
++            throw new IllegalStateException("Persistent storage is already initialized");
++        }
++        if (configureCesium) {
++            final Path worldRoot = this.storageSource.getLevelPath(LevelResource.ROOT);
++            final boolean existingWorld = Files.isRegularFile(this.storageSource.getLevelPath(LevelResource.LEVEL_DATA_FILE));
++            io.canvasmc.canvas.storage.cesium.CesiumStorageManager.open(worldRoot, existingWorld);
++        }
++        this.randomSequences = this.savedDataStorage.computeIfAbsent(RandomSequences.TYPE);
++        this.clockManager = this.savedDataStorage.computeIfAbsent(ServerClockManager.TYPE);
++        this.clockManager.init(this);
++        this.customBossEvents = this.savedDataStorage.computeIfAbsent(CustomBossEvents.TYPE);
++        this.pearls = this.savedDataStorage.computeIfAbsent(io.canvasmc.canvas.threadedregions.entities.EnderPearls.TYPE);
+     }
+ 
+     protected abstract boolean initServer() throws IOException;
+@@ -678,7 +689,7 @@
+     ) {
+         final WorldOptions worldOptions = worldDataAndGenSettings.genSettings().options();
+         final ResourceKey<Level> dimensionKey = loading.info().dimensionKey();
+-        final SavedDataStorage savedDataStorage = new SavedDataStorage(this.storageSource.getDimensionPath(dimensionKey).resolve(LevelResource.DATA.id()), this.getFixerUpper(), this.registryAccess());
++        final SavedDataStorage savedDataStorage = new SavedDataStorage(this.storageSource.getDimensionPath(dimensionKey).resolve(LevelResource.DATA.id()), this.getFixerUpper(), this.registryAccess(), dimensionKey);
+         savedDataStorage.set(WorldGenSettings.TYPE, new WorldGenSettings(worldDataAndGenSettings.genSettings().options(), worldDataAndGenSettings.genSettings().dimensions()));
+         long seed = worldOptions.seed();
+         long biomeZoomSeed = BiomeManager.obfuscateSeed(seed);
+@@ -1116,9 +1127,12 @@
+         this.savedDataStorage.close();
+         this.resources.close();
+ 
++        // Region tasks only guarantee that writes reached the Cesium commit pump. Drain the pump
++        // after every producer is stopped and before publishing clean manifests.
+         LOGGER.info("Waiting for all RegionFile I/O tasks to complete...");
+         ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.flush((MinecraftServer)(Object)this);
+         LOGGER.info("All RegionFile I/O tasks complete");
++        io.canvasmc.canvas.storage.cesium.CesiumStorageManager.current().flushAndClose(!this.abnormalExit);
+ 
+         try {
+             this.storageSource.close();
+@@ -1144,6 +1158,11 @@
+         Util.shutdownExecutors();
+         this.onServerExit();
+         // Paper end - Improved watchdog support - move final shutdown items here
++    }
++
++    public void cesium$storageFailed() {
++        this.abnormalExit = true;
++        this.halt(false);
+     }
+ 
+     public String getLocalIp() {
