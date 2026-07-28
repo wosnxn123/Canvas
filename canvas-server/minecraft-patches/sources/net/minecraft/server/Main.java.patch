@@ -49,7 +49,7 @@
  
              // Paper start - Detect headless JRE
              String awtException = io.papermc.paper.util.ServerEnvironment.awtDependencyCheck();
-@@ -198,6 +198,11 @@
+@@ -198,6 +_,11 @@
              String levelName = Optional.ofNullable((String) options.valueOf("world")).orElse(settings.getProperties().levelName); // CraftBukkit
              LevelStorageSource levelStorageSource = LevelStorageSource.createDefault(universePath.toPath());
              LevelStorageSource.LevelStorageAccess access = levelStorageSource.validateAndCreateAccess(levelName);
@@ -61,7 +61,7 @@
              Dynamic<?> levelDataTag;
              if (access.hasWorldData()) {
                  Dynamic<?> levelDataUnfixed;
-@@ -205,17 +210,20 @@
+@@ -205,17 +_,20 @@
                      levelDataUnfixed = access.getUnfixedDataTagWithFallback();
                  } catch (IOException | NbtException | ReportedNbtException ex) {
                      LOGGER.error("Failed to load world data. World files may be corrupted. Shutting down.", ex);
@@ -82,7 +82,7 @@
                      return;
                  }
  
-@@ -300,6 +308,7 @@
+@@ -300,6 +_,7 @@
                  LOGGER.warn(
                      "Failed to load datapacks, can't proceed with server load. You can either fix your datapacks or reset to vanilla with --safeMode", e
                  );
@@ -90,7 +90,7 @@
                  return;
              }
  
-@@ -370,6 +379,15 @@
+@@ -370,6 +_,15 @@
              */ // CraftBukkit end
          } catch (Throwable t) {
              LOGGER.error(LogUtils.FATAL_MARKER, "Failed to start the minecraft server", t);
