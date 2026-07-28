@@ -19,7 +19,7 @@
      paperclip("io.papermc:paperclip:3.0.4")
  }
  
-+val mergeMinecraftATs by tasks.registering<MergeAccessTransforms> {
++val mergeMinecraftATs = tasks.register<MergeAccessTransforms>("mergeMinecraftATs") {
 +    firstFile.set(paperweight.activeFork.flatMap { it.buildDataDir.file("${it.name}.at") })
 +    secondFile.set(paperweight.activeFork.flatMap { it.buildDataDir.file("folia.at") })
 +}
@@ -67,6 +67,15 @@
 +}
  configurations.named(log4jPlugins.compileClasspathConfigurationName) {
      extendsFrom(configurations.compileClasspath.get())
+ }
+@@ -93,6 +_,6 @@
+-val alsoShade: Configuration by configurations.creating
++val alsoShade = configurations.create("alsoShade")
+ 
+-val runtimeConfiguration by configurations.consumable("runtimeConfiguration") {
++val runtimeConfiguration = configurations.consumable("runtimeConfiguration") {
+     attributes.attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage.JAVA_RUNTIME))
+     extendsFrom(configurations.getByName(sourceSets.main.get().runtimeElementsConfigurationName))
  }
 @@ -109,12 +_,14 @@
  }
@@ -146,6 +155,15 @@
          )
          for (tld in setOf("net", "com", "org")) {
              attributes("$tld/bukkit", "Sealed" to true)
+@@ -209,7 +_,7 @@
+     options.forkOptions.memoryMaximumSize = "1G"
+ }
+ 
+-val scanJarForBadCalls by tasks.registering(io.papermc.paperweight.tasks.ScanJarForBadCalls::class) {
++val scanJarForBadCalls = tasks.register<io.papermc.paperweight.tasks.ScanJarForBadCalls>("scanJarForBadCalls") {
+     badAnnotations.add("Lio/papermc/paper/annotation/DoNotUse;")
+     jarToScan.set(tasks.jar.flatMap { it.archiveFile })
+     classpath.from(configurations.compileClasspath)
 @@ -273,17 +_,18 @@
      javaLauncher.set(project.javaToolchains.launcherFor {
          languageVersion.set(JavaLanguageVersion.of(25))
