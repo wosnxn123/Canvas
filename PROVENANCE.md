@@ -198,6 +198,30 @@ whose full license texts now live in
 and
 [`licenses/MIT.md`](https://github.com/LophineLabs/Lophine/blob/dev/26.2-hardfork/licenses/MIT.md).
 
+### Cesium dimension-qualified `PaperWorldLoader` route
+
+Recorded 2026-07-29 after the cloud-built server failed during first-world
+initialisation with `IllegalStateException: Cesium saved-data storage requires a
+dimension-qualified key`, raised by `SavedDataStorage.cesiumStore` while
+`io.papermc.paper.world.PaperWorldLoader.loadWorldData` read Paper's world
+metadata. The Paper baseline in this checkout was using the legacy
+three-argument `SavedDataStorage` constructor even though the call has a
+dimension key available.
+
+Classification: **Independent**. No external implementation was copied. The
+tracked patch is derived from the observed stack trace and the existing
+dimension-aware four-argument constructor added by this fork's Cesium storage
+integration. It changes only the `PaperWorldLoader` call to pass its `dimension`
+key, preserving separate global and per-dimension SavedData namespaces.
+
+Evidence and affected path:
+
+- Baseline source: `paper-server/src/main/java/io/papermc/paper/world/PaperWorldLoader.java`
+  at imported Paper commit `0c0b37a7aeda044533e66f162d73bdb4f8e5b9c6`.
+- Failure observation: cloud run `30422079995`, whose startup stack reached
+  `PaperWorldLoader.loadWorldData` and rejected the dimensionless key.
+- Fix: `canvas-server/paper-patches/files/src/main/java/io/papermc/paper/world/PaperWorldLoader.java.patch`.
+
 ### License notices
 
 - Repository license: [`LICENSE`](LICENSE)

@@ -1,0 +1,11 @@
+--- a/src/main/java/io/papermc/paper/world/PaperWorldLoader.java
++++ b/src/main/java/io/papermc/paper/world/PaperWorldLoader.java
+@@ -100,7 +100,7 @@
+         final var storageSource = server.storageSource;
+         final var registryAccess = server.registryAccess();
+ 
+-        final SavedDataStorage tempStorage = new SavedDataStorage(storageSource.getDimensionPath(dimension).resolve(LevelResource.DATA.id()), DataFixers.getDataFixer(), registryAccess);
++        final SavedDataStorage tempStorage = new SavedDataStorage(storageSource.getDimensionPath(dimension).resolve(LevelResource.DATA.id()), dimension, DataFixers.getDataFixer(), registryAccess);
+         final PaperWorldMetadata metadata = tempStorage.get(PaperWorldMetadata.TYPE);
+         final PaperWorldPDC pdc = tempStorage.get(PaperWorldPDC.TYPE);
+         final PaperLevelOverrides levelOverrides = tempStorage.get(PaperLevelOverrides.TYPE);
