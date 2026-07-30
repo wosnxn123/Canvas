@@ -1,0 +1,26 @@
+--- a/net/minecraft/stats/ServerStatsCounter.java
++++ b/net/minecraft/stats/ServerStatsCounter.java
+@@ -65,8 +_,11 @@
+ 
+     public ServerStatsCounter(final MinecraftServer server, final Path file) {
+         this.file = file;
+-        if (Files.isRegularFile(file)) {
+-            try (Reader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
++        // Folesium start - route <world>/stats/<uuid>.json through the player store.
++        // FolesiumPlayerFiles falls straight through to java.nio Files when Folesium is off
++        // or the path is not a per-player JSON of the active world, so behaviour is unchanged.
++        if (dev.folesium.integration.FolesiumPlayerFiles.isRegularFile(file)) { // Folesium
++            try (Reader reader = dev.folesium.integration.FolesiumPlayerFiles.newBufferedReader(file)) { // Folesium
+                 JsonElement element = StrictJsonParser.parse(reader);
+                 this.parse(server.getFixerUpper(), element);
+             } catch (IOException e) {
+@@ -93,7 +_,8 @@
+         try {
+             FileUtil.createDirectoriesSafe(this.file.getParent());
+ 
+-            try (Writer writer = Files.newBufferedWriter(this.file, StandardCharsets.UTF_8)) {
++            // Folesium - commit the JSON to the player store; the writer is atomic on close
++            try (Writer writer = dev.folesium.integration.FolesiumPlayerFiles.newBufferedWriter(this.file)) {
+                 GSON.toJson(this.toJson(), GSON.newJsonWriter(writer));
+             }
+         } catch (IOException | JsonIOException e) {

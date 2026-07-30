@@ -1,0 +1,59 @@
+--- a/net/minecraft/world/level/storage/PlayerDataStorage.java
++++ b/net/minecraft/world/level/storage/PlayerDataStorage.java
+@@ -23,11 +_,21 @@
+     private static final Logger LOGGER = LogUtils.getLogger();
+     private final File playerDir;
+     protected final DataFixer fixerUpper;
++    // Folesium start - player data in the sharded store instead of one file per player
++    /**
++     * Non-null when Folesium is enabled. Player NBT is then read from and written to the
++     * world-root store ({@code <world>/folesium}, role=players) instead of
++     * {@code playerdata/<uuid>.dat}. Reads fall back to the vanilla file for players not
++     * migrated yet, and the vanilla files are never deleted.
++     */
++    public final dev.folesium.integration.FolesiumPlayerStorage folesium;
++    // Folesium end - player data in the sharded store instead of one file per player
+ 
+     public PlayerDataStorage(final LevelStorageSource.LevelStorageAccess levelAccess, final DataFixer fixerUpper) {
+         this.fixerUpper = fixerUpper;
+         this.playerDir = levelAccess.getLevelPath(LevelResource.PLAYER_DATA_DIR).toFile();
+         this.playerDir.mkdirs();
++        this.folesium = dev.folesium.integration.FolesiumPlayerStorage.createIfEnabled(this.playerDir.toPath().getParent()); // Folesium - the store lives at the save root, next to playerdata/
+     }
+ 
+     public void save(final Player player) {
+@@ -35,6 +_,12 @@
+         try (ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(player.problemPath(), LOGGER)) {
+             TagValueOutput output = TagValueOutput.createWithContext(reporter, player.registryAccess());
+             player.saveWithoutId(output);
++            // Folesium start - one append into the store, no temp file / rename / fsync trio
++            if (this.folesium != null) {
++                this.folesium.savePlayer(player.getUUID(), output.buildResult());
++                return;
++            }
++            // Folesium end
+             Path playerDirPath = this.playerDir.toPath();
+             Path tmpFile = Files.createTempFile(playerDirPath, player.getStringUUID() + "-", ".dat");
+             CompoundTag dataToStore = output.buildResult();
+@@ -91,6 +_,21 @@
+     }
+ 
+     public Optional<CompoundTag> load(final NameAndId nameAndId) {
++        // Folesium start - read from the store; fall through to the files when absent
++        if (this.folesium != null) {
++            try {
++                CompoundTag stored = this.folesium.loadPlayer(nameAndId.id());
++                if (stored != null) {
++                    int storedVersion = NbtUtils.getDataVersion(stored);
++                    return Optional.of(ca.spottedleaf.dataconverter.minecraft.MCDataConverter.convertTag(ca.spottedleaf.dataconverter.minecraft.datatypes.MCTypeRegistry.PLAYER, stored, storedVersion, ca.spottedleaf.dataconverter.minecraft.util.Version.getCurrentVersion()));
++                }
++            } catch (Exception e) {
++                LOGGER.warn("Failed to load Folesium player data for {}, falling back to the vanilla files", nameAndId.name(), e);
++            }
++            // Not in the store: let vanilla handle it. That covers lazy migration of
++            // playerdata/<uuid>.dat as well as .dat_old, offline-mode UUID files and backups.
++        }
++        // Folesium end
+         Optional<CompoundTag> optTag = this.load(nameAndId, ".dat");
+         if (optTag.isEmpty()) {
+             this.backup(nameAndId, ".dat");

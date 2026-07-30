@@ -1,0 +1,154 @@
+/*
+ * Folesium
+ * Copyright (C) 2026 Folesium contributors
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+package dev.folesium.integration;
+
+import dev.folesium.converter.PlayerPathRecognizer;
+
+import java.io.IOException;
+import java.io.Reader;
+import java.io.StringReader;
+import java.io.StringWriter;
+import java.io.Writer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.UUID;
+
+/**
+ * Drop-in replacements for the three {@code java.nio.file.Files} calls that
+ * {@code PlayerAdvancements} and {@code ServerStatsCounter} use to read and write
+ * {@code <world>/advancements/<uuid>.json} and {@code <world>/stats/<uuid>.json}.
+ *
+ * <p>Both classes follow the same shape — {@code Files.isRegularFile(path)} to decide
+ * whether there is anything to load, then {@code Files.newBufferedReader} /
+ * {@code Files.newBufferedWriter} for the JSON itself. Routing those three calls
+ * through here redirects the data into the Folesium player store without touching any
+ * of the surrounding parsing, codec or data-fixer logic, which keeps the server patch
+ * to one changed line per call site.</p>
+ *
+ * <p>When Folesium is disabled, or the path is not a per-player JSON file of the active
+ * world, every method falls straight through to {@code Files}, so behaviour is exactly
+ * vanilla.</p>
+ *
+ * <p>The path classification itself lives in
+ * {@link PlayerPathRecognizer} (vendored with the engine), so the rule can be
+ * unit-tested without pulling in the {@code net.minecraft} packages — see
+ * {@code PlayerPathRecognizerTest}.</p>
+ */
+public final class FolesiumPlayerFiles {
+
+    private FolesiumPlayerFiles() {
+    }
+
+    /** Which keyspace a per-player JSON path belongs to, or {@code null} if it is not one. */
+    private record Target(FolesiumPlayerStorage storage, String directory, UUID player) {
+    }
+
+    private static Target target(Path path) {
+        FolesiumPlayerStorage storage = FolesiumPlayerStorage.active();
+        if (storage == null || path == null) {
+            return null;
+        }
+        PlayerPathRecognizer rec = new PlayerPathRecognizer(storage.worldRootForClassify());
+        PlayerPathRecognizer.Kind kind = rec.classify(path);
+        if (kind == null) {
+            return null;
+        }
+        return new Target(storage, kind.directory(), kind.player());
+    }
+
+    private static String load(Target t) throws IOException {
+        return t.directory().equals(PlayerPathRecognizer.DIR_ADVANCEMENTS)
+                ? t.storage().loadAdvancements(t.player())
+                : t.storage().loadStats(t.player());
+    }
+
+    private static void store(Target t, String json) {
+        if (t.directory().equals(PlayerPathRecognizer.DIR_ADVANCEMENTS)) {
+            t.storage().saveAdvancements(t.player(), json);
+        } else {
+            t.storage().saveStats(t.player(), json);
+        }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Files.* replacements                                                */
+    /* ------------------------------------------------------------------ */
+
+    /** Replacement for {@code Files.isRegularFile(path)}. */
+    public static boolean isRegularFile(Path path) {
+        Target t = target(path);
+        if (t == null) {
+            return Files.isRegularFile(path);
+        }
+        try {
+            // load() already falls back to the vanilla file, so a `true` here means
+            // "there is data to read", whether it lives in the store or still on disk.
+            return load(t) != null;
+        } catch (IOException e) {
+            return Files.isRegularFile(path);
+        }
+    }
+
+    /** Replacement for {@code Files.newBufferedReader(path, UTF_8)}. */
+    public static Reader newBufferedReader(Path path) throws IOException {
+        Target t = target(path);
+        if (t == null) {
+            return Files.newBufferedReader(path, StandardCharsets.UTF_8);
+        }
+        String json = load(t);
+        if (json == null) {
+            throw new java.io.FileNotFoundException("no stored player JSON for " + t.player());
+        }
+        return new StringReader(json);
+    }
+
+    /**
+     * Replacement for {@code Files.newBufferedWriter(path, UTF_8)}. The returned writer
+     * buffers in memory and commits the record to the store on {@code close()}, which is
+     * what makes the write atomic: a partially written record can never be observed,
+     * unlike the vanilla truncate-then-write on the real file.
+     */
+    public static Writer newBufferedWriter(Path path) throws IOException {
+        Target t = target(path);
+        if (t == null) {
+            return Files.newBufferedWriter(path, StandardCharsets.UTF_8);
+        }
+        return new StoreWriter(t);
+    }
+
+    private static final class StoreWriter extends StringWriter {
+        private final Target target;
+        private boolean committed;
+
+        StoreWriter(Target target) {
+            super(8 * 1024);
+            this.target = target;
+        }
+
+        @Override
+        public void close() throws IOException {
+            super.close();
+            if (!committed) {
+                committed = true;
+                store(target, getBuffer().toString());
+            }
+        }
+    }
+}

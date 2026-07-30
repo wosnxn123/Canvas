@@ -1,0 +1,26 @@
+--- a/net/minecraft/server/PlayerAdvancements.java
++++ b/net/minecraft/server/PlayerAdvancements.java
+@@ -110,8 +_,11 @@
+     }
+ 
+     private void load(final ServerAdvancementManager manager) {
+-        if (Files.isRegularFile(this.playerSavePath)) {
+-            try (Reader reader = Files.newBufferedReader(this.playerSavePath, StandardCharsets.UTF_8)) {
++        // Folesium start - route <world>/advancements/<uuid>.json through the player store.
++        // FolesiumPlayerFiles falls straight through to java.nio Files when Folesium is off
++        // or the path is not a per-player JSON of the active world, so behaviour is unchanged.
++        if (dev.folesium.integration.FolesiumPlayerFiles.isRegularFile(this.playerSavePath)) { // Folesium
++            try (Reader reader = dev.folesium.integration.FolesiumPlayerFiles.newBufferedReader(this.playerSavePath)) { // Folesium
+                 JsonElement json = StrictJsonParser.parse(reader);
+                 PlayerAdvancements.Data data = this.codec.parse(JsonOps.INSTANCE, json).getOrThrow(JsonParseException::new);
+                 this.applyFrom(manager, data);
+@@ -133,7 +_,8 @@
+         try {
+             FileUtil.createDirectoriesSafe(this.playerSavePath.getParent());
+ 
+-            try (Writer outputWriter = Files.newBufferedWriter(this.playerSavePath, StandardCharsets.UTF_8)) {
++            // Folesium - commit the JSON to the player store; the writer is atomic on close
++            try (Writer outputWriter = dev.folesium.integration.FolesiumPlayerFiles.newBufferedWriter(this.playerSavePath)) {
+                 GSON.toJson(json, GSON.newJsonWriter(outputWriter));
+             }
+         } catch (IOException | JsonIOException e) {

@@ -1,0 +1,97 @@
+/*
+ * Folesium
+ * Copyright (C) 2026 Folesium contributors
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+package dev.folesium.core.util;
+
+import dev.folesium.core.FolesiumConfig.Compression;
+import dev.folesium.core.util.ZstdNative;
+
+import java.io.ByteArrayOutputStream;
+import java.util.zip.DataFormatException;
+import java.util.zip.Deflater;
+import java.util.zip.Inflater;
+
+/** Pure-Java per-record compression. Thread-safe (no shared state). */
+public final class Compressors {
+    private Compressors() {
+    }
+
+    public static byte[] compress(Compression c, int level, byte[] raw) {
+        return switch (c) {
+            case NONE -> raw;
+            case DEFLATE -> deflate(raw, level);
+            case ZSTD -> zstdCompress(raw, level);
+        };
+    }
+
+    public static byte[] decompress(Compression c, byte[] stored, int rawLen) {
+        return switch (c) {
+            case NONE -> stored;
+            case DEFLATE -> inflate(stored, rawLen);
+            case ZSTD -> zstdInflate(stored, rawLen);
+        };
+    }
+
+    private static byte[] deflate(byte[] raw, int level) {
+        Deflater d = new Deflater(level);
+        try {
+            d.setInput(raw);
+            d.finish();
+            ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(64, raw.length / 3));
+            byte[] buf = new byte[8192];
+            while (!d.finished()) {
+                out.write(buf, 0, d.deflate(buf));
+            }
+            return out.toByteArray();
+        } finally {
+            d.end();
+        }
+    }
+
+    private static byte[] inflate(byte[] stored, int rawLen) {
+        Inflater inf = new Inflater();
+        try {
+            inf.setInput(stored);
+            byte[] out = new byte[rawLen];
+            int off = 0;
+            while (off < rawLen && !inf.finished()) {
+                int n = inf.inflate(out, off, rawLen - off);
+                if (n == 0 && inf.needsInput()) {
+                    throw new IllegalStateException("Truncated compressed record");
+                }
+                off += n;
+            }
+            if (off != rawLen) {
+                throw new IllegalStateException("Decompressed size mismatch: " + off + " != " + rawLen);
+            }
+            return out;
+        } catch (DataFormatException e) {
+            throw new IllegalStateException("Corrupt compressed record", e);
+        } finally {
+            inf.end();
+        }
+    }
+
+    private static byte[] zstdCompress(byte[] raw, int level) {
+        return ZstdNative.compress(raw, level);
+    }
+
+    private static byte[] zstdInflate(byte[] stored, int rawLen) {
+        return ZstdNative.decompress(stored, rawLen);
+    }
+}

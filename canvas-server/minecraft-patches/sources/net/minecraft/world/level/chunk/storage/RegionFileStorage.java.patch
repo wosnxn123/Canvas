@@ -1,0 +1,179 @@
+--- a/net/minecraft/world/level/chunk/storage/RegionFileStorage.java
++++ b/net/minecraft/world/level/chunk/storage/RegionFileStorage.java
+@@ -26,6 +_,15 @@
+ 
+     // Paper start - recalculate region file headers
+     private final boolean isChunkData;
++    // Folesium start - sharded crash-safe chunk storage
++    /**
++     * Non-null when Folesium is enabled ({@code -Dfolesium.enabled=true} or
++     * {@code folesium.properties}). When set, every read/write of this storage is
++     * routed to the per-dimension Folesium store instead of {@code .mca} region files.
++     * The vanilla {@link RegionFile} cache below stays empty in that case.
++     */
++    public final dev.folesium.integration.FolesiumRegionStorage folesium;
++    // Folesium end - sharded crash-safe chunk storage
+ 
+     @Nullable
+     public static ChunkPos getRegionFileCoordinates(Path file) {
+@@ -86,16 +_,23 @@
+ 
+     @Override
+     public final boolean moonrise$doesRegionFileNotExistNoIO(final int chunkX, final int chunkZ) {
++        // Folesium start - no region files exist; the store answers existence queries itself
++        if (this.folesium != null) {
++            return false;
++        }
++        // Folesium end
+         return !this.doesRegionFilePossiblyExist(ChunkPos.pack(chunkX >> REGION_SHIFT, chunkZ >> REGION_SHIFT));
+     }
+ 
+     @Override
+     public synchronized final RegionFile moonrise$getRegionFileIfLoaded(final int chunkX, final int chunkZ) {
++        if (this.folesium != null) return null; // Folesium - no RegionFile objects exist
+         return this.regionCache.getAndMoveToFirst(ChunkPos.pack(chunkX >> REGION_SHIFT, chunkZ >> REGION_SHIFT));
+     }
+ 
+     @Override
+     public synchronized final RegionFile moonrise$getRegionFileIfExists(final int chunkX, final int chunkZ) throws IOException {
++        if (this.folesium != null) return null; // Folesium - no RegionFile objects exist
+         final long key = ChunkPos.pack(chunkX >> REGION_SHIFT, chunkZ >> REGION_SHIFT);
+ 
+         RegionFile ret = this.regionCache.getAndMoveToFirst(key);
+@@ -142,6 +_,16 @@
+             );
+         }
+ 
++        // Folesium start - serialise off the region thread, store on finishWrite
++        if (this.folesium != null) {
++            final byte[] serialised = dev.folesium.integration.FolesiumRegionStorage.serialise(compound);
++            return new ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.WriteData(
++                compound, ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.WriteData.WriteResult.WRITE,
++                null, (final RegionFile unused) -> this.folesium.writeRaw(chunkX, chunkZ, serialised)
++            );
++        }
++        // Folesium end
++
+         final ChunkPos pos = new ChunkPos(chunkX, chunkZ);
+         final RegionFile regionFile = this.getRegionFile(pos);
+ 
+@@ -175,6 +_,17 @@
+     public final void moonrise$finishWrite(
+         final int chunkX, final int chunkZ, final ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.WriteData writeData
+     ) throws IOException {
++        // Folesium start
++        if (this.folesium != null) {
++            if (writeData.result() == ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.WriteData.WriteResult.DELETE) {
++                this.folesium.delete(chunkX, chunkZ);
++            } else {
++                writeData.write().run(null); // lambda from startWrite ignores the RegionFile
++            }
++            return;
++        }
++        // Folesium end
++
+         final ChunkPos pos = new ChunkPos(chunkX, chunkZ);
+         if (writeData.result() == ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.WriteData.WriteResult.DELETE) {
+             final RegionFile regionFile = this.moonrise$getRegionFileIfExists(chunkX, chunkZ);
+@@ -192,6 +_,18 @@
+     public final ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.ReadData moonrise$readData(
+         final int chunkX, final int chunkZ
+     ) throws IOException {
++        // Folesium start - decompress + parse on the IO thread, hand the tag straight back
++        if (this.folesium != null) {
++            final CompoundTag data = this.folesium.read(chunkX, chunkZ);
++            return new ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.ReadData(
++                data == null
++                    ? ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.ReadData.ReadResult.NO_DATA
++                    : ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.ReadData.ReadResult.SYNC_READ,
++                null, data, 0
++            );
++        }
++        // Folesium end
++
+         final RegionFile regionFile = this.moonrise$getRegionFileIfExists(chunkX, chunkZ);
+ 
+         final DataInputStream input = regionFile == null ? null : regionFile.getChunkDataInputStream(new ChunkPos(chunkX, chunkZ));
+@@ -228,6 +_,11 @@
+     public final CompoundTag moonrise$finishRead(
+         final int chunkX, final int chunkZ, final ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionDataController.ReadData readData
+     ) throws IOException {
++        // Folesium start - readData already returned SYNC_READ/NO_DATA, there is no stream to finish
++        if (this.folesium != null) {
++            return readData.syncRead();
++        }
++        // Folesium end
+         try {
+             // Paper start - Attempt to recalculate regionfile header if it is corrupt
+             final CompoundTag ret = NbtIo.read(readData.input());
+@@ -271,6 +_,7 @@
+         this.sync = sync;
+         this.info = info;
+         this.isChunkData = info.dfuType()[0] == net.minecraft.util.datafix.DataFixTypes.CHUNK; // Paper - recalculate region file headers
++        this.folesium = dev.folesium.integration.FolesiumRegionStorage.createIfEnabled(folder); // Folesium - sharded crash-safe chunk storage
+     }
+ 
+     @org.jetbrains.annotations.Contract("_, false -> !null") private @Nullable RegionFile getRegionFile(final ChunkPos pos, boolean existingOnly) throws IOException { // CraftBukkit
+@@ -345,6 +_,7 @@
+     // Paper end
+ 
+     public @Nullable CompoundTag read(final ChunkPos pos) throws IOException {
++        if (this.folesium != null) return this.folesium.read(pos.x(), pos.z()); // Folesium
+         // CraftBukkit start - SPIGOT-5680: There's no good reason to preemptively create files on read, save that for writing
+         RegionFile region = this.getRegionFile(pos, true);
+         if (region == null) {
+@@ -382,6 +_,15 @@
+     }
+ 
+     public void scanChunk(final ChunkPos pos, final StreamTagVisitor scanner) throws IOException {
++        // Folesium start - stream the stored tag through the visitor
++        if (this.folesium != null) {
++            final CompoundTag data = this.folesium.read(pos.x(), pos.z());
++            if (data != null) {
++                data.accept(scanner);
++            }
++            return;
++        }
++        // Folesium end
+         // CraftBukkit start - SPIGOT-5680: There's no good reason to preemptively create files on read, save that for writing
+         RegionFile region = this.getRegionFile(pos, true);
+         if (region == null) {
+@@ -398,6 +_,12 @@
+ 
+     public void write(final ChunkPos pos, final @Nullable CompoundTag value) throws IOException {
+         if (!SharedConstants.DEBUG_DONT_SAVE_WORLD) {
++            // Folesium start
++            if (this.folesium != null) {
++                this.folesium.write(pos.x(), pos.z(), value);
++                return;
++            }
++            // Folesium end
+             RegionFile region = this.getRegionFile(pos, value == null); // CraftBukkit // Paper - rewrite chunk system
+             // Paper start - rewrite chunk system
+             if (region == null) {
+@@ -427,6 +_,12 @@
+ 
+     @Override
+     public void close() throws IOException {
++        // Folesium start - flush + release the shared per-dimension store
++        if (this.folesium != null) {
++            this.folesium.close();
++            return;
++        }
++        // Folesium end
+         // Paper start - rewrite chunk system
+         synchronized (this) {
+             final ExceptionCollector<IOException> exceptionCollector = new ExceptionCollector<>();
+@@ -443,6 +_,12 @@
+     }
+ 
+     public void flush() throws IOException {
++        // Folesium start
++        if (this.folesium != null) {
++            this.folesium.flush();
++            return;
++        }
++        // Folesium end
+         // Paper start - rewrite chunk system
+         synchronized (this) {
+             final ExceptionCollector<IOException> exceptionCollector = new ExceptionCollector<>();
