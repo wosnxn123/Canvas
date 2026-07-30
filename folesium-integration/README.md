@@ -24,7 +24,9 @@ The script:
 1. clones (or updates) Folesium into `folesium-integration/.folesium-src` (git-ignored),
 2. runs `./gradlew applyAllPatches` if the decompiled sources are missing,
 3. runs Folesium's `scripts/apply-integration.sh`, which
-   * vendors `dev.folesium.{core,anvil,converter,integration}` into `paper-server/src/main/java`,
+   * vendors `dev.folesium.{core,anvil,converter,integration}` into the detected
+     `<server-module>/src/main/java` (`folia-server` on Folia, `canvas-server` on Canvas,
+     `paper-server` on Paper-style checkouts),
    * patches four vanilla classes:
      | class | data it redirects | store |
 |---|---|---|
@@ -61,7 +63,7 @@ you may now remove manually. Details, all configuration keys and troubleshooting
 
 ## Keeping the fork updatable
 
-* All Folesium changes are applied to **generated** sources (`paper-server/`,
+* All Folesium changes are applied to **generated** sources (`<server-module>/src/main/java`,
   `*-server/src/minecraft/`), which are git-ignored by paperweight — they are never
   committed here.
 * To update upstream: `git pull upstream <branch> && ./gradlew applyAllPatches`,
@@ -72,8 +74,8 @@ you may now remove manually. Details, all configuration keys and troubleshooting
 ## Reverting
 
 ```bash
-git -C paper-server checkout .        # drop vendored sources + Main hook
-./gradlew applyAllPatches             # restore pristine minecraft sources
+git -C <server-module> checkout .        # drop vendored sources + Main hook
+./gradlew applyAllPatches                 # restore pristine minecraft sources
 rm -rf folesium-integration/.folesium-src
 ```
 

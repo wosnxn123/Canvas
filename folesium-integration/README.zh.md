@@ -22,7 +22,9 @@
 1. 把 Folesium 克隆（或更新）到 `folesium-integration/.folesium-src`（已 gitignore）；
 2. 若反编译源码缺失，先执行 `./gradlew applyAllPatches`；
 3. 执行 Folesium 的 `scripts/apply-integration.sh`：
-   * 将 `dev.folesium.{core,anvil,converter,integration}` 内联进 `paper-server/src/main/java`；
+   * 将 `dev.folesium.{core,anvil,converter,integration}` 内联进自动探测的
+     `<server-module>/src/main/java`（Folia 为 `folia-server`，Canvas 为
+     `canvas-server`，Paper 风格检出为 `paper-server`）；
    * 给四个原版类打补丁：
      | 类 | 重定向的数据 | 存储 |
 |---|---|---|
@@ -58,8 +60,8 @@ java -jar <paperclip>.jar --folesiumConvertToAnvil --nogui
 
 ## 保持可拉取上游更新
 
-* 所有 Folesium 改动只作用于**生成的**源码目录（`paper-server/`、`*-server/src/minecraft/`），
-  这些目录被 paperweight 忽略，不会提交到本仓库。
+* 所有 Folesium 改动只作用于**生成的**源码目录（`<server-module>/src/main/java`、
+  `*-server/src/minecraft/`），这些目录被 paperweight 忽略，不会提交到本仓库。
 * 更新上游：`git pull upstream <分支> && ./gradlew applyAllPatches`，
   然后重新执行 `./folesium-integration/setup-folesium.sh`。
 * 若上游改动导致某个补丁冲突，可模糊应用：
@@ -68,8 +70,8 @@ java -jar <paperclip>.jar --folesiumConvertToAnvil --nogui
 ## 撤销集成
 
 ```bash
-git -C paper-server checkout .        # 丢弃内联源码与 Main 钩子
-./gradlew applyAllPatches             # 还原干净的 minecraft 源码
+git -C <server-module> checkout .        # 丢弃内联源码与 Main 钩子
+./gradlew applyAllPatches                 # 还原干净的 minecraft 源码
 rm -rf folesium-integration/.folesium-src
 ```
 
