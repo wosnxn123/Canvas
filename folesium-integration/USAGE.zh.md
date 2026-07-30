@@ -176,7 +176,7 @@ java -jar <fork>-paperclip-*.jar --nogui                               # 恢复�
 ```
 
 把每个区块和玩家记录字节级一致地还原回原版文件。同样**不删除任何文件**：
-`folesium/` 存储保留为备份，转换结束时会打印它们的确切路径，例如：
+`folesium/` 存储保留为备份，转换结束时会打印它们的确切绝对（规范化）路径，例如：
 
 ```
 Folesium: no files were deleted. The now-redundant Folesium stores were kept as a backup:

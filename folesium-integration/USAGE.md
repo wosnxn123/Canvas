@@ -188,7 +188,7 @@ java -jar <fork>-paperclip-*.jar --nogui                               # stock s
 
 Restores every chunk and player record back to the vanilla files, byte-identically.
 Again **no files are deleted**: the `folesium/` stores are kept as a backup and the
-conversion prints their exact paths, e.g.
+conversion prints their exact, absolute (normalized) paths, e.g.
 
 ```
 Folesium: no files were deleted. The now-redundant Folesium stores were kept as a backup:
