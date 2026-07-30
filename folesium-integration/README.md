@@ -55,8 +55,9 @@ java -jar <paperclip>.jar --folesiumConvertToAnvil --nogui
 ```
 
 The converter **never deletes files** (cesium-fabric parity): the old data stays on
-disk as a backup and the conversion prints what you may now remove manually. Details,
-all configuration keys and troubleshooting: [USAGE.md](USAGE.md).
+disk as a backup and the conversion prints the **absolute, normalized** paths of what
+you may now remove manually. Details, all configuration keys and troubleshooting:
+[USAGE.md](USAGE.md).
 
 ## Keeping the fork updatable
 

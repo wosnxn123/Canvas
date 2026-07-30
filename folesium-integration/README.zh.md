@@ -53,7 +53,7 @@ java -jar <paperclip>.jar --folesiumConvertToAnvil --nogui
 ```
 
 转换器**不会删除任何文件**（与 cesium-fabric 一致）：旧数据留在磁盘上作为备份，
-转换结束时会打印可手动删除的路径。详细说明、全部配置键与故障排查见
+转换结束时会打印可手动删除的绝对（规范化）路径。详细说明、全部配置键与故障排查见
 [USAGE.zh.md](USAGE.zh.md)。
 
 ## 保持可拉取上游更新
