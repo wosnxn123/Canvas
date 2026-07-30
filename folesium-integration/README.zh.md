@@ -3,7 +3,8 @@
 > [English](README.md) | **简体中文**
 
 [Folesium](https://github.com/wosnxn123/Folesium) 是面向 Folia 26.2 / Canvas 的
-面向字节的世界存储后端，用于替换 Anvil `.mca` 区域文件。本目录是 Folesium 对该 fork
+面向字节的世界存储后端，用于替换 Anvil `.mca` 区域文件**以及单玩家文件**
+（`players/data`、`players/advancements`、`players/stats`）。本目录是 Folesium 对该 fork
 添加的**全部**内容——不修改任何上游跟踪的文件，因此 `git pull upstream <分支>`
 不会因为 Folesium 产生冲突。
 
@@ -19,9 +20,18 @@
 2. 若反编译源码缺失，先执行 `./gradlew applyAllPatches`；
 3. 执行 Folesium 的 `scripts/apply-integration.sh`：
    * 将 `dev.folesium.{core,anvil,converter,integration}` 内联进 `paper-server/src/main/java`；
-   * 给 `net.minecraft.world.level.chunk.storage.RegionFileStorage` 打补丁（区块/实体/POI 读写）；
+   * 给四个原版类打补丁：
+     | 类 | 重定向的数据 | 存储 |
+     |---|---|---|
+     | `RegionFileStorage` | 区块 / 实体 / POI | `<维度>/folesium`（`role=DIMENSION`） |
+     | `PlayerDataStorage` | `players/data/<uuid>.dat` | `<世界>/players/folesium`（`role=PLAYERS`） |
+     | `PlayerAdvancements` | `players/advancements/<uuid>.json` | 同一存储 |
+     | `ServerStatsCounter` | `players/stats/<uuid>.json` | 同一存储 |
    * 给 `org.bukkit.craftbukkit.Main` 打补丁，加入原地转换启动参数；
 4. 构建 paperclip jar。
+
+两类存储目录都叫 `folesium/`，靠各自元数据里记录的 `store.role` 区分，
+绝不依赖路径判断。
 
 可选项：`--no-build`；环境变量 `FOLESIUM_REPO`、`FOLESIUM_REF`、`FOLESIUM_HOME`
 （指向本地已有的 Folesium 检出，跳过克隆）。
@@ -45,8 +55,8 @@ java -jar <paperclip>.jar --folesiumConvertToAnvil --nogui
   这些目录被 paperweight 忽略，不会提交到本仓库。
 * 更新上游：`git pull upstream <分支> && ./gradlew applyAllPatches`，
   然后重新执行 `./folesium-integration/setup-folesium.sh`。
-* 若上游改动导致 `RegionFileStorage` 补丁冲突，可模糊应用：
-  `patch -p5 --fuzz=3 -d <fork>-server/src/minecraft/java < .folesium-src/integration/folia-26.2/patches/RegionFileStorage.java.patch`。
+* 若上游改动导致某个补丁冲突，可模糊应用：
+  `patch -p5 --fuzz=3 -d <fork>-server/src/minecraft/java < .folesium-src/integration/folia-26.2/patches/<名称>.java.patch`。
 
 ## 撤销集成
 

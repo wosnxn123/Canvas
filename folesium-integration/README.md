@@ -3,7 +3,9 @@
 > **English** | [简体中文](README.zh.md)
 
 [Folesium](https://github.com/wosnxn123/Folesium) is a byte-oriented world storage
-backend that replaces Anvil `.mca` region files inside a Folia 26.2 / Canvas server.
+backend that replaces Anvil `.mca` region files **and the per-player files**
+(`players/data`, `players/advancements`, `players/stats`) inside a Folia 26.2 / Canvas
+server.
 This directory is the **only** thing Folesium adds to this fork — no upstream-tracked
 file is modified, so `git pull upstream <branch>` never conflicts because of Folesium.
 
@@ -19,9 +21,18 @@ The script:
 2. runs `./gradlew applyAllPatches` if the decompiled sources are missing,
 3. runs Folesium's `scripts/apply-integration.sh`, which
    * vendors `dev.folesium.{core,anvil,converter,integration}` into `paper-server/src/main/java`,
-   * patches `net.minecraft.world.level.chunk.storage.RegionFileStorage` (chunk/entity/POI I/O),
+   * patches four vanilla classes:
+     | class | data it redirects | store |
+     |---|---|---|
+     | `RegionFileStorage` | chunks / entities / POI | `<dimension>/folesium` (`role=DIMENSION`) |
+     | `PlayerDataStorage` | `players/data/<uuid>.dat` | `<world>/players/folesium` (`role=PLAYERS`) |
+     | `PlayerAdvancements` | `players/advancements/<uuid>.json` | same store |
+     | `ServerStatsCounter` | `players/stats/<uuid>.json` | same store |
    * patches `org.bukkit.craftbukkit.Main` to add the in-place conversion flags,
 4. builds the paperclip jar.
+
+Both store directories are called `folesium/`; they are told apart by the `store.role`
+recorded in each store's metadata, never by their path.
 
 Options: `--no-build`, and env vars `FOLESIUM_REPO`, `FOLESIUM_REF`, `FOLESIUM_HOME`
 (point at a local Folesium checkout instead of cloning).
@@ -46,8 +57,8 @@ java -jar <paperclip>.jar --folesiumConvertToAnvil --nogui
   committed here.
 * To update upstream: `git pull upstream <branch> && ./gradlew applyAllPatches`,
   then re-run `./folesium-integration/setup-folesium.sh`.
-* If an upstream change makes the `RegionFileStorage` patch fail, apply it fuzzily:
-  `patch -p5 --fuzz=3 -d <fork>-server/src/minecraft/java < .folesium-src/integration/folia-26.2/patches/RegionFileStorage.java.patch`.
+* If an upstream change makes one of the patches fail, apply it fuzzily:
+  `patch -p5 --fuzz=3 -d <fork>-server/src/minecraft/java < .folesium-src/integration/folia-26.2/patches/<name>.java.patch`.
 
 ## Reverting
 
