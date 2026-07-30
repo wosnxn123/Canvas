@@ -39,10 +39,6 @@ jobs:
 
       - name: Apply patches
         run: ./gradlew applyAllPatches --no-configuration-cache
-      - name: Apply Folesium integration
-        env:
-          FOLESIUM_REF: main
-        run: ./folesium-integration/setup-folesium.sh --no-build
 
       - name: Build paperclip jar
         run: ./gradlew :canvas-server:createPaperclipJar --no-configuration-cache
