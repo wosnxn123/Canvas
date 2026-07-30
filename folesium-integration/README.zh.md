@@ -69,6 +69,7 @@ java -jar <paperclip>.jar --folesiumConvertToAnvil --nogui
 
 ## 撤销集成
 
+
 ```bash
 git -C <server-module> checkout .        # 丢弃内联源码与 Main 钩子
 ./gradlew applyAllPatches                 # 还原干净的 minecraft 源码
