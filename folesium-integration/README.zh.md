@@ -8,6 +8,9 @@
 添加的**全部**内容——不修改任何上游跟踪的文件，因此 `git pull upstream <分支>`
 不会因为 Folesium 产生冲突。
 
+> **要开服？** 完整运维指南——启用方法、全部配置项、迁移路径、回滚、备份、
+> 故障排查——见 **[USAGE.zh.md](USAGE.zh.md)**（[English](USAGE.md)）。
+
 ## 快速开始
 
 ```bash
@@ -48,6 +51,10 @@ java -Dfolesium.enabled=true -jar <paperclip>.jar --nogui
 # 回滚
 java -jar <paperclip>.jar --folesiumConvertToAnvil --nogui
 ```
+
+转换器**不会删除任何文件**（与 cesium-fabric 一致）：旧数据留在磁盘上作为备份，
+转换结束时会打印可手动删除的路径。详细说明、全部配置键与故障排查见
+[USAGE.zh.md](USAGE.zh.md)。
 
 ## 保持可拉取上游更新
 

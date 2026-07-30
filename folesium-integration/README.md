@@ -9,6 +9,10 @@ server.
 This directory is the **only** thing Folesium adds to this fork — no upstream-tracked
 file is modified, so `git pull upstream <branch>` never conflicts because of Folesium.
 
+> **Running a server?** The full operator's guide — enabling, every configuration
+> option, migration paths, rollback, backups, troubleshooting — is in
+> **[USAGE.md](USAGE.md)** ([中文](USAGE.zh.md)).
+
 ## Quick start
 
 ```bash
@@ -49,6 +53,10 @@ java -Dfolesium.enabled=true -jar <paperclip>.jar --nogui
 # rollback
 java -jar <paperclip>.jar --folesiumConvertToAnvil --nogui
 ```
+
+The converter **never deletes files** (cesium-fabric parity): the old data stays on
+disk as a backup and the conversion prints what you may now remove manually. Details,
+all configuration keys and troubleshooting: [USAGE.md](USAGE.md).
 
 ## Keeping the fork updatable
 
