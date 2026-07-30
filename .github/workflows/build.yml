@@ -39,17 +39,6 @@ jobs:
 
       - name: Apply patches
         run: ./gradlew applyAllPatches --no-configuration-cache
-      - name: Apply and persist Folesium source patches
-        env:
-          FOLESIUM_REF: d4ee43a
-        run: |
-          ./folesium-integration/setup-folesium.sh --no-build
-          ./rbp.sh --force-run
-          git restore .github/workflows/build.yml
-          git add canvas-server/minecraft-patches canvas-server/paper-patches
-          git diff --cached --quiet && exit 0
-          git commit -m "feat(folesium): embed storage integration patches"
-          git push origin HEAD:main
 
       - name: Build paperclip jar
         run: ./gradlew :canvas-server:createPaperclipJar --no-configuration-cache
