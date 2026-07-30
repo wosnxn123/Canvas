@@ -72,7 +72,7 @@ enabled=true
 
 and start the server normally. On boot you will see one line per opened store:
 
-```
+```text
 Folesium: opened DIMENSION store .../world/dimensions/minecraft/overworld/folesium
 Folesium: opened PLAYERS store .../world/players/folesium
 ```
@@ -190,7 +190,7 @@ Restores every chunk and player record back to the vanilla files, byte-identical
 Again **no files are deleted**: the `folesium/` stores are kept as a backup and the
 conversion prints their exact, absolute (normalized) paths, e.g.
 
-```
+```text
 Folesium: no files were deleted. The now-redundant Folesium stores were kept as a backup:
     /srv/world/players/folesium
     /srv/world/dimensions/minecraft/overworld/folesium
@@ -209,7 +209,7 @@ The two flags are mutually exclusive; passing both aborts with an error.
 
 ## 7. On-disk layout & backups
 
-```
+```text
 world/
 ├── players/
 │   ├── folesium/                    <- PLAYERS store
@@ -245,7 +245,7 @@ world/
 
 Log lines to know:
 
-```
+```text
 Folesium: opened DIMENSION store <path>     # a dimension store is active
 Folesium: opened PLAYERS store <path>       # the player store is active
 Folesium: no files were deleted. ...        # conversion retention note (§5/§6)

@@ -69,7 +69,7 @@ enabled=true
 
 然后正常启动。开服时每打开一个存储会打印一行：
 
-```
+```text
 Folesium: opened DIMENSION store .../world/dimensions/minecraft/overworld/folesium
 Folesium: opened PLAYERS store .../world/players/folesium
 ```
@@ -178,7 +178,7 @@ java -jar <fork>-paperclip-*.jar --nogui                               # 恢复�
 把每个区块和玩家记录字节级一致地还原回原版文件。同样**不删除任何文件**：
 `folesium/` 存储保留为备份，转换结束时会打印它们的确切绝对（规范化）路径，例如：
 
-```
+```text
 Folesium: no files were deleted. The now-redundant Folesium stores were kept as a backup:
     /srv/world/players/folesium
     /srv/world/dimensions/minecraft/overworld/folesium
@@ -197,7 +197,7 @@ Folesium: no files were deleted. The now-redundant Folesium stores were kept as 
 
 ## 7. 磁盘布局与备份
 
-```
+```text
 world/
 ├── players/
 │   ├── folesium/                    <- PLAYERS 存储
@@ -233,7 +233,7 @@ world/
 
 需要认识的日志行：
 
-```
+```text
 Folesium: opened DIMENSION store <path>     # 维度存储已激活
 Folesium: opened PLAYERS store <path>       # 玩家存储已激活
 Folesium: no files were deleted. ...        # 转换保留提示（§5/§6）

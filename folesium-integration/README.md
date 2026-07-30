@@ -27,7 +27,7 @@ The script:
    * vendors `dev.folesium.{core,anvil,converter,integration}` into `paper-server/src/main/java`,
    * patches four vanilla classes:
      | class | data it redirects | store |
-     |---|---|---|
+|---|---|---|
      | `RegionFileStorage` | chunks / entities / POI | `<dimension>/folesium` (`role=DIMENSION`) |
      | `PlayerDataStorage` | `players/data/<uuid>.dat` | `<world>/players/folesium` (`role=PLAYERS`) |
      | `PlayerAdvancements` | `players/advancements/<uuid>.json` | same store |

@@ -25,7 +25,7 @@
    * 将 `dev.folesium.{core,anvil,converter,integration}` 内联进 `paper-server/src/main/java`；
    * 给四个原版类打补丁：
      | 类 | 重定向的数据 | 存储 |
-     |---|---|---|
+|---|---|---|
      | `RegionFileStorage` | 区块 / 实体 / POI | `<维度>/folesium`（`role=DIMENSION`） |
      | `PlayerDataStorage` | `players/data/<uuid>.dat` | `<世界>/players/folesium`（`role=PLAYERS`） |
      | `PlayerAdvancements` | `players/advancements/<uuid>.json` | 同一存储 |
