@@ -41,7 +41,7 @@ jobs:
         run: ./gradlew applyAllPatches --no-configuration-cache
       - name: Apply and persist Folesium source patches
         env:
-          FOLESIUM_REF: 1ac5e26b6c4b2845920e65d207c9cf4b01c000ce
+          FOLESIUM_REF: d4ee43a
         run: |
           ./folesium-integration/setup-folesium.sh --no-build
           ./rbp.sh --force-run
