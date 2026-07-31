@@ -39,7 +39,7 @@ import java.util.logging.Logger;
  *
  * <p>Called from {@code org.bukkit.craftbukkit.Main#main} right after joptsimple
  * parses the argv and before any MC bootstrap. The handler is the ONLY place in
- * the server that uses the {@code dev.folesium.converter} package — keeping it
+ * the server that uses the {@code dev.folesium.converter} package -- keeping it
  * here means the converter does not leak into the runtime classpath otherwise.</p>
  *
  * <p>The conversion runs against {@code -W &lt;worldDir&gt;}/{@code <worldName>},
@@ -57,7 +57,7 @@ public final class FolesiumCli {
      * Inspects the parsed joptsimple options and, if a {@code --folesiumConvert*}
      * flag is present, runs the in-place conversion and returns {@code true}.
      * The caller is expected to {@code return} from {@code main} when this returns
-     * {@code true} so the server does not start up afterwards — the conversion
+     * {@code true} so the server does not start up afterwards -- the conversion
      * is the entire purpose of the invocation.
      */
     public static boolean handle(OptionSet options) {

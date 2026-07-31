@@ -26,12 +26,13 @@
      `<server-module>/src/main/java`（Folia 为 `folia-server`，Canvas 为
      `canvas-server`，Paper 风格检出为 `paper-server`）；
    * 给四个原版类打补丁：
-     | 类 | 重定向的数据 | 存储 |
-|---|---|---|
-     | `RegionFileStorage` | 区块 / 实体 / POI | `<维度>/folesium`（`role=DIMENSION`） |
-     | `PlayerDataStorage` | `players/data/<uuid>.dat` | `<世界>/players/folesium`（`role=PLAYERS`） |
-     | `PlayerAdvancements` | `players/advancements/<uuid>.json` | 同一存储 |
-     | `ServerStatsCounter` | `players/stats/<uuid>.json` | 同一存储 |
+
+   | 类 | 重定向的数据 | 存储 |
+   |---|---|---|
+   | `RegionFileStorage` | 区块 / 实体 / POI | `<维度>/folesium`（`role=DIMENSION`） |
+   | `PlayerDataStorage` | `players/data/<uuid>.dat` | `<世界>/players/folesium`（`role=PLAYERS`） |
+   | `PlayerAdvancements` | `players/advancements/<uuid>.json` | 同一存储 |
+   | `ServerStatsCounter` | `players/stats/<uuid>.json` | 同一存储 |
    * 给 `org.bukkit.craftbukkit.Main` 打补丁，加入原地转换启动参数；
 4. 构建 paperclip jar。
 
@@ -68,7 +69,6 @@ java -jar <paperclip>.jar --folesiumConvertToAnvil --nogui
   `patch -p5 --fuzz=3 -d <fork>-server/src/minecraft/java < .folesium-src/integration/folia-26.2/patches/<名称>.java.patch`。
 
 ## 撤销集成
-
 
 ```bash
 git -C <server-module> checkout .        # 丢弃内联源码与 Main 钩子

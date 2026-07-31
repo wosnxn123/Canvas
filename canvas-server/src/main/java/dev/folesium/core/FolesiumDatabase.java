@@ -24,6 +24,7 @@ import java.nio.file.Path;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -51,7 +52,7 @@ import dev.folesium.core.util.ZstdNative;
  *
  * <p>The {@link StoreRole role} is recorded in the metadata file rather than being
  * inferred from the directory name. Tools therefore never have to guess what a
- * {@code folesium/} directory contains — see {@link #readRole(Path)}.</p>
+ * {@code folesium/} directory contains - see {@link #readRole(Path)}.</p>
  *
  * <p>Thread model: fully thread-safe. Keyspaces are created lazily via a
  * {@link ConcurrentHashMap}; per-key mutual exclusion is provided by the owning
@@ -78,7 +79,7 @@ public final class FolesiumDatabase implements AutoCloseable {
     /**
      * What a store directory holds. Recorded in {@code folesium.properties} as
      * {@code store.role} so that no tool has to infer a store's purpose from its
-     * location — a world-root store and a dimension store may both be named
+     * location - a world-root store and a dimension store may both be named
      * {@code folesium/} without any ambiguity.
      */
     public enum StoreRole {
@@ -123,8 +124,8 @@ public final class FolesiumDatabase implements AutoCloseable {
             return null;
         }
         Properties p = new Properties();
-        try (var in = Files.newInputStream(meta)) {
-            p.load(in);
+        try (var reader = Files.newBufferedReader(meta, java.nio.charset.StandardCharsets.UTF_8)) {
+            p.load(reader);
         } catch (IOException e) {
             throw new FolesiumException("Cannot read " + meta, e);
         }
@@ -174,8 +175,8 @@ public final class FolesiumDatabase implements AutoCloseable {
         Path meta = dir.resolve(METADATA_FILE);
         Properties p = new Properties();
         if (Files.exists(meta)) {
-            try (var in = Files.newInputStream(meta)) {
-                p.load(in);
+            try (var reader = Files.newBufferedReader(meta, java.nio.charset.StandardCharsets.UTF_8)) {
+                p.load(reader);
             } catch (IOException e) {
                 throw new FolesiumException("Cannot read " + meta, e);
             }
@@ -190,9 +191,24 @@ public final class FolesiumDatabase implements AutoCloseable {
                         + " data but was opened as " + role
                         + ". Refusing to mix player data and chunk data in one store.");
             }
-            int shards = Integer.parseInt(p.getProperty("store.shardCount"));
-            FolesiumConfig.Compression comp =
-                    FolesiumConfig.Compression.valueOf(p.getProperty("store.compression"));
+            int shards;
+            String shardsRaw = p.getProperty("store.shardCount");
+            try {
+                shards = Integer.parseInt(Objects.requireNonNull(shardsRaw, "store.shardCount").trim());
+            } catch (RuntimeException e) {
+                throw new FolesiumException("Missing/invalid store.shardCount '" + shardsRaw + "' in " + meta, e);
+            }
+            if (Integer.bitCount(shards) != 1 || shards < 1 || shards > 1024) {
+                throw new FolesiumException("Invalid store.shardCount " + shards + " in " + meta);
+            }
+            String compRaw = p.getProperty("store.compression");
+            FolesiumConfig.Compression comp;
+            try {
+                comp = FolesiumConfig.Compression.valueOf(
+                        Objects.requireNonNull(compRaw, "store.compression").trim().toUpperCase(java.util.Locale.ROOT));
+            } catch (RuntimeException e) {
+                throw new FolesiumException("Missing/unknown store.compression '" + compRaw + "' in " + meta, e);
+            }
             if (shards != requested.shardCount()) {
                 LOGGER.log(System.Logger.Level.INFO,
                         "Folesium: existing store at {0} uses {1} shards; overriding requested {2}",
@@ -209,8 +225,8 @@ public final class FolesiumDatabase implements AutoCloseable {
         p.setProperty("store.shardCount", Integer.toString(requested.shardCount()));
         p.setProperty("store.compression", requested.compression().name());
         p.setProperty("store.created", Long.toString(System.currentTimeMillis()));
-        try (var out = Files.newOutputStream(meta)) {
-            p.store(out, "Folesium store metadata - do not edit while the server is running");
+        try (var writer = Files.newBufferedWriter(meta, java.nio.charset.StandardCharsets.UTF_8)) {
+            p.store(writer, "Folesium store metadata - do not edit while the server is running");
         } catch (IOException e) {
             throw new FolesiumException("Cannot write " + meta, e);
         }

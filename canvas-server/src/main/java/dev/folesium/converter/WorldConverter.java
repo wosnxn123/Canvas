@@ -29,7 +29,6 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -141,7 +140,7 @@ public final class WorldConverter {
      *
      * <p>Like cesium-fabric's converter, <em>nothing is deleted</em>: the Folesium
      * store is left in place as a backup. Delete it manually once the restored Anvil
-     * world has been verified — and always before re-converting to Folesium after
+     * world has been verified -- and always before re-converting to Folesium after
      * having played on Anvil, because {@link #anvilToFolesium} merges and would keep
      * the (older) store records over the newer Anvil chunks.</p>
      */
@@ -166,15 +165,13 @@ public final class WorldConverter {
                 Files.createDirectories(out);
 
                 // Group chunk keys by region.
-                Map<Long, List<long[]>> byRegion = new HashMap<>();
+                Map<Long, List<long[]>> byRegion = new ConcurrentHashMap<>();
                 ks.forEach((k, v) -> {
                     long key = LongKeys.decode(k);
                     int cx = LongKeys.chunkX(key);
                     int cz = LongKeys.chunkZ(key);
                     long regionKey = LongKeys.chunkKey(cx >> 5, cz >> 5);
-                    synchronized (byRegion) {
-                        byRegion.computeIfAbsent(regionKey, r -> new ArrayList<>()).add(new long[]{key});
-                    }
+                    byRegion.computeIfAbsent(regionKey, r -> new ArrayList<>()).add(new long[]{key});
                 });
 
                 runParallel(new ArrayList<>(byRegion.keySet()), regionKey -> {

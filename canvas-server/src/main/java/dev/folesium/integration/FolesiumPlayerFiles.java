@@ -35,7 +35,7 @@ import java.util.UUID;
  * {@code PlayerAdvancements} and {@code ServerStatsCounter} use to read and write
  * {@code <world>/advancements/<uuid>.json} and {@code <world>/stats/<uuid>.json}.
  *
- * <p>Both classes follow the same shape — {@code Files.isRegularFile(path)} to decide
+ * <p>Both classes follow the same shape -- {@code Files.isRegularFile(path)} to decide
  * whether there is anything to load, then {@code Files.newBufferedReader} /
  * {@code Files.newBufferedWriter} for the JSON itself. Routing those three calls
  * through here redirects the data into the Folesium player store without touching any
@@ -48,7 +48,7 @@ import java.util.UUID;
  *
  * <p>The path classification itself lives in
  * {@link PlayerPathRecognizer} (vendored with the engine), so the rule can be
- * unit-tested without pulling in the {@code net.minecraft} packages — see
+ * unit-tested without pulling in the {@code net.minecraft} packages -- see
  * {@code PlayerPathRecognizerTest}.</p>
  */
 public final class FolesiumPlayerFiles {

@@ -28,7 +28,7 @@ import java.lang.reflect.Method;
  * NONE / DEFLATE paths). The optional {@link dev.folesium.core.FolesiumConfig.Compression#ZSTD}
  * path reuses the host server's zstd-jni, so the vendored Folesium sources stay
  * dependency-free at compile time and need nothing extra at runtime on a Folia
- * server — exactly the same library cesium-fabric uses for its store.</p>
+ * server - exactly the same library cesium-fabric uses for its store.</p>
  *
  * <p>Everything is resolved lazily and cached: if zstd-jni is absent,
  * {@link #available()} is {@code false} and callers surface a clear error

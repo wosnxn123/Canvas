@@ -85,10 +85,10 @@ Folesium: opened PLAYERS store .../world/players/folesium
 |---|---|---|
 | `enabled` | **`false`** | 总开关。关闭 = 100% 原生服务端。 |
 | `configFile` | `folesium.properties` | 备用配置文件路径（仅系统属性） |
-| `shards` | `32` | **新建**存储的分片数（2 的幂，1–1024；已有存储沿用盘上值）。32 可支撑约 64 个写线程；小型服务器用 8–16 即可。 |
+| `shards` | 自适应（按 CPU 核数取 8/16/32/64/128） | **新建**存储的分片数（2 的幂，1–1024；已有存储沿用盘上值）。默认值按 CPU 核数自适应；小型服务器用 8–16 即可。 |
 | `durability` | `BATCH` | `ALWAYS` = 每次写入 fsync；`BATCH` = 后台组提交；`EXPLICIT` = 仅 flush/close 时 fsync |
 | `batchFlushMillis` | `500` | `BATCH` 的组提交间隔 |
-| `compression` | `DEFLATE` | `NONE` / `DEFLATE` / `ZSTD`；建店时固定（旧记录始终可读） |
+| `compression` | `ZSTD`（zstd-jni 可用时）否则 `DEFLATE` | `NONE` / `DEFLATE` / `ZSTD`；建店时固定（旧记录始终可读） |
 | `compressionLevel` | `4` | Deflate 与 ZSTD 等级 1–9。4 ≈ 原版 zlib 压缩率但 CPU 更低。 |
 | `compactRatio` | `0.5` | 分片死字节超过文件的该比例时触发压实 |
 | `compactMinBytes` | `8388608` | 小于该大小（8 MiB）的分片不压实 |

@@ -28,12 +28,13 @@ The script:
      `<server-module>/src/main/java` (`folia-server` on Folia, `canvas-server` on Canvas,
      `paper-server` on Paper-style checkouts),
    * patches four vanilla classes:
-     | class | data it redirects | store |
-|---|---|---|
-     | `RegionFileStorage` | chunks / entities / POI | `<dimension>/folesium` (`role=DIMENSION`) |
-     | `PlayerDataStorage` | `players/data/<uuid>.dat` | `<world>/players/folesium` (`role=PLAYERS`) |
-     | `PlayerAdvancements` | `players/advancements/<uuid>.json` | same store |
-     | `ServerStatsCounter` | `players/stats/<uuid>.json` | same store |
+
+   | class | data it redirects | store |
+   |---|---|---|
+   | `RegionFileStorage` | chunks / entities / POI | `<dimension>/folesium` (`role=DIMENSION`) |
+   | `PlayerDataStorage` | `players/data/<uuid>.dat` | `<world>/players/folesium` (`role=PLAYERS`) |
+   | `PlayerAdvancements` | `players/advancements/<uuid>.json` | same store |
+   | `ServerStatsCounter` | `players/stats/<uuid>.json` | same store |
    * patches `org.bukkit.craftbukkit.Main` to add the in-place conversion flags,
 4. builds the paperclip jar.
 

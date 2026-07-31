@@ -62,5 +62,5 @@ cat <<EOF
     convert an existing world : java -jar <paperclip>.jar --folesiumConvertToFolesium --nogui
     start on Folesium         : java -Dfolesium.enabled=true -jar <paperclip>.jar --nogui
     roll back to Anvil        : java -jar <paperclip>.jar --folesiumConvertToAnvil --nogui
-    docs                      : $SRC/docs/INTEGRATION.md (English) / docs/zh/INTEGRATION.md (中文)
+    docs                      : $SRC/docs/INTEGRATION.md (English) / docs/zh/INTEGRATION.md (Chinese)
 EOF

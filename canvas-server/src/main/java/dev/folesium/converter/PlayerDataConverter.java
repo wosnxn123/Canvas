@@ -42,7 +42,7 @@ import java.util.regex.Pattern;
  * <p>Values are stored as the <em>exact bytes of the source file</em>: the gzip-compressed
  * NBT for {@code .dat}, the UTF-8 JSON text for {@code .json}. The converter therefore
  * never parses NBT or JSON, which keeps it version-independent, lossless and free of any
- * Minecraft dependency — the same property that makes the chunk converter safe.</p>
+ * Minecraft dependency -- the same property that makes the chunk converter safe.</p>
  *
  * <p>Keys are the raw 16 bytes of the player UUID, see {@link UuidKeys}.</p>
  *
@@ -100,7 +100,7 @@ public final class PlayerDataConverter {
 
     /**
      * The vanilla files always live next to the store, so once a store location is
-     * fixed the store's parent is the player root — this keeps a conversion coherent
+     * fixed the store's parent is the player root -- this keeps a conversion coherent
      * even if a world somehow has both a {@code players/} directory and a legacy
      * world-root store.
      */
@@ -208,7 +208,7 @@ public final class PlayerDataConverter {
      *
      * <p>Like cesium-fabric's converter, <em>nothing is deleted</em>: the player store is
      * left in place as a backup. Delete it manually once the restored files have been
-     * verified — and always before re-converting after having played on the restored
+     * verified -- and always before re-converting after having played on the restored
      * files, because {@link #anvilToFolesium} merges and would keep the (older) store
      * records over the newer vanilla files.</p>
      */

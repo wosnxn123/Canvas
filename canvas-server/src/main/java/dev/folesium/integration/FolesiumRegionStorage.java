@@ -60,7 +60,7 @@ import net.minecraft.nbt.NbtIo;
  * <p>When Folesium is enabled on a world that has not yet been converted, chunks
  * missing from the store are served from the original Anvil region files on read.
  * This keeps an un-converted world fully playable the moment Folesium is switched on,
- * and—combined with the merge-mode converter—makes the "enable Folesium, then convert
+ * and--combined with the merge-mode converter--makes the "enable Folesium, then convert
  * later" workflow data-safe: chunks a running server has already migrated (or edited)
  * are never clobbered by the older Anvil bytes.</p>
  */

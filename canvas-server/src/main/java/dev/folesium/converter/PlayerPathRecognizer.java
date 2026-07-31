@@ -84,7 +84,8 @@ public final class PlayerPathRecognizer {
         if (kind.player == null) {
             return null;
         }
-        if (!worldRoot.equals(dir.getParent().toAbsolutePath().normalize())) {
+        Path parent = dir.getParent();
+        if (parent == null || !worldRoot.equals(parent.toAbsolutePath().normalize())) {
             return null;
         }
         return kind;

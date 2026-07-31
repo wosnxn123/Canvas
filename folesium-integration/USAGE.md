@@ -89,10 +89,10 @@ startup.
 |---|---|---|
 | `enabled` | **`false`** | master switch. Off = 100 % stock server. |
 | `configFile` | `folesium.properties` | alternative config file path (system property only) |
-| `shards` | `32` | shard count for **newly created** stores (power of two, 1–1024; existing stores keep their on-disk value). 32 suits up to ~64 writer threads; 8–16 is fine for small servers. |
+| `shards` | auto (8/16/32/64/128 by CPU cores) | shard count for **newly created** stores (power of two, 1–1024; existing stores keep their on-disk value). The default is auto-tuned from CPU core count; 8–16 is fine for small servers. |
 | `durability` | `BATCH` | `ALWAYS` = fsync every write; `BATCH` = background group commit; `EXPLICIT` = fsync only on flush/close |
 | `batchFlushMillis` | `500` | group-commit interval for `BATCH` |
-| `compression` | `DEFLATE` | `NONE` / `DEFLATE` / `ZSTD`; fixed at store creation (old records stay readable) |
+| `compression` | `ZSTD` (when zstd-jni is available) else `DEFLATE` | `NONE` / `DEFLATE` / `ZSTD`; fixed at store creation (old records stay readable) |
 | `compressionLevel` | `4` | Deflate and ZSTD level 1–9. 4 ≈ vanilla zlib ratio at lower CPU. |
 | `compactRatio` | `0.5` | compact a shard when dead bytes exceed this fraction of the file |
 | `compactMinBytes` | `8388608` | never compact shards smaller than this (8 MiB) |

@@ -38,7 +38,7 @@ import java.util.Set;
 /**
  * Server-level conversion driver: walks a Minecraft world root and converts the
  * world's player data plus every dimension (overworld / the_nether / the_end /
- * modded, …) in a single call.
+ * modded, ...) in a single call.
  *
  * <p>Used by both the {@code folesium-converter} CLI and the Folia server's
  * {@code --folesiumConvertToFolesium} / {@code --folesiumConvertToAnvil} startup
@@ -91,7 +91,7 @@ public final class WorldConversionService {
     }
 
     /**
-     * Converts {@code worldRoot} — its player data and all of its dimensions —
+     * Converts {@code worldRoot} -- its player data and all of its dimensions --
      * according to {@code dir}. For the Folesium direction, dimension stores are
      * opened/created at {@code <dimension>/folesium/} and the player store at
      * {@code <world>/folesium/}; for the Anvil direction the vanilla files are
@@ -102,8 +102,8 @@ public final class WorldConversionService {
      * backup and a note is printed telling the operator what can now be removed
      * manually.</p>
      *
-     * <p>Anything with no source data is silently skipped — no Anvil {@code region/}
-     * dir for TO_FOLESIUM, no store for TO_ANVIL — which lets the same call work on a
+     * <p>Anything with no source data is silently skipped -- no Anvil {@code region/}
+     * dir for TO_FOLESIUM, no store for TO_ANVIL -- which lets the same call work on a
      * brand-new world.</p>
      */
     public Report convertWorld(Path worldRoot, Direction dir, FolesiumConfig config) throws IOException {
@@ -118,7 +118,7 @@ public final class WorldConversionService {
         Set<Path> keptStores = new LinkedHashSet<>();
         if (dir == Direction.TO_ANVIL) {
             // Problem B: list the PLAYER store whenever it actually exists as a PLAYERS
-            // store — even when it holds zero records. Judging by the conversion record
+            // store -- even when it holds zero records. Judging by the conversion record
             // count (players > 0) would hide an empty-but-real store from the log.
             Path playerStore = PlayerDataConverter.storeDirectoryFor(worldRoot);
             if (Files.isDirectory(playerStore)
@@ -233,8 +233,8 @@ public final class WorldConversionService {
      *
      * <p>A directory counts as a dimension when it contains an Anvil {@code region/}
      * directory, or a {@code folesium/} store whose recorded role is
-     * {@link FolesiumDatabase.StoreRole#DIMENSION}. Checking the role — not merely the
-     * directory name — is what keeps a world root holding a <em>player</em> store from
+     * {@link FolesiumDatabase.StoreRole#DIMENSION}. Checking the role -- not merely the
+     * directory name -- is what keeps a world root holding a <em>player</em> store from
      * being converted as if it were a dimension.</p>
      *
      * <p>The scan is recursive and stops descending once a dimension directory is

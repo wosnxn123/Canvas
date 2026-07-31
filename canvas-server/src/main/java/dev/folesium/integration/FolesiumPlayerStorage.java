@@ -40,14 +40,14 @@ import net.minecraft.nbt.NbtIo;
  * <p>Vanilla stores one small file per player and per data type (26.x layout;
  * older versions used {@code <world>/playerdata} etc. directly under the world root):</p>
  * <pre>
- * &lt;world&gt;/players/data/&lt;uuid&gt;.dat           gzip NBT   (inventory, position, health, …)
+ * &lt;world&gt;/players/data/&lt;uuid&gt;.dat           gzip NBT   (inventory, position, health, ...)
  * &lt;world&gt;/players/advancements/&lt;uuid&gt;.json  UTF-8 JSON
  * &lt;world&gt;/players/stats/&lt;uuid&gt;.json         UTF-8 JSON
  * </pre>
  * <p>Every autosave rewrites, renames and fsyncs each of those files, which on a
  * busy server turns into hundreds of tiny synchronous file operations. Folesium
  * routes all three into one store next to them ({@code <world>/players/folesium}
- * on 26.x, {@code <world>/folesium} on the older layout — the same place
+ * on 26.x, {@code <world>/folesium} on the older layout -- the same place
  * cesium-fabric puts its {@code players.db}) with keyspaces {@code playerdata},
  * {@code advancements} and {@code stats}, so an autosave becomes a handful of
  * appends plus one group commit.</p>
@@ -83,7 +83,7 @@ public final class FolesiumPlayerStorage implements AutoCloseable {
      * Vanilla directory names, used for the lazy-migration fallback reads. The player
      * NBT directory is {@code <root>/data} since Minecraft 26.x
      * ({@code LevelResource.PLAYER_DATA_DIR = "players/data"}, and this class receives
-     * {@code players/} as its root) and {@code <root>/playerdata} on older layouts —
+     * {@code players/} as its root) and {@code <root>/playerdata} on older layouts --
      * both are tried, in that order.
      */
     static final String DIR_DATA = "data";
@@ -93,7 +93,7 @@ public final class FolesiumPlayerStorage implements AutoCloseable {
 
     /**
      * The storage for the running server. A server has exactly one player data
-     * directory, so a single handle is enough — and it lets {@link FolesiumPlayerFiles}
+     * directory, so a single handle is enough -- and it lets {@link FolesiumPlayerFiles}
      * redirect the advancement/statistics JSON without threading a reference through
      * {@code PlayerAdvancements} and {@code ServerStatsCounter}.
      */
