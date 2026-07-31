@@ -125,8 +125,10 @@ public record FolesiumConfig(
             throw new IllegalArgumentException(
                     "compressionLevel must be in [1," + maxLevel + "] for " + compression + ": " + compressionLevel);
         }
-        if (compactRatio <= 0 || compactRatio > 1) {
-            throw new IllegalArgumentException("compactRatio must be in (0,1]");
+        // NaN fails both `<= 0` and `> 1`, so the positive form is required: a NaN here would
+        // otherwise pass and make ShardFile.needsCompaction() permanently false (store never compacts).
+        if (!(compactRatio > 0) || compactRatio > 1) {
+            throw new IllegalArgumentException("compactRatio must be in (0,1]: " + compactRatio);
         }
         if (compactMinBytes < 0) {
             throw new IllegalArgumentException("compactMinBytes must be >= 0: " + compactMinBytes);
@@ -206,7 +208,7 @@ public record FolesiumConfig(
         if (compressionLevel != other.compressionLevel) {
             out.add("compressionLevel: " + compressionLevel + " -> " + other.compressionLevel);
         }
-        if (compactRatio != other.compactRatio) {
+        if (Double.compare(compactRatio, other.compactRatio) != 0) {
             out.add("compactRatio: " + compactRatio + " -> " + other.compactRatio);
         }
         if (compactMinBytes != other.compactMinBytes) {

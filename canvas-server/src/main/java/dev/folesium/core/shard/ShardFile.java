@@ -295,7 +295,12 @@ public final class ShardFile implements AutoCloseable {
             }
             long dead = b.getLong();
             int count = b.getInt();
-            Map<Bytes, Loc> loaded = new HashMap<>(count * 2);
+            // Smallest conceivable entry is 2+0+8+4+4+1 = 19 bytes, so a count that cannot fit
+            // in the remaining bytes is nonsense - refuse it instead of pre-sizing a huge map.
+            if (count < 0 || (long) count * 19L > b.remaining()) {
+                return false;
+            }
+            Map<Bytes, Loc> loaded = new HashMap<>(Math.max(16, count * 2));
             for (int i = 0; i < count; i++) {
                 int keyLen = b.getShort() & 0xFFFF;
                 byte[] key = new byte[keyLen];
@@ -534,20 +539,31 @@ public final class ShardFile implements AutoCloseable {
         }
     }
 
-    /** Rewrites the shard keeping only live records. Tombstones are dropped. */
+    /**
+     * Rewrites the shard keeping only live records. Tombstones are dropped.
+     *
+     * <p>The replacement is built beside the live file and only swapped in once it is
+     * complete and fsynced, so a crash at any point leaves the original log intact (the
+     * leftover {@code .compact} file is ignored by everything and removed on the next
+     * successful compaction). A failure <em>before</em> the swap reopens the original
+     * channel, so a shard that could not be compacted stays fully usable.</p>
+     */
     public void compact() {
         lock.writeLock().lock();
+        Path tmp = path.resolveSibling(path.getFileName() + ".compact");
+        boolean swapped = false;
         try {
-            Path tmp = path.resolveSibling(path.getFileName() + ".compact");
-            Map<Bytes, Loc> newIndex = new HashMap<>(index.size() * 2);
+            Map<Bytes, Loc> newIndex = new HashMap<>(Math.max(16, index.size() * 2));
+            long pos = FILE_HEADER_LEN;
             try (FileChannel out = FileChannel.open(tmp,
                     StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
                 ByteBuffer hdr = ByteBuffer.allocate(FILE_HEADER_LEN);
                 hdr.put(FILE_MAGIC).putShort(FORMAT_VERSION).putShort((short) 0)
                         .putInt(shardIndex).putInt(shardCount);
                 hdr.flip();
-                out.write(hdr, 0);
-                long pos = FILE_HEADER_LEN;
+                while (hdr.hasRemaining()) {
+                    out.write(hdr, FILE_HEADER_LEN - hdr.remaining());
+                }
                 for (Map.Entry<Bytes, Loc> e : index.entrySet()) {
                     Loc loc = e.getValue();
                     ByteBuffer whole = ByteBuffer.allocate(loc.recordLength);
@@ -560,18 +576,37 @@ public final class ShardFile implements AutoCloseable {
                     pos += loc.recordLength;
                 }
                 out.force(false);
-                channel.close();
-                Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-                channel = FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE);
-                index = newIndex;
-                writePos = pos;
-                deadBytes = 0;
-                dirty = false;
-                Files.deleteIfExists(hintPath);
             }
+            // The stale hint describes the pre-compaction log; drop it first so a crash in the
+            // middle of the swap can never pair the new file with the old index.
+            Files.deleteIfExists(hintPath);
+            channel.close();
+            Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            swapped = true;
+            channel = FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE);
+            index = newIndex;
+            writePos = pos;
+            deadBytes = 0;
+            dirty = false;
         } catch (IOException e) {
-            throw new FolesiumException("Compaction failed for " + path, e);
+            FolesiumException failure = new FolesiumException("Compaction failed for " + path, e);
+            if (!swapped && !channel.isOpen()) {
+                // Nothing was replaced: put the shard back in working order.
+                try {
+                    channel = FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE);
+                } catch (IOException reopen) {
+                    failure.addSuppressed(reopen);
+                }
+            }
+            throw failure;
         } finally {
+            if (!swapped) {
+                try {
+                    Files.deleteIfExists(tmp);
+                } catch (IOException ignored) {
+                    // Scratch file only; the next compaction truncates it.
+                }
+            }
             lock.writeLock().unlock();
         }
     }
@@ -589,6 +624,21 @@ public final class ShardFile implements AutoCloseable {
             }
         } catch (IOException e) {
             throw new FolesiumException("Iteration failed in " + path, e);
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
+    /**
+     * Iterates all live keys without touching the log. Lets callers that only need the key
+     * set (grouping, counting, export planning) skip reading and decompressing every value.
+     */
+    public void forEachKey(java.util.function.Consumer<byte[]> consumer) {
+        lock.readLock().lock();
+        try {
+            for (Bytes k : index.keySet()) {
+                consumer.accept(k.array());
+            }
         } finally {
             lock.readLock().unlock();
         }

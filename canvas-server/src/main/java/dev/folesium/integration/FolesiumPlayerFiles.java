@@ -60,13 +60,37 @@ public final class FolesiumPlayerFiles {
     private record Target(FolesiumPlayerStorage storage, String directory, UUID player) {
     }
 
+    /**
+     * The recognizer for the currently active storage. Building one normalises the world
+     * root, and these methods sit on the advancement/statistics save path of every player
+     * on every autosave, so the instance is cached and only rebuilt when the active storage
+     * actually changes (world unload/reload). Both fields are only ever written together
+     * under {@link #RECOGNIZER_LOCK}.
+     */
+    private static final Object RECOGNIZER_LOCK = new Object();
+    private static volatile FolesiumPlayerStorage recognizerOwner;
+    private static volatile PlayerPathRecognizer recognizer;
+
+    private static PlayerPathRecognizer recognizerFor(FolesiumPlayerStorage storage) {
+        PlayerPathRecognizer cached = recognizer;
+        if (cached != null && recognizerOwner == storage) {
+            return cached;
+        }
+        synchronized (RECOGNIZER_LOCK) {
+            if (recognizer == null || recognizerOwner != storage) {
+                recognizer = new PlayerPathRecognizer(storage.worldRootForClassify());
+                recognizerOwner = storage;
+            }
+            return recognizer;
+        }
+    }
+
     private static Target target(Path path) {
         FolesiumPlayerStorage storage = FolesiumPlayerStorage.active();
         if (storage == null || path == null) {
             return null;
         }
-        PlayerPathRecognizer rec = new PlayerPathRecognizer(storage.worldRootForClassify());
-        PlayerPathRecognizer.Kind kind = rec.classify(path);
+        PlayerPathRecognizer.Kind kind = recognizerFor(storage).classify(path);
         if (kind == null) {
             return null;
         }

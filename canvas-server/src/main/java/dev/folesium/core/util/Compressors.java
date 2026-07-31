@@ -19,7 +19,6 @@
 package dev.folesium.core.util;
 
 import dev.folesium.core.FolesiumConfig.Compression;
-import dev.folesium.core.util.ZstdNative;
 
 import java.io.ByteArrayOutputStream;
 import java.util.zip.DataFormatException;
@@ -48,7 +47,10 @@ public final class Compressors {
     }
 
     private static byte[] deflate(byte[] raw, int level) {
-        Deflater d = new Deflater(level);
+        // Deflater only accepts 0..9; clamp defensively in case a caller passes a level
+        // validated for a different algorithm (e.g. a ZSTD level routed to DEFLATE).
+        int lvl = level < 0 ? 0 : Math.min(level, 9);
+        Deflater d = new Deflater(lvl);
         try {
             d.setInput(raw);
             d.finish();
@@ -71,8 +73,19 @@ public final class Compressors {
             int off = 0;
             while (off < rawLen && !inf.finished()) {
                 int n = inf.inflate(out, off, rawLen - off);
-                if (n == 0 && inf.needsInput()) {
-                    throw new IllegalStateException("Truncated compressed record");
+                if (n == 0) {
+                    if (inf.finished()) {
+                        break;
+                    }
+                    if (inf.needsDictionary()) {
+                        throw new IllegalStateException("Compressed record requires a preset dictionary");
+                    }
+                    if (inf.needsInput()) {
+                        throw new IllegalStateException("Truncated compressed record");
+                    }
+                    // Made no progress yet is neither finished nor needs more input: a corrupt
+                    // stream that would otherwise deadlock the read thread.
+                    throw new IllegalStateException("Compressed record made no progress");
                 }
                 off += n;
             }

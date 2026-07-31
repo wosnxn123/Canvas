@@ -236,17 +236,23 @@ public final class PlayerDataConverter {
                 }
                 Path out = playerRoot.resolve(m.dir());
                 Files.createDirectories(out);
-                List<byte[][]> records = new ArrayList<>();
-                ks.forEach((k, v) -> records.add(new byte[][]{k, v}));
-                for (byte[][] record : records) {
-                    if (record[0].length != UuidKeys.LENGTH) {
+                // Keys first, values one at a time: buffering every record would hold the
+                // whole keyspace (all player .dat/.json payloads) in memory at once.
+                List<byte[]> keys = new ArrayList<>();
+                ks.forEachKey(keys::add);
+                for (byte[] key : keys) {
+                    if (key.length != UuidKeys.LENGTH) {
                         continue; // not a player key; leave it alone rather than guess
                     }
-                    UUID id = UuidKeys.decode(record[0]);
+                    byte[] value = ks.get(key);
+                    if (value == null) {
+                        continue; // deleted between the key scan and the read
+                    }
+                    UUID id = UuidKeys.decode(key);
                     Path file = out.resolve(id + m.extension());
-                    Files.write(file, record[1]);
+                    Files.write(file, value);
                     entries++;
-                    bytes += record[1].length;
+                    bytes += value.length;
                 }
             }
         }

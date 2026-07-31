@@ -18,7 +18,9 @@
 
 package dev.folesium.core.util;
 
-import java.lang.reflect.Method;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 
 /**
  * Reflection bridge to {@code com.github.luben.zstd.Zstd}, the JNI-backed zstd
@@ -38,29 +40,32 @@ public final class ZstdNative {
 
     private ZstdNative() {}
 
-    private static final class Handle {
-        final Method compress;
-        final Method decompress;
-
-        Handle() throws Exception {
-            Class<?> zstd = Class.forName("com.github.luben.zstd.Zstd");
-            this.compress = zstd.getMethod("compress", byte[].class, int.class);
-            this.decompress = zstd.getMethod("decompress", byte[].class, int.class);
-        }
-    }
-
-    private static final Handle HANDLE;
+    /**
+     * {@code MethodHandle}s rather than {@code Method.invoke}: compression sits on the
+     * per-record write path, and {@code invokeExact} against a static final handle costs
+     * about as much as a direct call, with no argument boxing or varargs array per record.
+     */
+    private static final MethodHandle COMPRESS;
+    private static final MethodHandle DECOMPRESS;
     private static final boolean AVAILABLE;
 
     static {
-        Handle h = null;
+        MethodHandle compress = null;
+        MethodHandle decompress = null;
         try {
-            h = new Handle();
+            Class<?> zstd = Class.forName("com.github.luben.zstd.Zstd");
+            MethodHandles.Lookup lookup = MethodHandles.publicLookup();
+            MethodType type = MethodType.methodType(byte[].class, byte[].class, int.class);
+            compress = lookup.findStatic(zstd, "compress", type);
+            decompress = lookup.findStatic(zstd, "decompress", type);
         } catch (Throwable ignored) {
             // zstd-jni not on the classpath; ZSTD compression simply unavailable.
+            compress = null;
+            decompress = null;
         }
-        HANDLE = h;
-        AVAILABLE = h != null;
+        COMPRESS = compress;
+        DECOMPRESS = decompress;
+        AVAILABLE = compress != null && decompress != null;
     }
 
     /** Whether {@code zstd-jni} is loadable on the current classpath. */
@@ -69,32 +74,34 @@ public final class ZstdNative {
     }
 
     public static byte[] compress(byte[] src, int level) {
-        if (HANDLE == null) {
+        MethodHandle mh = COMPRESS;
+        if (mh == null) {
             throw new UnsupportedOperationException(
                     "Folesium ZSTD compression requested but zstd-jni is not on the classpath. "
                             + "Run on a Folia/Canvas server (which ships zstd-jni) or add com.github.luben:zstd-jni.");
         }
         try {
-            return (byte[]) HANDLE.compress.invoke(null, src, level);
-        } catch (RuntimeException e) {
+            return (byte[]) mh.invokeExact(src, level);
+        } catch (RuntimeException | Error e) {
             throw e;
-        } catch (Exception e) {
-            throw new IllegalStateException("zstd compression failed", e);
+        } catch (Throwable t) {
+            throw new IllegalStateException("zstd compression failed", t);
         }
     }
 
     public static byte[] decompress(byte[] src, int rawLen) {
-        if (HANDLE == null) {
+        MethodHandle mh = DECOMPRESS;
+        if (mh == null) {
             throw new UnsupportedOperationException(
                     "Folesium ZSTD decompression requested but zstd-jni is not on the classpath. "
                             + "Run on a Folia/Canvas server (which ships zstd-jni) or add com.github.luben:zstd-jni.");
         }
         try {
-            return (byte[]) HANDLE.decompress.invoke(null, src, rawLen);
-        } catch (RuntimeException e) {
+            return (byte[]) mh.invokeExact(src, rawLen);
+        } catch (RuntimeException | Error e) {
             throw e;
-        } catch (Exception e) {
-            throw new IllegalStateException("zstd decompression failed", e);
+        } catch (Throwable t) {
+            throw new IllegalStateException("zstd decompression failed", t);
         }
     }
 }

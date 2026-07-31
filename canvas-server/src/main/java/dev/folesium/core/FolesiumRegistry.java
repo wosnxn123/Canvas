@@ -24,7 +24,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.logging.StreamHandler;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -410,7 +409,9 @@ public final class FolesiumRegistry {
                 out.add(new ReloadReport(db.directory(), db.applyRuntimeConfig(cfg), null));
             } catch (RuntimeException ex) {
                 LOGGER.log(System.Logger.Level.ERROR, "Folesium: reload failed for " + db.directory(), ex);
-                out.add(new ReloadReport(db.directory(), null, ex.getMessage()));
+                // toString(), never getMessage(): a message-less RuntimeException would make
+                // error() null too, and callers use "error != null" to tell failure apart.
+                out.add(new ReloadReport(db.directory(), null, ex.toString()));
             }
         }
         out.sort(java.util.Comparator.comparing(r -> r.directory().toString()));
@@ -503,14 +504,16 @@ public final class FolesiumRegistry {
                 for (ReloadReport r : reload()) {
                     if (r.error() != null) {
                         LOGGER.log(System.Logger.Level.ERROR, "Folesium: {0}: {1}", r.directory(), r.error());
-                    } else if (r.result().changed()) {
+                    }
+                    if (r.result() == null) {
+                        continue;
+                    }
+                    if (r.result().changed()) {
                         LOGGER.log(System.Logger.Level.INFO, "Folesium: {0}: {1}",
                                 r.directory(), String.join(", ", r.result().changes()));
                     }
-                    if (r.result() != null) {
-                        for (String note : r.result().notes()) {
-                            LOGGER.log(System.Logger.Level.WARNING, "Folesium: {0}: {1}", r.directory(), note);
-                        }
+                    for (String note : r.result().notes()) {
+                        LOGGER.log(System.Logger.Level.WARNING, "Folesium: {0}: {1}", r.directory(), note);
                     }
                 }
             } catch (RuntimeException ex) {
@@ -679,6 +682,9 @@ public final class FolesiumRegistry {
         for (FolesiumDatabase db : snapshot) {
             try {
                 db.flush();
+                // The server's save path is also where a store gets the chance to reclaim
+                // dead bytes; throttled internally, and a no-op unless a shard is bloated.
+                db.compactIfNeededThrottled();
             } catch (RuntimeException ex) {
                 LOGGER.log(System.Logger.Level.ERROR, "Folesium: flush failed " + db.directory(), ex);
             }

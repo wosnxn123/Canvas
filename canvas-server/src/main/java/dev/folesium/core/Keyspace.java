@@ -44,8 +44,22 @@ public final class Keyspace implements AutoCloseable {
         this.name = name;
         this.shards = new ShardFile[config.shardCount()];
         this.shardMask = config.shardCount() - 1;
-        for (int i = 0; i < shards.length; i++) {
-            shards[i] = new ShardFile(dir.resolve(String.format("%s-%04d.flog", name, i)), i, config);
+        int opened = 0;
+        try {
+            for (; opened < shards.length; opened++) {
+                shards[opened] = new ShardFile(dir.resolve(String.format("%s-%04d.flog", name, opened)), opened, config);
+            }
+        } catch (RuntimeException e) {
+            // One bad shard must not leak the handles of the shards already opened: nobody
+            // holds a reference to this half-built keyspace, so nothing else can close them.
+            for (int i = 0; i < opened; i++) {
+                try {
+                    shards[i].close();
+                } catch (RuntimeException suppressed) {
+                    e.addSuppressed(suppressed);
+                }
+            }
+            throw e;
         }
     }
 
@@ -165,8 +179,22 @@ public final class Keyspace implements AutoCloseable {
         }
     }
 
+    /**
+     * Iterates every live key without reading any value - much cheaper than {@link #forEach}
+     * when only the key set is needed, since no record is read back or decompressed.
+     */
+    public void forEachKey(java.util.function.Consumer<byte[]> consumer) {
+        for (ShardFile s : shards) {
+            s.forEachKey(consumer);
+        }
+    }
+
     /** Iterates one shard only; lets callers parallelise a full scan safely. */
     public void forEachShard(int shardIndex, BiConsumer<byte[], byte[]> consumer) {
+        if (shardIndex < 0 || shardIndex >= shards.length) {
+            throw new IndexOutOfBoundsException("shardIndex " + shardIndex + " outside [0,"
+                    + shards.length + ") of keyspace '" + name + "'");
+        }
         shards[shardIndex].forEach(consumer);
     }
 

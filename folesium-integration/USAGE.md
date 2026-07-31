@@ -82,21 +82,46 @@ Folesium: opened PLAYERS store .../world/players/folesium
 ## 4. Configuration reference
 
 All keys work both as `-Dfolesium.<key>` and as `<key>` in `folesium.properties`.
-Unparseable values fall back to the default and log a warning — they never abort
-startup.
+Unparseable **and out-of-range** values fall back to the default and log a warning — they
+never abort startup.
 
-| key | default | meaning |
-|---|---|---|
-| `enabled` | **`false`** | master switch. Off = 100 % stock server. |
-| `configFile` | `folesium.properties` | alternative config file path (system property only) |
-| `shards` | auto (8/16/32/64/128 by CPU cores) | shard count for **newly created** stores (power of two, 1–1024; existing stores keep their on-disk value). The default is auto-tuned from CPU core count; 8–16 is fine for small servers. |
-| `durability` | `BATCH` | `ALWAYS` = fsync every write; `BATCH` = background group commit; `EXPLICIT` = fsync only on flush/close |
-| `batchFlushMillis` | `500` | group-commit interval for `BATCH` |
-| `compression` | `ZSTD` (when zstd-jni is available) else `DEFLATE` | `NONE` / `DEFLATE` / `ZSTD`; fixed at store creation (old records stay readable) |
-| `compressionLevel` | `4` | Deflate and ZSTD level 1–9. 4 ≈ vanilla zlib ratio at lower CPU. |
-| `compactRatio` | `0.5` | compact a shard when dead bytes exceed this fraction of the file |
-| `compactMinBytes` | `8388608` | never compact shards smaller than this (8 MiB) |
-| `verifyChecksums` | `false` | re-verify record CRC32C on every read (~2× read I/O; recovery scans always verify) |
+The "applies" column says how a change reaches an **existing** store: **live** = within
+seconds, no restart (see §4.1); **next start** = the store is rewritten when next opened;
+**world load** = the world binds its backend when it loads.
+
+| key | default | applies | meaning |
+|---|---|---|---|
+| `enabled` | **`false`** | world load | master switch. Off = 100 % stock server. |
+| `configFile` | `folesium.properties` | startup | alternative config file path (system property only) |
+| `shards` | auto (8/16/32/64/128 by CPU cores) | next start | shard count (power of two, 1–1024). Changing it reshards the existing store automatically and crash-safely on the next open. Auto-tuned from CPU core count; 8–16 is fine for small servers. |
+| `durability` | `BATCH` | live | `ALWAYS` = fsync every write; `BATCH` = background group commit; `EXPLICIT` = fsync only on flush/close. Switching to/from `BATCH` starts/stops the group-commit thread. |
+| `batchFlushMillis` | `500` | live | group-commit interval for `BATCH` |
+| `compression` | `ZSTD` (when zstd-jni is available) else `DEFLATE` | live | `NONE` / `DEFLATE` / `ZSTD`. Applies to new writes only; every record records its own codec, so a change needs no migration and old records stay readable. |
+| `compressionLevel` | `4` | live | Deflate 1–9, ZSTD 1–22. 4 ≈ vanilla zlib ratio at lower CPU. |
+| `compactRatio` | `0.5` | live | compact a shard when dead bytes exceed this fraction of the file |
+| `compactMinBytes` | `8388608` | live | never compact shards smaller than this (8 MiB) |
+| `verifyChecksums` | `false` | live | re-verify record CRC32C on every read (~2× read I/O; recovery scans always verify) |
+| `autoReload` | `true` | live | watch `folesium.properties` and apply edits to the running server |
+| `autoReloadSeconds` | `10` | live | how often the file is checked for edits |
+
+### 4.1 Retuning a running server
+
+A configuration that turns out not to suit the machine does **not** need a restart to fix.
+Edit `folesium.properties` and save it; within `autoReloadSeconds` the change is applied to
+every open store and the log states exactly what changed:
+
+```text
+[INFO] Folesium: folesium.properties changed on disk, applying it to the running server
+[INFO] Folesium: .../world/players/folesium: durability: BATCH -> ALWAYS, compressionLevel: 4 -> 9
+```
+
+`enabled` and `shards` are the only two that cannot fully apply live — they are reported in
+the log rather than silently dropped, and `shards` is then applied by an automatic reshard on
+the next start (staged three-phase commit: a crash leaves either the old store untouched or a
+swap that resumes and finishes on the next open). Take the usual backup before a big layout
+change on a large world.
+
+Set `autoReload=false` to keep the old restart-to-apply behaviour.
 
 ### Durability guidance
 
@@ -240,7 +265,7 @@ world/
 | `ZSTD` store open fails | `zstd-jni` not on the classpath (only possible outside the server); use the server flags or add the dependency |
 | `.mca` files still present after conversion | expected — the converter never deletes files; remove them manually once verified (§5) |
 | `folesium/` still present after rollback | expected — same policy; remove manually (§6) |
-| store directory keeps growing | dead records are reclaimed by compaction once a shard passes `compactRatio` × size and `compactMinBytes`; lower these to compact sooner |
+| store directory keeps growing | dead records are reclaimed by compaction: the engine checks every open store at most once every 5 minutes and rewrites a shard once it passes `compactRatio` × size and `compactMinBytes`; lower those two to compact sooner |
 | want to verify integrity | start with `-Dfolesium.verifyChecksums=true`, or `folesium-converter … inspect <store>` |
 
 Log lines to know:

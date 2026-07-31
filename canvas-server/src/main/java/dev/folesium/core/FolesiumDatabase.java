@@ -439,8 +439,14 @@ public final class FolesiumDatabase implements AutoCloseable {
             }
         } else {
             stopFlusher();
-            // Leaving BATCH must not silently drop whatever the last window buffered.
-            flush();
+            // Leaving BATCH must not silently drop whatever the last window buffered. A
+            // concurrent close() could have already closed the shards, so guard the flush.
+            try {
+                flush();
+            } catch (RuntimeException e) {
+                LOGGER.log(System.Logger.Level.ERROR,
+                        "Folesium: flush during durability change failed for " + dir, e);
+            }
         }
 
         LOGGER.log(System.Logger.Level.INFO, "Folesium: {0} reconfigured - {1}", dir, String.join(", ", changes));
@@ -472,7 +478,7 @@ public final class FolesiumDatabase implements AutoCloseable {
     }
 
     public Map<String, Keyspace> openKeyspaces() {
-        return Collections.unmodifiableMap(new LinkedHashMap<>(keyspaces));
+        return Map.copyOf(keyspaces);
     }
 
     /** fsyncs every dirty shard of every open keyspace. */
@@ -486,6 +492,38 @@ public final class FolesiumDatabase implements AutoCloseable {
         for (Keyspace ks : keyspaces.values()) {
             ks.compactIfNeeded();
         }
+    }
+
+    /** How often a store looks at its shards to decide whether any of them needs compacting. */
+    private static final long COMPACT_CHECK_INTERVAL_NANOS = 5L * 60 * 1_000_000_000L;
+
+    private final java.util.concurrent.atomic.AtomicLong lastCompactCheck =
+            new java.util.concurrent.atomic.AtomicLong(System.nanoTime());
+
+    /**
+     * {@link #compactIfNeeded()}, rate-limited to once every five minutes per store.
+     *
+     * <p>Compaction has to be driven by <em>something</em>: an append-only log that is never
+     * compacted grows without bound and read amplification grows with it. Rather than relying
+     * on the host server to call it (nothing did), the engine drives it itself from the
+     * group-commit loop and from {@link FolesiumRegistry#flushAll()}. The check itself is a
+     * per-shard read lock plus two comparisons, and the thresholds
+     * ({@code compactMinBytes} / {@code compactRatio}) mean a rewrite only happens for shards
+     * that really are mostly dead bytes.</p>
+     *
+     * @return {@code true} if the check ran (not that anything was compacted)
+     */
+    public boolean compactIfNeededThrottled() {
+        if (closed.get()) {
+            return false;
+        }
+        long now = System.nanoTime();
+        long previous = lastCompactCheck.get();
+        if (now - previous < COMPACT_CHECK_INTERVAL_NANOS || !lastCompactCheck.compareAndSet(previous, now)) {
+            return false;
+        }
+        compactIfNeeded();
+        return true;
     }
 
     /** Starts the group-commit thread if {@code durability == BATCH} and none is running. */
@@ -560,6 +598,9 @@ public final class FolesiumDatabase implements AutoCloseable {
                 }
                 try {
                     flush();
+                    // Off the region threads and rate-limited: this is the only thing that
+                    // keeps an append-only store from growing without bound.
+                    compactIfNeededThrottled();
                 } catch (RuntimeException e) {
                     LOGGER.log(System.Logger.Level.ERROR, "Folesium group-commit failed for " + dir, e);
                 }
@@ -580,18 +621,23 @@ public final class FolesiumDatabase implements AutoCloseable {
         }
         stopFlusher();
         FolesiumException first = null;
-        for (Keyspace ks : keyspaces.values()) {
-            try {
-                ks.close();
-            } catch (FolesiumException e) {
-                if (first == null) {
-                    first = e;
-                } else {
-                    first.addSuppressed(e);
+        // Taken for the same reason as in keyspace(): a concurrent first-use of a keyspace
+        // that slipped past the closed check would otherwise register a fresh Keyspace after
+        // the map was cleared, leaking its shard file handles for the lifetime of the JVM.
+        synchronized (keyspaceLock) {
+            for (Keyspace ks : keyspaces.values()) {
+                try {
+                    ks.close();
+                } catch (FolesiumException e) {
+                    if (first == null) {
+                        first = e;
+                    } else {
+                        first.addSuppressed(e);
+                    }
                 }
             }
+            keyspaces.clear();
         }
-        keyspaces.clear();
         if (first != null) {
             throw first;
         }

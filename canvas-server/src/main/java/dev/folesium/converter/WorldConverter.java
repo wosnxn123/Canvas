@@ -169,14 +169,16 @@ public final class WorldConverter {
                 Path out = dimensionDir.resolve(anvilDir);
                 Files.createDirectories(out);
 
-                // Group chunk keys by region.
-                Map<Long, List<long[]>> byRegion = new ConcurrentHashMap<>();
-                ks.forEach((k, v) -> {
+                // Group chunk keys by region. Keys only: forEach would read back and
+                // decompress every chunk here, and each one is read again below anyway -
+                // that is a full extra decompression pass over the whole dimension.
+                Map<Long, List<Long>> byRegion = new ConcurrentHashMap<>();
+                ks.forEachKey(k -> {
                     long key = LongKeys.decode(k);
                     int cx = LongKeys.chunkX(key);
                     int cz = LongKeys.chunkZ(key);
                     long regionKey = LongKeys.chunkKey(cx >> 5, cz >> 5);
-                    byRegion.computeIfAbsent(regionKey, r -> new ArrayList<>()).add(new long[]{key});
+                    byRegion.computeIfAbsent(regionKey, r -> new ArrayList<>()).add(key);
                 });
 
                 runParallel(new ArrayList<>(byRegion.keySet()), regionKey -> {
@@ -184,8 +186,7 @@ public final class WorldConverter {
                     int rz = LongKeys.chunkZ(regionKey);
                     Path mca = out.resolve("r." + rx + "." + rz + ".mca");
                     try (AnvilRegionFile rf = new AnvilRegionFile(mca)) {
-                        for (long[] holder : byRegion.get(regionKey)) {
-                            long key = holder[0];
+                        for (long key : byRegion.get(regionKey)) {
                             byte[] payload = ks.get(key);
                             if (payload == null) {
                                 continue;

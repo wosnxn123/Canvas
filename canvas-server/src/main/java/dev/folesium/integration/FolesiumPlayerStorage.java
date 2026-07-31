@@ -106,6 +106,12 @@ public final class FolesiumPlayerStorage implements AutoCloseable {
     private final Keyspace advancements;
     private final Keyspace stats;
     private volatile boolean closed;
+    /**
+     * The final-flush hook registered in {@link #createIfEnabled}. Kept so {@link #close()}
+     * can unregister it: a server that loads and unloads worlds repeatedly would otherwise
+     * accumulate one hook per storage, each pinning a closed instance for the JVM's lifetime.
+     */
+    private volatile Thread shutdownHook;
 
     private FolesiumPlayerStorage(Path worldRoot, Path storeDir, FolesiumDatabase database) {
         this.worldRoot = worldRoot.toAbsolutePath().normalize();
@@ -131,8 +137,9 @@ public final class FolesiumPlayerStorage implements AutoCloseable {
         // The server has no single "player storage close" call to hook, so guarantee a
         // final fsync at JVM exit. Everything before that is covered by the configured
         // durability mode (group commit by default, per-write fsync with durability=ALWAYS).
-        Runtime.getRuntime().addShutdownHook(
-                Thread.ofPlatform().unstarted(storage::flushQuietly));
+        Thread hook = Thread.ofPlatform().name("folesium-player-flush").unstarted(storage::flushQuietly);
+        storage.shutdownHook = hook;
+        Runtime.getRuntime().addShutdownHook(hook);
         LOGGER.log(System.Logger.Level.INFO, "Folesium: player data {0} -> {1}", worldRoot, storeDir);
         return storage;
     }
@@ -297,6 +304,16 @@ public final class FolesiumPlayerStorage implements AutoCloseable {
         closed = true;
         if (active == this) {
             active = null;
+        }
+        Thread hook = shutdownHook;
+        shutdownHook = null;
+        if (hook != null) {
+            try {
+                Runtime.getRuntime().removeShutdownHook(hook);
+            } catch (IllegalStateException alreadyShuttingDown) {
+                // close() is running from the shutdown sequence itself; the hook either
+                // already ran or is about to, and flushQuietly() is a no-op once closed.
+            }
         }
         flush();
         // Pass the instance we actually hold: if the registry has since reopened the store

@@ -75,7 +75,13 @@ public final class FolesiumRegionStorage implements AutoCloseable {
     private final String keyspaceName;
     private final FolesiumDatabase database;
     private final Keyspace keyspace;
-    private volatile boolean closed;
+    /**
+     * CAS, not a plain flag: the server closes storages from world unload and from the
+     * shutdown hook, and a double release would decrement the registry's reference count
+     * twice, closing a store another dimension is still using.
+     */
+    private final java.util.concurrent.atomic.AtomicBoolean closed =
+            new java.util.concurrent.atomic.AtomicBoolean();
 
     /**
      * Region keys whose {@code .mca} file is known to be absent. Used to skip the
@@ -242,10 +248,9 @@ public final class FolesiumRegionStorage implements AutoCloseable {
 
     @Override
     public void close() {
-        if (closed) {
+        if (!closed.compareAndSet(false, true)) {
             return;
         }
-        closed = true;
         anvilMissing.clear();
         keyspace.flush();
         // Pass the instance we actually hold: if the registry has since reopened the store

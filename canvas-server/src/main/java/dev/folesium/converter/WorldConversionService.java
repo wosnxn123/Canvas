@@ -239,7 +239,12 @@ public final class WorldConversionService {
      *
      * <p>The scan is recursive and stops descending once a dimension directory is
      * found, so arbitrarily nested modded dimension layouts
-     * ({@code dimensions/<ns>/<path>/<path>/...}) are discovered correctly.</p>
+     * ({@code dimensions/<ns>/<path>/<path>/...}) are discovered correctly. Directories
+     * that can only ever hold leaf data ({@code region/}, {@code folesium/}, ...) are
+     * skipped outright: descending into them on a large save means stat-ing tens of
+     * thousands of {@code .mca} and shard files for nothing. Entries that cannot be
+     * read (permissions, a dangling symlink) are ignored instead of aborting the whole
+     * conversion.</p>
      */
     static List<Path> discoverDimensions(Path worldRoot) throws IOException {
         List<Path> out = new ArrayList<>();
@@ -254,6 +259,9 @@ public final class WorldConversionService {
                 if (dir.equals(worldRoot) || seen.contains(dir)) {
                     return FileVisitResult.CONTINUE;
                 }
+                if (isDataLeafDirectory(dir)) {
+                    return FileVisitResult.SKIP_SUBTREE;
+                }
                 if (isDimensionDirectory(dir)) {
                     out.add(dir);
                     seen.add(dir);
@@ -261,8 +269,29 @@ public final class WorldConversionService {
                 }
                 return FileVisitResult.CONTINUE;
             }
+
+            @Override
+            public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                return FileVisitResult.CONTINUE;
+            }
         });
         return out;
+    }
+
+    /**
+     * Directories that hold data files rather than further dimensions. Walking into them
+     * can never discover a dimension, so the scan skips their whole subtree.
+     */
+    private static boolean isDataLeafDirectory(Path dir) {
+        Path name = dir.getFileName();
+        if (name == null) {
+            return false;
+        }
+        return switch (name.toString().toLowerCase(Locale.ROOT)) {
+            case FolesiumDatabase.STORE_DIR_NAME, "region", "entities", "poi", "data",
+                 "playerdata", "advancements", "stats", "datapacks", "serverconfig" -> true;
+            default -> false;
+        };
     }
 
     private static boolean isDimensionDirectory(Path dir) {

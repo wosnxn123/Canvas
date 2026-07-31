@@ -79,20 +79,41 @@ Folesium: opened PLAYERS store .../world/players/folesium
 ## 4. 配置项参考
 
 所有键既可写成 `-Dfolesium.<key>`，也可写在 `folesium.properties` 里。
-无法解析的值会回退到默认值并记录警告——绝不会中断启动。
+无法解析**以及超出取值范围**的值都会回退到默认值并记录警告——绝不会中断启动。
 
-| 键 | 默认 | 含义 |
-|---|---|---|
-| `enabled` | **`false`** | 总开关。关闭 = 100% 原生服务端。 |
-| `configFile` | `folesium.properties` | 备用配置文件路径（仅系统属性） |
-| `shards` | 自适应（按 CPU 核数取 8/16/32/64/128） | **新建**存储的分片数（2 的幂，1–1024；已有存储沿用盘上值）。默认值按 CPU 核数自适应；小型服务器用 8–16 即可。 |
-| `durability` | `BATCH` | `ALWAYS` = 每次写入 fsync；`BATCH` = 后台组提交；`EXPLICIT` = 仅 flush/close 时 fsync |
-| `batchFlushMillis` | `500` | `BATCH` 的组提交间隔 |
-| `compression` | `ZSTD`（zstd-jni 可用时）否则 `DEFLATE` | `NONE` / `DEFLATE` / `ZSTD`；建店时固定（旧记录始终可读） |
-| `compressionLevel` | `4` | Deflate 与 ZSTD 等级 1–9。4 ≈ 原版 zlib 压缩率但 CPU 更低。 |
-| `compactRatio` | `0.5` | 分片死字节超过文件的该比例时触发压实 |
-| `compactMinBytes` | `8388608` | 小于该大小（8 MiB）的分片不压实 |
-| `verifyChecksums` | `false` | 每次读取重校验 CRC32C（约 2 倍读 I/O；恢复扫描始终校验） |
+「生效方式」一列说明改动如何作用到**已存在**的存储：**实时** = 数秒内生效、无需重启（见 §4.1）；
+**下次启动** = 下次打开该存储时物理改写；**加载世界时** = 世界在加载时绑定其存储后端。
+
+| 键 | 默认 | 生效方式 | 含义 |
+|---|---|---|---|
+| `enabled` | **`false`** | 加载世界时 | 总开关。关闭 = 100% 原生服务端。 |
+| `configFile` | `folesium.properties` | 启动时 | 备用配置文件路径（仅系统属性） |
+| `shards` | 自适应（按 CPU 核数取 8/16/32/64/128） | 下次启动 | 分片数（2 的幂，1–1024）。改动后，下次打开存储时会自动、崩溃安全地重分片。默认值按 CPU 核数自适应；小型服务器用 8–16 即可。 |
+| `durability` | `BATCH` | 实时 | `ALWAYS` = 每次写入 fsync；`BATCH` = 后台组提交；`EXPLICIT` = 仅 flush/close 时 fsync。切入/切出 `BATCH` 会启动/停止组提交线程。 |
+| `batchFlushMillis` | `500` | 实时 | `BATCH` 的组提交间隔 |
+| `compression` | `ZSTD`（zstd-jni 可用时）否则 `DEFLATE` | 实时 | `NONE` / `DEFLATE` / `ZSTD`。仅作用于新写入；每条记录自带编解码标志，因此改动无需迁移，旧记录照常可读。 |
+| `compressionLevel` | `4` | 实时 | Deflate 1–9，ZSTD 1–22。4 ≈ 原版 zlib 压缩率但 CPU 更低。 |
+| `compactRatio` | `0.5` | 实时 | 分片死字节超过文件的该比例时触发压实 |
+| `compactMinBytes` | `8388608` | 实时 | 小于该大小（8 MiB）的分片不压实 |
+| `verifyChecksums` | `false` | 实时 | 每次读取重校验 CRC32C（约 2 倍读 I/O；恢复扫描始终校验） |
+| `autoReload` | `true` | 实时 | 监视 `folesium.properties`，把改动应用到运行中的服务端 |
+| `autoReloadSeconds` | `10` | 实时 | 多久检查一次文件改动 |
+
+### 4.1 给运行中的服务器重新调参
+
+发现配置不适合这台机器时，**不需要重启**来修正。编辑并保存 `folesium.properties`，
+`autoReloadSeconds` 秒内改动就会应用到所有已打开的存储，日志会写明改了什么：
+
+```text
+[INFO] Folesium: folesium.properties changed on disk, applying it to the running server
+[INFO] Folesium: .../world/players/folesium: durability: BATCH -> ALWAYS, compressionLevel: 4 -> 9
+```
+
+只有 `enabled` 与 `shards` 无法完全实时生效——它们会写进日志而不是被静默丢弃，其中
+`shards` 会在下次启动时通过自动重分片落地（分阶段三段式提交：崩溃后要么旧存储原封不动，
+要么下次打开时续做并完成换入）。在大世界上做布局变更前，请照常先备份。
+
+设 `autoReload=false` 可恢复「改完重启才生效」的旧行为。
 
 ### 持久性选择
 
@@ -228,7 +249,7 @@ world/
 | `ZSTD` 存储打开失败 | classpath 缺 `zstd-jni`（只会发生在服务器之外）；改用服务端 flag 或补依赖 |
 | 转换后 `.mca` 还在 | 符合预期——转换器不删文件；验证后手动删除（§5） |
 | 回滚后 `folesium/` 还在 | 符合预期——同一策略；手动删除（§6） |
-| 存储目录持续变大 | 分片死字节超过 `compactRatio` × 大小且大于 `compactMinBytes` 时压实回收；调低这两项可更早压实 |
+| 存储目录持续变大 | 死记录由压实回收：引擎最多每 5 分钟检查一次每个已打开的存储，分片死字节超过 `compactRatio` × 大小且大于 `compactMinBytes` 时改写该分片；调低这两项可更早压实 |
 | 想验证完整性 | 用 `-Dfolesium.verifyChecksums=true` 启动，或 `folesium-converter … inspect <store>` |
 
 需要认识的日志行：

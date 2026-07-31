@@ -64,12 +64,25 @@ public final class AnvilRegionFile implements Closeable {
     /** Folia's {@code region-file-compression=lz4} option (region compression type 4). */
     public static final byte COMPRESSION_LZ4 = 4;
 
+    /**
+     * Set on the compression byte when the payload does not live in the region file but in a
+     * sibling {@code c.<chunkX>.<chunkZ>.mcc} file. Vanilla writes these for chunks larger than
+     * 255 sectors (~1 MiB); a converter that ignored the flag would silently skip them.
+     */
+    private static final int EXTERNAL_FLAG = 0x80;
+
+    /** {@code r.<regionX>.<regionZ>.mca}, the only naming Anvil uses. */
+    private static final java.util.regex.Pattern REGION_NAME =
+            java.util.regex.Pattern.compile("^r\\.(-?\\d+)\\.(-?\\d+)\\.mc[ar]$");
+
+    private final Path path;
     private final FileChannel channel;
     private final int[] locations = new int[CHUNKS_PER_REGION];
     private final int[] timestamps = new int[CHUNKS_PER_REGION];
     private final BitSet usedSectors = new BitSet();
 
     public AnvilRegionFile(Path path) throws IOException {
+        this.path = path;
         this.channel = FileChannel.open(path,
                 StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE);
         usedSectors.set(0, 2); // header sectors
@@ -135,10 +148,18 @@ public final class AnvilRegionFile implements Closeable {
         if (length <= 0 || length > read - 4) {
             throw new IOException("Corrupt chunk payload length " + length + " at sector " + sectorOff);
         }
-        byte compressionType = buf.get(4);
-        byte[] data = new byte[length - 1];
-        buf.position(5);
-        buf.get(data);
+        int rawType = buf.get(4) & 0xFF;
+        byte compressionType = (byte) (rawType & ~EXTERNAL_FLAG);
+        byte[] data;
+        if ((rawType & EXTERNAL_FLAG) != 0) {
+            // Oversized chunk: the region file holds only the header, the payload is in
+            // c.<chunkX>.<chunkZ>.mcc next to it.
+            data = java.nio.file.Files.readAllBytes(externalChunkPath(localX, localZ));
+        } else {
+            data = new byte[length - 1];
+            buf.position(5);
+            buf.get(data);
+        }
         return switch (compressionType) {
             case COMPRESSION_GZIP -> readAll(new GZIPInputStream(new ByteArrayInputStream(data)));
             case COMPRESSION_ZLIB -> readAll(new InflaterInputStream(new ByteArrayInputStream(data)));
@@ -146,6 +167,27 @@ public final class AnvilRegionFile implements Closeable {
             case COMPRESSION_LZ4 -> Lz4Native.decompress(data);
             default -> throw new IOException("Unknown chunk compression type " + compressionType);
         };
+    }
+
+    /** Location of the external payload of an oversized chunk. */
+    private Path externalChunkPath(int localX, int localZ) throws IOException {
+        Path p = externalChunkPathOrNull(localX, localZ);
+        if (p == null) {
+            throw new IOException("Chunk in " + path + " is stored externally, but the region file name"
+                    + " does not encode its coordinates, so the .mcc file cannot be located");
+        }
+        return p;
+    }
+
+    /** Same, but {@code null} when the file is not named {@code r.<x>.<z>.mca}. */
+    private Path externalChunkPathOrNull(int localX, int localZ) {
+        java.util.regex.Matcher m = REGION_NAME.matcher(path.getFileName().toString());
+        if (!m.matches()) {
+            return null;
+        }
+        long chunkX = Long.parseLong(m.group(1)) * 32 + (localX & 31);
+        long chunkZ = Long.parseLong(m.group(2)) * 32 + (localZ & 31);
+        return path.resolveSibling("c." + chunkX + "." + chunkZ + ".mcc");
     }
 
     /** Compresses (zlib) and writes a chunk payload, allocating sectors first-fit. */
@@ -157,10 +199,10 @@ public final class AnvilRegionFile implements Closeable {
         byte[] compressed = bos.toByteArray();
 
         int payloadLen = 4 + 1 + compressed.length;
-        int sectorsNeeded = (payloadLen + SECTOR_BYTES - 1) / SECTOR_BYTES;
-        if (sectorsNeeded > 255) {
-            throw new IOException("Chunk too large for region format: " + payloadLen + " bytes");
-        }
+        // A chunk that needs more than 255 sectors cannot be addressed by the 8-bit sector
+        // count, so Anvil stores it in a sibling .mcc file and keeps only the header here.
+        boolean external = (payloadLen + SECTOR_BYTES - 1) / SECTOR_BYTES > 255;
+        int sectorsNeeded = external ? 1 : (payloadLen + SECTOR_BYTES - 1) / SECTOR_BYTES;
 
         int idx = indexOf(localX, localZ);
         int oldLoc = locations[idx];
@@ -170,7 +212,17 @@ public final class AnvilRegionFile implements Closeable {
 
         int sectorOff = allocateSectors(sectorsNeeded);
         ByteBuffer out = ByteBuffer.allocate(sectorsNeeded * SECTOR_BYTES);
-        out.putInt(compressed.length + 1).put(COMPRESSION_ZLIB).put(compressed);
+        if (external) {
+            java.nio.file.Files.write(externalChunkPath(localX, localZ), compressed);
+            out.putInt(1).put((byte) (COMPRESSION_ZLIB | EXTERNAL_FLAG));
+        } else {
+            // A previous, larger version of this chunk may have been stored externally.
+            Path stale = externalChunkPathOrNull(localX, localZ);
+            if (stale != null) {
+                java.nio.file.Files.deleteIfExists(stale);
+            }
+            out.putInt(compressed.length + 1).put(COMPRESSION_ZLIB).put(compressed);
+        }
         out.position(0);
         writeFully(out, (long) sectorOff * SECTOR_BYTES);
 

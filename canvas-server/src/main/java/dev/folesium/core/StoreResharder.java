@@ -101,15 +101,56 @@ final class StoreResharder {
         if (hasStaging && Files.isRegularFile(staging.resolve(COMMIT_MARKER))) {
             LOGGER.log(System.Logger.Level.WARNING,
                     "Folesium: resuming an interrupted reshard of {0}", dir);
+            int newCount = readCommittedShardCount(staging);
             finishSwap(dir, staging, backup);
+            // The COMMIT marker was written *before* the metadata was updated, so a crash in
+            // that window leaves the metadata naming the old count while the files on disk use
+            // the new layout. Re-apply the count now (idempotent) so the next open does not
+            // reject the store as a topology mismatch. finishSwap deletes the staging dir, so
+            // the count must be read first.
+            applyShardCountMetadata(dir, newCount);
             return;
         }
-        // No COMMIT marker: the new shard set was never complete, so the original files
-        // are still the authoritative copy and were never modified. Drop the scratch.
+        if (!hasStaging && Files.isRegularFile(backup.resolve(MOVED_MARKER))) {
+            // Staging is gone but the backup survived: the swap already completed and the
+            // crash happened during the final cleanup. The new shard set is live; the
+            // backup only holds the superseded old files.
+            LOGGER.log(System.Logger.Level.INFO,
+                    "Folesium: removing the backup of a completed reshard of {0}", dir);
+            deleteRecursively(backup);
+            return;
+        }
+        // No COMMIT marker: the new shard set was never complete, so the original files are
+        // still the authoritative copy. They may however have been half moved aside already
+        // (crash inside phase 3 before the MOVED marker became durable), so put anything the
+        // backup still holds back before dropping the scratch -- deleting it outright would
+        // destroy live shards.
         LOGGER.log(System.Logger.Level.WARNING,
                 "Folesium: discarding an incomplete reshard of {0} (store is unchanged)", dir);
+        if (hasBackup) {
+            restoreFromBackup(dir, backup);
+        }
         deleteRecursively(staging);
         deleteRecursively(backup);
+    }
+
+    /**
+     * Moves every shard file the backup still holds and that {@code dir} is missing back into
+     * place. Only reachable when no {@code MOVED} marker exists, i.e. no staged file was ever
+     * swapped in, so anything already in {@code dir} is part of the same old set and wins.
+     */
+    private static void restoreFromBackup(Path dir, Path backup) {
+        try {
+            for (Path old : listShardFiles(backup)) {
+                Path target = dir.resolve(old.getFileName().toString());
+                if (!Files.exists(target)) {
+                    Files.move(old, target, StandardCopyOption.ATOMIC_MOVE);
+                }
+            }
+            fsyncDirectory(dir);
+        } catch (IOException e) {
+            throw new FolesiumException("Cannot restore the original shard files of " + dir, e);
+        }
     }
 
     // ---------------------------------------------------------------- reshard
@@ -221,7 +262,7 @@ final class StoreResharder {
                 Files.createDirectories(backup);
                 for (Path old : listShardFiles(dir)) {
                     Files.move(old, backup.resolve(old.getFileName().toString()),
-                            StandardCopyOption.REPLACE_EXISTING);
+                            StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
                 }
                 Files.writeString(movedMarker, "ok", StandardCharsets.UTF_8);
                 fsyncDirectory(backup);
@@ -234,7 +275,7 @@ final class StoreResharder {
                             .toList();
                     for (Path p : staged) {
                         Files.move(p, dir.resolve(p.getFileName().toString()),
-                                StandardCopyOption.REPLACE_EXISTING);
+                                StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
                     }
                 }
                 fsyncDirectory(dir);
@@ -277,6 +318,42 @@ final class StoreResharder {
         }
     }
 
+    private static int readCommittedShardCount(Path staging) {
+        try {
+            return Integer.parseInt(
+                    Files.readString(staging.resolve(COMMIT_MARKER), StandardCharsets.UTF_8).trim());
+        } catch (IOException e) {
+            throw new FolesiumException("Cannot read reshard COMMIT marker in " + staging.getParent(), e);
+        }
+    }
+
+    /** Idempotently records {@code store.shardCount = newCount} (see {@link #recover}). */
+    private static void applyShardCountMetadata(Path dir, int newCount) {
+        Path meta = dir.resolve(FolesiumDatabase.METADATA_FILE);
+        int oldCount = newCount;
+        if (Files.isRegularFile(meta)) {
+            Properties p = new Properties();
+            try (var r = Files.newBufferedReader(meta, StandardCharsets.UTF_8)) {
+                p.load(r);
+            } catch (IOException e) {
+                throw new FolesiumException("Cannot read " + meta, e);
+            }
+            String raw = p.getProperty("store.shardCount");
+            if (raw != null) {
+                try {
+                    oldCount = Integer.parseInt(raw.trim());
+                } catch (RuntimeException ignore) {
+                    // keep newCount as both old and new; updateShardCountMetadata tolerates this.
+                }
+            }
+        }
+        try {
+            updateShardCountMetadata(meta, oldCount, newCount);
+        } catch (IOException e) {
+            throw new FolesiumException("Cannot update shard count metadata in " + dir, e);
+        }
+    }
+
     private static void updateShardCountMetadata(Path meta, int oldCount, int newCount) throws IOException {
         Properties p = new Properties();
         if (Files.isRegularFile(meta)) {
@@ -315,7 +392,7 @@ final class StoreResharder {
                 Files.deleteIfExists(p);
             }
         } catch (IOException e) {
-            throw new UncheckedIOException("Cannot remove " + root, e);
+            throw new FolesiumException("Cannot remove " + root, e);
         }
     }
 
