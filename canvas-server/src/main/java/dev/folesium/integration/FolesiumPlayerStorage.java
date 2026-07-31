@@ -299,6 +299,8 @@ public final class FolesiumPlayerStorage implements AutoCloseable {
             active = null;
         }
         flush();
-        FolesiumRegistry.release(storeDir);
+        // Pass the instance we actually hold: if the registry has since reopened the store
+        // (e.g. after closeAll()), this release must not decrement the new one.
+        FolesiumRegistry.release(storeDir, database);
     }
 }

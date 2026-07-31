@@ -31,6 +31,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -153,8 +154,12 @@ public final class WorldConverter {
             return new Stats(0, 0, (System.nanoTime() - start) / 1_000_000);
         }
 
+        // Export only: open the store exactly as it lies on disk (applyLayoutChanges=false),
+        // so a shard count or codec that differs from the defaults is read as-is instead of
+        // triggering a pointless rewrite of a store we read once and then abandon.
         try (FolesiumDatabase db = FolesiumDatabase.open(folesiumDir,
-                FolesiumConfig.defaults().withDurability(FolesiumConfig.DurabilityMode.EXPLICIT))) {
+                FolesiumConfig.defaults().withDurability(FolesiumConfig.DurabilityMode.EXPLICIT),
+                FolesiumDatabase.StoreRole.DIMENSION, false)) {
             for (Map.Entry<String, String> e : DIR_TO_KEYSPACE.entrySet()) {
                 String anvilDir = e.getKey();
                 Keyspace ks = db.keyspace(e.getValue());

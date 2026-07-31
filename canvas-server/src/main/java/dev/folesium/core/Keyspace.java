@@ -57,6 +57,23 @@ public final class Keyspace implements AutoCloseable {
         return shards.length;
     }
 
+    /**
+     * Pushes a new runtime configuration to every shard. Takes effect on the next
+     * operation; nothing on disk is touched.
+     *
+     * @throws IllegalArgumentException if the shard count differs from this keyspace's
+     *                                  physical topology
+     */
+    public void applyRuntimeConfig(FolesiumConfig next) {
+        if (next.shardCount() != shards.length) {
+            throw new IllegalArgumentException("Cannot change shardCount on the open keyspace '"
+                    + name + "' (" + shards.length + " -> " + next.shardCount() + ")");
+        }
+        for (ShardFile s : shards) {
+            s.applyRuntimeConfig(next);
+        }
+    }
+
     private ShardFile shardFor(byte[] key) {
         return shards[(int) (Bytes.mix64(key) & shardMask)];
     }

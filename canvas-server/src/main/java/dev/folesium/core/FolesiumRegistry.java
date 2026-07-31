@@ -71,6 +71,9 @@ public final class FolesiumRegistry {
     private static Properties fileProperties;
     private static Boolean enabledCache;
 
+    private static Thread configWatcher;
+    private static long configFileStamp;
+
     private FolesiumRegistry() {
     }
 
@@ -88,11 +91,16 @@ public final class FolesiumRegistry {
     /* configuration                                                       */
     /* ------------------------------------------------------------------ */
 
+    /** Where {@code folesium.properties} is read from; {@code -Dfolesium.configFile} overrides it. */
+    public static Path configFilePath() {
+        return Path.of(System.getProperty("folesium.configFile", CONFIG_FILE));
+    }
+
     private static synchronized Properties fileProperties() {
         ensureUtf8Logging();
         if (fileProperties == null) {
             Properties p = new Properties();
-            Path file = Path.of(System.getProperty("folesium.configFile", CONFIG_FILE));
+            Path file = configFilePath();
             if (Files.isRegularFile(file)) {
                 try (var reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
                     p.load(reader);
@@ -139,6 +147,9 @@ public final class FolesiumRegistry {
         sb.append("# Folesium is OPT-IN: 'enabled' is intentionally false, so the server behaves like stock\n");
         sb.append("# Folia/Canvas (writes .mca) until you set enabled=true. Edit values freely; this file is\n");
         sb.append("# written only once. System properties -Dfolesium.<key>=<value> override anything here.\n");
+        sb.append("# Every value below can be changed while the server runs: Folesium notices that this file was\n");
+        sb.append("# edited and applies it within a few seconds. Two exceptions: 'enabled' applies when a world is\n");
+        sb.append("# next loaded, and 'shards' by an automatic reshard of the store on the next start.\n");
         sb.append("# Auto-tuned for this machine: ").append(describeMachine()).append('\n');
         sb.append('\n');
         sb.append("# Master switch. false = vanilla Anvil behaviour; true = use Folesium storage.\n");
@@ -157,7 +168,7 @@ public final class FolesiumRegistry {
         sb.append("# Per-record compression: NONE | DEFLATE | ZSTD. ZSTD is chosen automatically when zstd-jni is present.\n");
         sb.append("compression=").append(tuned.compression().name()).append('\n');
         sb.append('\n');
-        sb.append("# Compression level 1-9 (applies to both Deflate and ZSTD).\n");
+        sb.append("# Compression level. Valid range depends on the codec: DEFLATE 1-9, ZSTD 1-22.\n");
         sb.append("compressionLevel=").append(tuned.compressionLevel()).append('\n');
         sb.append('\n');
         sb.append("# Compact a shard when its dead (overwritten/deleted) bytes exceed this fraction of the file size.\n");
@@ -168,6 +179,12 @@ public final class FolesiumRegistry {
         sb.append('\n');
         sb.append("# Re-verify each record's CRC32C on every read (~2x read I/O). Leave false unless diagnosing corruption.\n");
         sb.append("verifyChecksums=").append(tuned.verifyChecksums()).append('\n');
+        sb.append('\n');
+        sb.append("# Watch this file and apply edits to the running server without a restart.\n");
+        sb.append("autoReload=true\n");
+        sb.append('\n');
+        sb.append("# How often (seconds) this file is checked for edits when autoReload is on.\n");
+        sb.append("autoReloadSeconds=10\n");
         try {
             if (file.getParent() != null) {
                 Files.createDirectories(file.getParent());
@@ -307,26 +324,199 @@ public final class FolesiumRegistry {
                     "Folesium: unknown compression ''{0}'', using {1}", compressionName, d.compression());
             compression = d.compression();
         }
+        if (compression == FolesiumConfig.Compression.ZSTD && !ZSTD_AVAILABLE) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: compression=ZSTD requested but zstd-jni is not available, using {0}", d.compression());
+            compression = d.compression();
+        }
         int shards = intProperty("shards", d.shardCount());
         if (Integer.bitCount(shards) != 1 || shards < 1 || shards > 1024) {
             LOGGER.log(System.Logger.Level.WARNING, "Folesium: invalid shards={0}, using {1}", shards, d.shardCount());
             shards = d.shardCount();
         }
+        // Deflate tops out at 9, zstd at 22 - validate against the codec actually in use.
+        int maxLevel = FolesiumConfig.maxCompressionLevel(compression);
         int level = intProperty("compressionLevel", d.compressionLevel());
-        if (level < 1 || level > 9) {
-            LOGGER.log(System.Logger.Level.WARNING, "Folesium: invalid compressionLevel={0}, using {1}", level, d.compressionLevel());
-            level = d.compressionLevel();
+        if (level < 1 || level > maxLevel) {
+            int fallback = FolesiumConfig.clampCompressionLevel(compression, d.compressionLevel());
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: compressionLevel={0} is out of range [1,{1}] for {2}, using {3}",
+                    level, maxLevel, compression, fallback);
+            level = fallback;
+        }
+        // Everything below must fall back rather than throw: an unusable value in
+        // folesium.properties is an operator typo, not a reason to abort server start.
+        int batchFlushMillis = intProperty("batchFlushMillis", d.batchFlushMillis());
+        if (batchFlushMillis < 1) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: batchFlushMillis={0} must be >= 1, using {1}", batchFlushMillis, d.batchFlushMillis());
+            batchFlushMillis = d.batchFlushMillis();
+        }
+        double compactRatio = doubleProperty("compactRatio", d.compactRatio());
+        if (!(compactRatio > 0) || compactRatio > 1) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: compactRatio={0} must be in (0,1], using {1}", compactRatio, d.compactRatio());
+            compactRatio = d.compactRatio();
+        }
+        long compactMinBytes = longProperty("compactMinBytes", d.compactMinBytes());
+        if (compactMinBytes < 0) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: compactMinBytes={0} must be >= 0, using {1}", compactMinBytes, d.compactMinBytes());
+            compactMinBytes = d.compactMinBytes();
         }
         return new FolesiumConfig(
                 shards,
                 durability,
-                intProperty("batchFlushMillis", d.batchFlushMillis()),
+                batchFlushMillis,
                 compression,
                 level,
-                doubleProperty("compactRatio", d.compactRatio()),
-                longProperty("compactMinBytes", d.compactMinBytes()),
+                compactRatio,
+                compactMinBytes,
                 boolProperty("verifyChecksums", d.verifyChecksums())
         );
+    }
+
+    /**
+     * Re-reads {@code folesium.properties} (and {@code -Dfolesium.*}) and pushes the result to
+     * every open store, so operators can retune a running server without restarting it.
+     *
+     * <p>{@code enabled} and {@code shards} are the two settings a reload cannot fully apply:
+     * worlds bind their storage backend when they load, and the shard count is physical. Both
+     * are reported back in the result instead of being silently dropped - {@code shards} is
+     * then applied automatically by a reshard on the next start.</p>
+     *
+     * @return one entry per open store, in directory order
+     */
+    public static List<ReloadReport> reload() {
+        List<FolesiumDatabase> snapshot;
+        FolesiumConfig cfg;
+        boolean enabledBefore;
+        synchronized (FolesiumRegistry.class) {
+            enabledBefore = isEnabled();
+            fileProperties = null;
+            enabledCache = null;
+            cfg = configFromProperties();
+            snapshot = openDatabases();
+        }
+        boolean enabledAfter = isEnabled();
+        if (enabledBefore != enabledAfter) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: enabled={0} takes effect when a world is (re)loaded; running worlds keep their"
+                            + " current storage backend", enabledAfter);
+        }
+        List<ReloadReport> out = new ArrayList<>(snapshot.size());
+        for (FolesiumDatabase db : snapshot) {
+            try {
+                out.add(new ReloadReport(db.directory(), db.applyRuntimeConfig(cfg), null));
+            } catch (RuntimeException ex) {
+                LOGGER.log(System.Logger.Level.ERROR, "Folesium: reload failed for " + db.directory(), ex);
+                out.add(new ReloadReport(db.directory(), null, ex.getMessage()));
+            }
+        }
+        out.sort(java.util.Comparator.comparing(r -> r.directory().toString()));
+        return out;
+    }
+
+    /**
+     * Per-store outcome of {@link #reload()}.
+     *
+     * @param result {@code null} when the store could not be reconfigured, see {@code error}
+     * @param error  failure message, or {@code null} on success
+     */
+    public record ReloadReport(Path directory, FolesiumDatabase.ConfigReloadResult result, String error) {
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* automatic reload                                                    */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Starts the watcher that applies edits to {@code folesium.properties} to the running
+     * server. Without it, retuning a setting would mean a restart - and a restart is exactly
+     * what an operator whose settings do not suit the machine cannot afford.
+     *
+     * <p>Disabled with {@code folesium.autoReload=false}; the poll interval is
+     * {@code folesium.autoReloadSeconds} (default 10). The thread is a daemon and stops on
+     * its own once the last store is closed.</p>
+     */
+    private static void ensureConfigWatcher() {
+        if (configWatcher != null || !boolProperty("autoReload", true)) {
+            return;
+        }
+        configFileStamp = configFileTimestamp();
+        Thread t = Thread.ofPlatform().daemon().name("folesium-config-watch")
+                .unstarted(FolesiumRegistry::watchConfigFile);
+        configWatcher = t;
+        t.start();
+    }
+
+    private static long configFileTimestamp() {
+        Path file = configFilePath();
+        try {
+            return Files.isRegularFile(file) ? Files.getLastModifiedTime(file).toMillis() : -1L;
+        } catch (IOException e) {
+            return -1L;
+        }
+    }
+
+    private static void watchConfigFile() {
+        while (true) {
+            int seconds;
+            synchronized (FolesiumRegistry.class) {
+                if (OPEN.isEmpty()) {
+                    // Nothing to reconfigure; a later acquire() starts a fresh watcher.
+                    configWatcher = null;
+                    return;
+                }
+                seconds = Math.max(1, intProperty("autoReloadSeconds", 10));
+            }
+            try {
+                Thread.sleep(seconds * 1000L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                synchronized (FolesiumRegistry.class) {
+                    configWatcher = null;
+                }
+                return;
+            }
+            long stamp = configFileTimestamp();
+            boolean changed;
+            synchronized (FolesiumRegistry.class) {
+                changed = stamp != -1L && stamp != configFileStamp;
+                if (changed) {
+                    configFileStamp = stamp;
+                }
+            }
+            if (!changed) {
+                continue;
+            }
+            try {
+                // Let a half-written file settle: editors truncate first and write after.
+                Thread.sleep(300);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            LOGGER.log(System.Logger.Level.INFO,
+                    "Folesium: {0} changed on disk, applying it to the running server", configFilePath());
+            try {
+                for (ReloadReport r : reload()) {
+                    if (r.error() != null) {
+                        LOGGER.log(System.Logger.Level.ERROR, "Folesium: {0}: {1}", r.directory(), r.error());
+                    } else if (r.result().changed()) {
+                        LOGGER.log(System.Logger.Level.INFO, "Folesium: {0}: {1}",
+                                r.directory(), String.join(", ", r.result().changes()));
+                    }
+                    if (r.result() != null) {
+                        for (String note : r.result().notes()) {
+                            LOGGER.log(System.Logger.Level.WARNING, "Folesium: {0}: {1}", r.directory(), note);
+                        }
+                    }
+                }
+            } catch (RuntimeException ex) {
+                LOGGER.log(System.Logger.Level.ERROR, "Folesium: automatic reload failed", ex);
+            }
+        }
     }
 
     /* ------------------------------------------------------------------ */
@@ -395,7 +585,6 @@ public final class FolesiumRegistry {
 
     /** Opens (or joins) the dimension store in {@code dir} and increments its reference count. */
     public static synchronized FolesiumDatabase acquire(Path dir) {
-        ensureShutdownHook();
         return acquire(dir, configFromProperties(), FolesiumDatabase.StoreRole.DIMENSION);
     }
 
@@ -409,6 +598,8 @@ public final class FolesiumRegistry {
     }
 
     public static synchronized FolesiumDatabase acquire(Path dir, FolesiumConfig config, FolesiumDatabase.StoreRole role) {
+        ensureShutdownHook();
+        ensureConfigWatcher();
         Path key = canonical(dir);
         Entry entry = OPEN.get(key);
         if (entry == null || entry.db.isClosed()) {

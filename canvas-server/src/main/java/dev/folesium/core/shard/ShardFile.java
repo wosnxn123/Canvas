@@ -86,7 +86,20 @@ public final class ShardFile implements AutoCloseable {
     private final Path path;
     private final Path hintPath;
     private final int shardIndex;
-    private final FolesiumConfig config;
+    /**
+     * Shard topology this file was opened with. Snapshotted separately from
+     * {@link #config} because it is stamped into the file header: the header must keep
+     * describing the physical layout even if the runtime configuration is hot-reloaded
+     * with a different shard count (which only takes effect after a reshard).
+     */
+    private final int shardCount;
+    /**
+     * Live configuration. Replaced wholesale by {@link #applyRuntimeConfig}; every read
+     * below goes through this field so a swap is picked up by the next operation.
+     * {@link FolesiumConfig} is an immutable record, so readers always observe a
+     * self-consistent snapshot - there is no torn-config window.
+     */
+    private volatile FolesiumConfig config;
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
 
     private FileChannel channel;
@@ -99,6 +112,7 @@ public final class ShardFile implements AutoCloseable {
         this.path = path;
         this.hintPath = path.resolveSibling(path.getFileName() + ".fidx");
         this.shardIndex = shardIndex;
+        this.shardCount = config.shardCount();
         this.config = config;
         try {
             boolean fresh = !Files.exists(path) || Files.size(path) == 0;
@@ -118,12 +132,33 @@ public final class ShardFile implements AutoCloseable {
         }
     }
 
+    /**
+     * Atomically swaps in a new runtime configuration. Every subsequent read/write/compact
+     * observes the new values; nothing on disk is touched.
+     *
+     * @throws IllegalArgumentException if {@code next} carries a different shard count - the
+     *                                  topology is baked into the file header and can only be
+     *                                  changed by rewriting the store.
+     */
+    public void applyRuntimeConfig(FolesiumConfig next) {
+        if (next.shardCount() != shardCount) {
+            throw new IllegalArgumentException("Cannot change shardCount on an open shard "
+                    + path + " (" + shardCount + " -> " + next.shardCount() + ")");
+        }
+        this.config = next;
+    }
+
+    /** Physical shard topology recorded in this file's header. */
+    public int shardCount() {
+        return shardCount;
+    }
+
     // ------------------------------------------------------------------ open
 
     private void writeFileHeader() throws IOException {
         ByteBuffer b = ByteBuffer.allocate(FILE_HEADER_LEN);
         b.put(FILE_MAGIC).putShort(FORMAT_VERSION).putShort((short) 0)
-                .putInt(shardIndex).putInt(config.shardCount());
+                .putInt(shardIndex).putInt(shardCount);
         b.flip();
         writeFully(b, 0);
         channel.force(false);
@@ -147,9 +182,9 @@ public final class ShardFile implements AutoCloseable {
         b.getShort();
         int idx = b.getInt();
         int count = b.getInt();
-        if (idx != shardIndex || count != config.shardCount()) {
+        if (idx != shardIndex || count != shardCount) {
             throw new FolesiumException("Shard topology mismatch in " + path
-                    + " (file: " + idx + "/" + count + ", expected: " + shardIndex + "/" + config.shardCount() + ")");
+                    + " (file: " + idx + "/" + count + ", expected: " + shardIndex + "/" + shardCount + ")");
         }
     }
 
@@ -509,7 +544,7 @@ public final class ShardFile implements AutoCloseable {
                     StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
                 ByteBuffer hdr = ByteBuffer.allocate(FILE_HEADER_LEN);
                 hdr.put(FILE_MAGIC).putShort(FORMAT_VERSION).putShort((short) 0)
-                        .putInt(shardIndex).putInt(config.shardCount());
+                        .putInt(shardIndex).putInt(shardCount);
                 hdr.flip();
                 out.write(hdr, 0);
                 long pos = FILE_HEADER_LEN;

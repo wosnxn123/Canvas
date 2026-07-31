@@ -248,6 +248,8 @@ public final class FolesiumRegionStorage implements AutoCloseable {
         closed = true;
         anvilMissing.clear();
         keyspace.flush();
-        FolesiumRegistry.release(storeDir);
+        // Pass the instance we actually hold: if the registry has since reopened the store
+        // (e.g. after closeAll()), this release must not decrement the new one.
+        FolesiumRegistry.release(storeDir, database);
     }
 }

@@ -223,9 +223,12 @@ public final class PlayerDataConverter {
         }
 
         Path playerRoot = playerRootOf(worldRoot, storeDir);
+        // Export only: open the store exactly as it lies on disk (applyLayoutChanges=false),
+        // so a store whose shard count or codec differs from the defaults is read as-is
+        // instead of being rewritten first.
         try (FolesiumDatabase db = FolesiumDatabase.open(storeDir,
                 FolesiumConfig.defaults().withDurability(FolesiumConfig.DurabilityMode.EXPLICIT),
-                FolesiumDatabase.StoreRole.PLAYERS)) {
+                FolesiumDatabase.StoreRole.PLAYERS, false)) {
             for (Mapping m : mappingsFor(worldRoot, playerRoot)) {
                 Keyspace ks = db.keyspace(m.keyspace());
                 if (ks.count() == 0) {

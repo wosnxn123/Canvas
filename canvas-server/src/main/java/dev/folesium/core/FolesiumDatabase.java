@@ -21,8 +21,10 @@ package dev.folesium.core;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
@@ -93,22 +95,74 @@ public final class FolesiumDatabase implements AutoCloseable {
     }
 
     private final Path dir;
-    private final FolesiumConfig config;
+    /**
+     * Live configuration. Volatile because {@link #applyRuntimeConfig} swaps it while other
+     * threads are reading; {@link FolesiumConfig} is an immutable record, so every reader
+     * sees a self-consistent snapshot.
+     */
+    private volatile FolesiumConfig config;
     private final StoreRole role;
     private final Map<String, Keyspace> keyspaces = new ConcurrentHashMap<>();
     private final AtomicBoolean closed = new AtomicBoolean();
-    private final Thread flusher;
+
+    /**
+     * Serialises keyspace <em>creation</em> against {@link #applyRuntimeConfig}, so that a
+     * keyspace can never be published with a configuration that was already superseded.
+     * The hot path ({@link #keyspace} for an existing keyspace) never takes this lock.
+     */
+    private final Object keyspaceLock = new Object();
+
+    /** Guards {@link #flusher} and doubles as the group-commit thread's wait monitor. */
+    private final Object flusherLock = new Object();
+    private Thread flusher;
+
+    /**
+     * Outcome of a runtime configuration change.
+     *
+     * @param applied         the configuration now in force
+     * @param changes         human-readable {@code "key: old -> new"} entries that took effect
+     * @param notes           warnings, e.g. a setting that had to be rejected or clamped
+     * @param reshardRequired {@code true} when the requested {@code shardCount} differs from the
+     *                        store's physical layout; it is applied by the automatic reshard on
+     *                        the next server start, not live
+     */
+    public record ConfigReloadResult(FolesiumConfig applied, List<String> changes, List<String> notes,
+                                     boolean reshardRequired) {
+        public ConfigReloadResult {
+            changes = List.copyOf(changes);
+            notes = List.copyOf(notes);
+        }
+
+        public boolean changed() {
+            return !changes.isEmpty();
+        }
+    }
 
     public static FolesiumDatabase open(Path dir, FolesiumConfig config) {
-        return new FolesiumDatabase(dir, config, StoreRole.DIMENSION);
+        return new FolesiumDatabase(dir, config, StoreRole.DIMENSION, true);
     }
 
     public static FolesiumDatabase open(Path dir) {
-        return new FolesiumDatabase(dir, FolesiumConfig.defaults(), StoreRole.DIMENSION);
+        return new FolesiumDatabase(dir, FolesiumConfig.defaults(), StoreRole.DIMENSION, true);
     }
 
     public static FolesiumDatabase open(Path dir, FolesiumConfig config, StoreRole role) {
-        return new FolesiumDatabase(dir, config, role);
+        return new FolesiumDatabase(dir, config, role, true);
+    }
+
+    /**
+     * @param applyLayoutChanges {@code true} (the default) means the requested configuration
+     *                           wins over the store's recorded one: a changed {@code shards}
+     *                           rewrites the store ({@link StoreResharder}) and a changed
+     *                           {@code compression} is recorded as the codec for new writes,
+     *                           so editing the configuration actually takes effect.
+     *                           <p>{@code false} opens the store exactly as it lies on disk and
+     *                           writes no metadata - what tools that only read a store (the
+     *                           Folesium -&gt; Anvil export, inspectors) want, since they must not
+     *                           rewrite a store they are about to abandon.</p>
+     */
+    public static FolesiumDatabase open(Path dir, FolesiumConfig config, StoreRole role, boolean applyLayoutChanges) {
+        return new FolesiumDatabase(dir, config, role, applyLayoutChanges);
     }
 
     /**
@@ -143,7 +197,7 @@ public final class FolesiumDatabase implements AutoCloseable {
         }
     }
 
-    private FolesiumDatabase(Path dir, FolesiumConfig requested, StoreRole requestedRole) {
+    private FolesiumDatabase(Path dir, FolesiumConfig requested, StoreRole requestedRole, boolean applyLayoutChanges) {
         this.dir = dir;
         this.role = requestedRole;
         try {
@@ -151,86 +205,136 @@ public final class FolesiumDatabase implements AutoCloseable {
         } catch (IOException e) {
             throw new FolesiumException("Cannot create store directory " + dir, e);
         }
-        this.config = reconcileMetadata(requested);
 
-        if (config.compression() == FolesiumConfig.Compression.ZSTD && !ZstdNative.available()) {
+        // Checked before reconcileMetadata so an unusable codec cannot be recorded in the
+        // metadata of a store that then refuses to open.
+        if (applyLayoutChanges) {
+            requireCompressionUsable(requested.compression());
+        }
+
+        // Converge any reshard that a previous run was killed in the middle of, before a
+        // single shard file is opened.
+        StoreResharder.recover(dir);
+
+        this.config = reconcileMetadata(requested, applyLayoutChanges);
+
+        // Covers the read-as-is path, where the store's own codec wins.
+        requireCompressionUsable(config.compression());
+
+        startFlusherIfNeeded();
+    }
+
+    private void requireCompressionUsable(FolesiumConfig.Compression compression) {
+        if (compression == FolesiumConfig.Compression.ZSTD && !ZstdNative.available()) {
             throw new FolesiumException("Folesium store at " + dir
                     + " is configured for ZSTD compression, but zstd-jni is not available on the classpath. "
                     + "Run on a Folia/Canvas server (which ships zstd-jni) or add com.github.luben:zstd-jni.");
         }
-
-        if (config.durability() == FolesiumConfig.DurabilityMode.BATCH) {
-            this.flusher = Thread.ofPlatform().daemon().name("folesium-groupcommit-" + dir.getFileName()).unstarted(this::flushLoop);
-            this.flusher.start();
-        } else {
-            this.flusher = null;
-        }
     }
 
     /**
-     * The on-disk metadata is authoritative for shard count and compression:
-     * changing them for an existing store would re-route keys / break records.
+     * Aligns the on-disk store with the requested configuration.
+     *
+     * <p>Only the shard count is physical: it routes keys and is stamped into every shard
+     * header, so a change is applied by rewriting the store ({@link StoreResharder}) rather
+     * than being silently ignored. {@code compression} is recorded for information only -
+     * every record stores its own codec, so changing it just changes what new writes use and
+     * needs no migration. Everything else lives purely in memory.</p>
+     *
+     * @return the configuration that actually applies to the store on disk
      */
-    private FolesiumConfig reconcileMetadata(FolesiumConfig requested) {
+    private FolesiumConfig reconcileMetadata(FolesiumConfig requested, boolean applyLayoutChanges) {
         Path meta = dir.resolve(METADATA_FILE);
         Properties p = new Properties();
-        if (Files.exists(meta)) {
-            try (var reader = Files.newBufferedReader(meta, java.nio.charset.StandardCharsets.UTF_8)) {
-                p.load(reader);
-            } catch (IOException e) {
-                throw new FolesiumException("Cannot read " + meta, e);
-            }
-            int version = Integer.parseInt(p.getProperty("store.version", "0"));
-            if (version != STORE_VERSION) {
-                throw new FolesiumException("Unsupported Folesium store version " + version + " at " + dir
-                        + " (this build supports " + STORE_VERSION + ")");
-            }
-            StoreRole onDisk = parseRole(p.getProperty("store.role"), meta);
-            if (onDisk != role) {
-                throw new FolesiumException("Folesium store at " + dir + " holds " + onDisk
-                        + " data but was opened as " + role
-                        + ". Refusing to mix player data and chunk data in one store.");
-            }
-            int shards;
-            String shardsRaw = p.getProperty("store.shardCount");
-            try {
-                shards = Integer.parseInt(Objects.requireNonNull(shardsRaw, "store.shardCount").trim());
-            } catch (RuntimeException e) {
-                throw new FolesiumException("Missing/invalid store.shardCount '" + shardsRaw + "' in " + meta, e);
-            }
-            if (Integer.bitCount(shards) != 1 || shards < 1 || shards > 1024) {
-                throw new FolesiumException("Invalid store.shardCount " + shards + " in " + meta);
-            }
-            String compRaw = p.getProperty("store.compression");
-            FolesiumConfig.Compression comp;
-            try {
-                comp = FolesiumConfig.Compression.valueOf(
-                        Objects.requireNonNull(compRaw, "store.compression").trim().toUpperCase(java.util.Locale.ROOT));
-            } catch (RuntimeException e) {
-                throw new FolesiumException("Missing/unknown store.compression '" + compRaw + "' in " + meta, e);
-            }
-            if (shards != requested.shardCount()) {
-                LOGGER.log(System.Logger.Level.INFO,
-                        "Folesium: existing store at {0} uses {1} shards; overriding requested {2}",
-                        dir, shards, requested.shardCount());
-            }
-            if (comp != requested.compression()) {
-                LOGGER.log(System.Logger.Level.INFO,
-                        "Folesium: existing store at {0} was written with {1}; new writes will use {1}", dir, comp);
-            }
+        if (!Files.exists(meta)) {
+            p.setProperty("store.version", Integer.toString(STORE_VERSION));
+            p.setProperty("store.role", role.name());
+            p.setProperty("store.shardCount", Integer.toString(requested.shardCount()));
+            p.setProperty("store.compression", requested.compression().name());
+            p.setProperty("store.created", Long.toString(System.currentTimeMillis()));
+            writeMetadata(meta, p);
+            return requested;
+        }
+
+        try (var reader = Files.newBufferedReader(meta, java.nio.charset.StandardCharsets.UTF_8)) {
+            p.load(reader);
+        } catch (IOException e) {
+            throw new FolesiumException("Cannot read " + meta, e);
+        }
+        int version = Integer.parseInt(p.getProperty("store.version", "0"));
+        if (version != STORE_VERSION) {
+            throw new FolesiumException("Unsupported Folesium store version " + version + " at " + dir
+                    + " (this build supports " + STORE_VERSION + ")");
+        }
+        StoreRole onDisk = parseRole(p.getProperty("store.role"), meta);
+        if (onDisk != role) {
+            throw new FolesiumException("Folesium store at " + dir + " holds " + onDisk
+                    + " data but was opened as " + role
+                    + ". Refusing to mix player data and chunk data in one store.");
+        }
+        int shards;
+        String shardsRaw = p.getProperty("store.shardCount");
+        try {
+            shards = Integer.parseInt(Objects.requireNonNull(shardsRaw, "store.shardCount").trim());
+        } catch (RuntimeException e) {
+            throw new FolesiumException("Missing/invalid store.shardCount '" + shardsRaw + "' in " + meta, e);
+        }
+        if (Integer.bitCount(shards) != 1 || shards < 1 || shards > 1024) {
+            throw new FolesiumException("Invalid store.shardCount " + shards + " in " + meta);
+        }
+        String compRaw = p.getProperty("store.compression");
+        FolesiumConfig.Compression comp;
+        try {
+            comp = FolesiumConfig.Compression.valueOf(
+                    Objects.requireNonNull(compRaw, "store.compression").trim().toUpperCase(java.util.Locale.ROOT));
+        } catch (RuntimeException e) {
+            throw new FolesiumException("Missing/unknown store.compression '" + compRaw + "' in " + meta, e);
+        }
+
+        if (!applyLayoutChanges) {
+            // Read-as-is: the store's recorded layout and codec win and nothing is written.
             return requested.withShardCount(shards).withCompression(comp);
         }
-        p.setProperty("store.version", Integer.toString(STORE_VERSION));
-        p.setProperty("store.role", role.name());
-        p.setProperty("store.shardCount", Integer.toString(requested.shardCount()));
-        p.setProperty("store.compression", requested.compression().name());
-        p.setProperty("store.created", Long.toString(System.currentTimeMillis()));
+
+        if (comp != requested.compression()) {
+            // Safe without any migration: each record header carries its own compression id,
+            // so old records keep decoding with the codec they were written with.
+            LOGGER.log(System.Logger.Level.INFO,
+                    "Folesium: {0} switches compression {1} -> {2}; existing records keep their own codec",
+                    dir, comp, requested.compression());
+            p.setProperty("store.compression", requested.compression().name());
+            writeMetadata(meta, p);
+        }
+
+        if (shards == requested.shardCount()) {
+            return requested;
+        }
+        // The store's own layout is what the data is in, so that is what the resharder reads.
+        StoreResharder.reshard(dir, meta, requested.withShardCount(shards), requested.shardCount());
+        return requested;
+    }
+
+    private void writeMetadata(Path meta, Properties p) {
         try (var writer = Files.newBufferedWriter(meta, java.nio.charset.StandardCharsets.UTF_8)) {
             p.store(writer, "Folesium store metadata - do not edit while the server is running");
         } catch (IOException e) {
             throw new FolesiumException("Cannot write " + meta, e);
         }
-        return requested;
+    }
+
+    /** Records a runtime compression switch so the next open does not report it again. */
+    private void persistCompression(FolesiumConfig.Compression compression) {
+        Path meta = dir.resolve(METADATA_FILE);
+        Properties p = new Properties();
+        if (Files.isRegularFile(meta)) {
+            try (var reader = Files.newBufferedReader(meta, java.nio.charset.StandardCharsets.UTF_8)) {
+                p.load(reader);
+            } catch (IOException e) {
+                throw new FolesiumException("Cannot read " + meta, e);
+            }
+        }
+        p.setProperty("store.compression", compression.name());
+        writeMetadata(meta, p);
     }
 
     public Path directory() {
@@ -255,7 +359,92 @@ public final class FolesiumDatabase implements AutoCloseable {
         if (closed.get()) {
             throw new FolesiumException("Database is closed: " + dir);
         }
-        return keyspaces.computeIfAbsent(name, n -> new Keyspace(dir, n, config));
+        Keyspace existing = keyspaces.get(name);
+        if (existing != null) {
+            return existing;
+        }
+        // Creation only: serialised against applyRuntimeConfig so that a keyspace built from
+        // an about-to-be-replaced config can never escape into the map unconfigured.
+        synchronized (keyspaceLock) {
+            if (closed.get()) {
+                throw new FolesiumException("Database is closed: " + dir);
+            }
+            return keyspaces.computeIfAbsent(name, n -> new Keyspace(dir, n, config));
+        }
+    }
+
+    /**
+     * Applies a new configuration to this live store.
+     *
+     * <p>Every setting except {@code shardCount} takes effect on the very next operation:
+     * the shards read the configuration afresh each time, so swapping the (immutable) config
+     * object is all that is needed. Concretely:</p>
+     * <ul>
+     *   <li>{@code compression} / {@code compressionLevel} - used for new writes; existing
+     *       records keep the codec stored in their own header, so nothing is migrated.</li>
+     *   <li>{@code durability} - the group-commit thread is started or stopped to match.</li>
+     *   <li>{@code batchFlushMillis} - the group-commit thread is woken to pick up the
+     *       new interval immediately instead of after the old one elapses.</li>
+     *   <li>{@code compactRatio} / {@code compactMinBytes} / {@code verifyChecksums} - read
+     *       per operation.</li>
+     *   <li>{@code shardCount} - physical; recorded as pending and applied by the automatic
+     *       reshard on the next store open. The live store keeps its current layout.</li>
+     * </ul>
+     *
+     * @return what changed, plus any setting that had to be rejected
+     */
+    public ConfigReloadResult applyRuntimeConfig(FolesiumConfig next) {
+        Objects.requireNonNull(next, "next");
+        if (closed.get()) {
+            throw new FolesiumException("Database is closed: " + dir);
+        }
+        List<String> notes = new ArrayList<>();
+        FolesiumConfig current = this.config;
+
+        boolean reshardRequired = next.shardCount() != current.shardCount();
+        FolesiumConfig effective = next.withShardCount(current.shardCount());
+
+        if (effective.compression() == FolesiumConfig.Compression.ZSTD && !ZstdNative.available()) {
+            notes.add("compression=ZSTD ignored: zstd-jni is not available; keeping " + current.compression());
+            effective = effective.withCompression(current.compression())
+                    .withCompressionLevel(FolesiumConfig.clampCompressionLevel(
+                            current.compression(), effective.compressionLevel()));
+        }
+        if (reshardRequired) {
+            notes.add("shards=" + next.shardCount() + " will be applied by an automatic reshard on the next"
+                    + " server start (currently " + current.shardCount() + ")");
+        }
+
+        List<String> changes = current.diff(effective);
+        if (changes.isEmpty()) {
+            return new ConfigReloadResult(current, changes, notes, reshardRequired);
+        }
+
+        if (effective.compression() != current.compression()) {
+            persistCompression(effective.compression());
+        }
+
+        synchronized (keyspaceLock) {
+            this.config = effective;
+            for (Keyspace ks : keyspaces.values()) {
+                ks.applyRuntimeConfig(effective);
+            }
+        }
+
+        if (effective.durability() == FolesiumConfig.DurabilityMode.BATCH) {
+            startFlusherIfNeeded();
+            // Wake the group-commit thread so a shortened interval applies right away.
+            synchronized (flusherLock) {
+                flusherLock.notifyAll();
+            }
+        } else {
+            stopFlusher();
+            // Leaving BATCH must not silently drop whatever the last window buffered.
+            flush();
+        }
+
+        LOGGER.log(System.Logger.Level.INFO, "Folesium: {0} reconfigured - {1}", dir, String.join(", ", changes));
+        return new ConfigReloadResult(effective, changes, notes, reshardRequired);
     }
 
     public Keyspace chunks() {
@@ -299,18 +488,87 @@ public final class FolesiumDatabase implements AutoCloseable {
         }
     }
 
-    private void flushLoop() {
-        while (!closed.get()) {
-            try {
-                Thread.sleep(config.batchFlushMillis());
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+    /** Starts the group-commit thread if {@code durability == BATCH} and none is running. */
+    private void startFlusherIfNeeded() {
+        synchronized (flusherLock) {
+            if (closed.get() || flusher != null
+                    || config.durability() != FolesiumConfig.DurabilityMode.BATCH) {
                 return;
             }
-            try {
-                flush();
-            } catch (RuntimeException e) {
-                LOGGER.log(System.Logger.Level.ERROR, "Folesium group-commit failed for " + dir, e);
+            Thread t = Thread.ofPlatform().daemon()
+                    .name("folesium-groupcommit-" + dir.getFileName())
+                    .unstarted(this::flushLoop);
+            this.flusher = t;
+            t.start();
+        }
+    }
+
+    /**
+     * Stops the group-commit thread and waits for it to finish its current cycle.
+     *
+     * <p>It is woken through the monitor rather than interrupted, because an interrupt during
+     * {@code FileChannel.force} closes the channel ({@link java.nio.channels.ClosedByInterruptException}).
+     * Interruption is kept only as a last resort if the thread does not come back in time.</p>
+     */
+    private void stopFlusher() {
+        Thread t;
+        synchronized (flusherLock) {
+            t = flusher;
+            flusher = null;
+            flusherLock.notifyAll();
+        }
+        if (t == null || t == Thread.currentThread()) {
+            return;
+        }
+        try {
+            t.join(5000);
+            if (t.isAlive()) {
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Folesium: group-commit thread for {0} did not stop in time; interrupting", dir);
+                t.interrupt();
+                t.join(1000);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void flushLoop() {
+        try {
+            while (true) {
+                FolesiumConfig snapshot = config;
+                synchronized (flusherLock) {
+                    // Either the store is closing or this thread has been superseded/retired.
+                    if (closed.get() || flusher != Thread.currentThread()
+                            || snapshot.durability() != FolesiumConfig.DurabilityMode.BATCH) {
+                        return;
+                    }
+                    try {
+                        flusherLock.wait(Math.max(1, snapshot.batchFlushMillis()));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                    if (closed.get() || flusher != Thread.currentThread()) {
+                        return;
+                    }
+                }
+                if (config.durability() != FolesiumConfig.DurabilityMode.BATCH) {
+                    // Switched away from BATCH while we slept; stopFlusher()/applyRuntimeConfig
+                    // takes care of the final flush.
+                    return;
+                }
+                try {
+                    flush();
+                } catch (RuntimeException e) {
+                    LOGGER.log(System.Logger.Level.ERROR, "Folesium group-commit failed for " + dir, e);
+                }
+            }
+        } finally {
+            synchronized (flusherLock) {
+                if (flusher == Thread.currentThread()) {
+                    flusher = null;
+                }
             }
         }
     }
@@ -320,14 +578,7 @@ public final class FolesiumDatabase implements AutoCloseable {
         if (!closed.compareAndSet(false, true)) {
             return;
         }
-        if (flusher != null) {
-            flusher.interrupt();
-            try {
-                flusher.join(5000);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        }
+        stopFlusher();
         FolesiumException first = null;
         for (Keyspace ks : keyspaces.values()) {
             try {

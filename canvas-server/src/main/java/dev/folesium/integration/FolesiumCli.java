@@ -20,6 +20,7 @@ package dev.folesium.integration;
 
 import dev.folesium.converter.WorldConversionService;
 import dev.folesium.core.FolesiumConfig;
+import dev.folesium.core.FolesiumRegistry;
 import joptsimple.OptionSet;
 
 import java.io.File;
@@ -81,10 +82,15 @@ public final class FolesiumCli {
                 ? WorldConversionService.Direction.TO_FOLESIUM
                 : WorldConversionService.Direction.TO_ANVIL;
 
-        LOGGER.info(() -> "Folesium: starting " + dir + " for " + worldDir);
+        // The operator's own configuration, not the library defaults: a store created here
+        // with defaults() would be stamped with a shard count / codec the running server
+        // never asked for, forcing a full reshard on the first real start.
+        FolesiumConfig config = FolesiumRegistry.configFromProperties();
+        LOGGER.info(() -> "Folesium: starting " + dir + " for " + worldDir
+                + " (shards=" + config.shardCount() + ", compression=" + config.compression() + ")");
         try {
             WorldConversionService.Report rep = new WorldConversionService()
-                    .convertWorld(worldDir, dir, FolesiumConfig.defaults());
+                    .convertWorld(worldDir, dir, config);
             LOGGER.info(() -> "Folesium: " + rep);
             return true;
         } catch (Exception e) {
