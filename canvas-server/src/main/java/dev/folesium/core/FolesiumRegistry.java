@@ -644,18 +644,22 @@ public final class FolesiumRegistry {
                     "Folesium: stale release for {0} ignored (store was reopened)", key);
             return;
         }
-        if (--entry.refCount < 0) {
-            LOGGER.log(System.Logger.Level.WARNING, "Folesium: reference count underflow for {0}", key);
-            entry.refCount = 0;
+        if (entry.refCount > 0) {
+            entry.refCount--;
+        } else {
+            LOGGER.log(System.Logger.Level.WARNING, "Folesium: retrying close of {0} after a prior close failure", key);
         }
-        if (entry.refCount == 0) {
-            OPEN.remove(key);
-            try {
-                entry.db.close();
-                LOGGER.log(System.Logger.Level.INFO, "Folesium: closed store {0}", key);
-            } catch (RuntimeException ex) {
-                LOGGER.log(System.Logger.Level.ERROR, "Folesium: error closing {0}", key, ex);
-            }
+        if (entry.refCount != 0) {
+            return;
+        }
+        try {
+            entry.db.close();
+            OPEN.remove(key, entry);
+            LOGGER.log(System.Logger.Level.INFO, "Folesium: closed store {0}", key);
+        } catch (RuntimeException ex) {
+            // Keep the zero-ref entry and its dirty keyspaces reachable. A later release or
+            // closeAll can retry after the transient I/O failure clears.
+            LOGGER.log(System.Logger.Level.ERROR, "Folesium: error closing " + key, ex);
         }
     }
 
@@ -693,20 +697,23 @@ public final class FolesiumRegistry {
 
     /** Closes every open store regardless of reference count (server shutdown hook). */
     public static synchronized void closeAll() {
-        for (Entry e : OPEN.values()) {
+        var iterator = OPEN.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Entry e = iterator.next().getValue();
             try {
                 e.db.flush();
             } catch (RuntimeException ex) {
                 LOGGER.log(System.Logger.Level.ERROR, "Folesium: flush failed " + e.db.directory(), ex);
             }
-        }
-        for (Entry e : OPEN.values()) {
             try {
                 e.db.close();
+                if (e.db.isClosed()) {
+                    iterator.remove();
+                }
             } catch (RuntimeException ex) {
                 LOGGER.log(System.Logger.Level.ERROR, "Folesium: error closing " + e.db.directory(), ex);
+                // Leave the entry registered so shutdown/release can retry the close.
             }
         }
-        OPEN.clear();
     }
 }

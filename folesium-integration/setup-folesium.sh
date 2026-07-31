@@ -38,16 +38,32 @@ else
 fi
 [ -x "$SRC/scripts/apply-integration.sh" ] || { echo "not a Folesium checkout: $SRC" >&2; exit 1; }
 
-# 2. make sure the fork sources are decompiled/patched -----------------------
-if ! ls "$FORK_ROOT"/*-server/src/minecraft/java >/dev/null 2>&1; then
-    echo "==> running ./gradlew applyAllPatches (first run, this takes a while)"
+# 2. refresh tracked Folia file patches before decompiling -------------------
+REGENERATE=0
+if [ -d "$FORK_ROOT/folia-server/paper-patches/files/src/main/java" ]; then
+    [ -f "$SRC/scripts/gen-folia-file-patches.sh" ] || {
+        echo "Folia checkout requires scripts/gen-folia-file-patches.sh: $SRC" >&2
+        exit 1
+    }
+    echo "==> regenerating tracked Folia Folesium file patches"
+    bash "$SRC/scripts/gen-folia-file-patches.sh" "$FORK_ROOT"
+    [ -n "$(find "$FORK_ROOT/folia-server/paper-patches/files/src/main/java/dev/folesium" -type f -name '*.patch' -print -quit)" ] || {
+        echo "Folia Folesium file-patch generation produced no patches" >&2
+        exit 1
+    }
+    REGENERATE=1
+fi
+
+# 3. make sure the fork sources are decompiled/patched -----------------------
+if [ "$REGENERATE" = 1 ] || ! ls "$FORK_ROOT"/*-server/src/minecraft/java >/dev/null 2>&1; then
+    echo "==> running ./gradlew applyAllPatches (this takes a while)"
     (cd "$FORK_ROOT" && ./gradlew applyAllPatches)
 fi
 
-# 3. vendor + patch ----------------------------------------------------------
+# 4. vendor + patch ----------------------------------------------------------
 bash "$SRC/scripts/apply-integration.sh" "$FORK_ROOT"
 
-# 4. build -------------------------------------------------------------------
+# 5. build -------------------------------------------------------------------
 if [ "$BUILD" = 1 ]; then
     echo "==> building paperclip jar"
     (cd "$FORK_ROOT" && ./gradlew createPaperclipJar --max-workers="$(nproc)")

@@ -3,9 +3,10 @@
 > **English** | [简体中文](USAGE.zh.md)
 
 This is the complete operator's guide for running **this server fork** (Folia 26.2 /
-Canvas) with the Folesium storage backend. For the engine internals see the
-[Folesium repository](https://github.com/wosnxn123/Folesium) (`docs/ARCHITECTURE.md`,
-`docs/SCHEMA.md`).
+Canvas) with the Folesium storage backend. The current integration is **Folia/Canvas-only**:
+Paper-style checkouts are not supported and no Paper integration code is provided. For the
+engine internals see the [Folesium repository](https://github.com/wosnxn123/Folesium)
+(`docs/ARCHITECTURE.md`, `docs/SCHEMA.md`).
 
 ---
 
@@ -36,10 +37,16 @@ exactly like the stock fork and keeps writing `.mca`.
 
 ## 2. Getting a server jar
 
+Run this kit from a Folia 26.2 or Canvas checkout only:
+
 ```bash
 ./folesium-integration/setup-folesium.sh          # clone/update engine, patch, build
 # result: <fork>-server/build/libs/<fork>-paperclip-*.jar
 ```
+
+The script refreshes the fork's tracked Folia file-patches or Canvas vendor sources and
+applies the vanilla hooks to generated sources before building. Paper-style checkouts are
+not detected or supported.
 
 Options: `--no-build` (patch only), env vars `FOLESIUM_REPO` / `FOLESIUM_REF` /
 `FOLESIUM_HOME` (use a local Folesium checkout instead of cloning).
@@ -81,13 +88,16 @@ Folesium: opened PLAYERS store .../world/players/folesium
 
 ## 4. Configuration reference
 
-All keys work both as `-Dfolesium.<key>` and as `<key>` in `folesium.properties`.
-Unparseable **and out-of-range** values fall back to the default and log a warning — they
-never abort startup.
+All file-backed keys work as `-Dfolesium.<key>=<value>` or as `<key>` in
+`folesium.properties`. `logging.utf8` is the exception: it is a JVM system-property-only
+setting and is not read from `folesium.properties`.
+Unparseable **and out-of-range** file-backed values fall back to the default and log a warning —
+they never abort startup.
 
 The "applies" column says how a change reaches an **existing** store: **live** = within
 seconds, no restart (see §4.1); **next start** = the store is rewritten when next opened;
-**world load** = the world binds its backend when it loads.
+**world load** = the world binds its backend when it loads; **startup** = read before the
+configuration watcher is created.
 
 | key | default | applies | meaning |
 |---|---|---|---|
@@ -101,8 +111,9 @@ seconds, no restart (see §4.1); **next start** = the store is rewritten when ne
 | `compactRatio` | `0.5` | live | compact a shard when dead bytes exceed this fraction of the file |
 | `compactMinBytes` | `8388608` | live | never compact shards smaller than this (8 MiB) |
 | `verifyChecksums` | `false` | live | re-verify record CRC32C on every read (~2× read I/O; recovery scans always verify) |
-| `autoReload` | `true` | live | watch `folesium.properties` and apply edits to the running server |
+| `autoReload` | `true` | startup | create the watcher for `folesium.properties`; changing this file key does not stop a watcher already running |
 | `autoReloadSeconds` | `10` | live | how often the file is checked for edits |
+| `logging.utf8` | `true` | startup | JVM system-property-only switch for existing Folesium/JUL handler encoding; not a file-backed key and not the complete server log |
 
 ### 4.1 Retuning a running server
 
@@ -115,13 +126,22 @@ every open store and the log states exactly what changed:
 [INFO] Folesium: .../world/players/folesium: durability: BATCH -> ALWAYS, compressionLevel: 4 -> 9
 ```
 
-`enabled` and `shards` are the only two that cannot fully apply live — they are reported in
-the log rather than silently dropped, and `shards` is then applied by an automatic reshard on
+`enabled` and `shards` are the only two that cannot fully apply live — they are reported in the
+log rather than silently dropped, and `shards` is then applied by an automatic reshard on
 the next start (staged three-phase commit: a crash leaves either the old store untouched or a
 swap that resumes and finishes on the next open). Take the usual backup before a big layout
 change on a large world.
 
-Set `autoReload=false` to keep the old restart-to-apply behaviour.
+`autoReload=false` must be set before startup to prevent watcher creation. Changing the file
+from `true` to `false` does not stop an existing watcher; restart after that change.
+
+### 4.2 JVM/JUL log encoding
+
+On platforms whose JVM default charset is not UTF-8, `-Dfolesium.logging.utf8=true` (the default)
+re-encodes the **existing** `java.util.logging` handlers when Folesium first loads its config.
+This covers Folesium's JUL messages only. Folia/Canvas later route normal server output through
+ForwardLogHandler/Log4j, so this setting does not claim to reconfigure the complete server log.
+Use `-Dfolesium.logging.utf8=false` to disable it; the setting is system-property-only.
 
 ### Durability guidance
 
@@ -138,8 +158,7 @@ shutdown.
 
 `compression=ZSTD` uses the `zstd-jni` native library that Folia/Canvas already ship —
 no setup needed on the server. It beats Deflate on both ratio and speed. If chosen where
-`zstd-jni` is missing (e.g. a standalone converter run), the store open fails with a
-clear message.
+`zstd-jni` is missing (e.g. a standalone converter run), the store open fails with a clear message.
 
 Example of a durability-first setup:
 
@@ -158,10 +177,9 @@ Three equivalent paths — pick one. **Back up your world first** in every case.
 
 ### 5a. Lazy migration (zero downtime beyond a restart)
 
-Just enable Folesium and start. Any chunk or player missing from the store is read from
-the original `.mca`/player files on demand, and migrates into the store when saved. The
-world is fully playable from the first second; the store fills up as the world is
-visited.
+Just enable Folesium and start. Any chunk or player missing from the store is read from the
+original `.mca`/player files on demand, and migrates into the store when saved. The world is
+fully playable from the first second; the store fills up as the world is visited.
 
 ### 5b. One-shot conversion (Cesium-style startup flags, recommended)
 
@@ -195,11 +213,10 @@ The same tool offers `inspect` (record counts per keyspace) and `diff`
 ### What happens to the old files?
 
 **Nothing is ever deleted** — the same guarantee the original cesium-fabric converter
-gives. The `.mca` and player files stay on disk as a backup and are ignored while
-Folesium is enabled. Once you have verified the converted world, you may delete them
-yourself to reclaim disk space: `region/`, `entities/`, `poi/` in every dimension and
-`players/data|advancements|stats` (26.x) or `playerdata/ advancements/ stats/`
-(pre-26).
+gives. The `.mca` and player files stay on disk as a backup and are ignored while Folesium
+is enabled. Once you have verified the converted world, you may delete them yourself to reclaim
+ disk space: `region/`, `entities/`, `poi/` in every dimension and `players/data|advancements|stats`
+(26.x) or `playerdata/ advancements/ stats/` (pre-26).
 
 ---
 
@@ -224,9 +241,9 @@ Folesium: no files were deleted. The now-redundant Folesium stores were kept as 
 
 Delete them by hand once the restored world is verified.
 
-> **Warning:** if you keep playing on Anvil after a rollback and later convert to
-> Folesium again, **delete the leftover `folesium/` stores first**. The forward
-> conversion merges, so stale store records would win over your newer Anvil data.
+> **Warning:** if you keep playing on Anvil after a rollback and later convert to Folesium again,
+> **delete the leftover `folesium/` stores first**. The forward conversion merges, so stale store
+> records would win over your newer Anvil data.
 
 The two flags are mutually exclusive; passing both aborts with an error.
 
@@ -266,7 +283,7 @@ world/
 | `.mca` files still present after conversion | expected — the converter never deletes files; remove them manually once verified (§5) |
 | `folesium/` still present after rollback | expected — same policy; remove manually (§6) |
 | store directory keeps growing | dead records are reclaimed by compaction: the engine checks every open store at most once every 5 minutes and rewrites a shard once it passes `compactRatio` × size and `compactMinBytes`; lower those two to compact sooner |
-| want to verify integrity | start with `-Dfolesium.verifyChecksums=true`, or `folesium-converter … inspect <store>` |
+| want to verify integrity | start with `-Dfolesium.verifyChecksums=true`, or `folesium-converter inspect <store>` |
 
 Log lines to know:
 

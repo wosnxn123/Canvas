@@ -26,12 +26,13 @@ public final class Bytes {
     private final int hash;
 
     public Bytes(byte[] data) {
-        this.data = data;
-        this.hash = Arrays.hashCode(data);
+        this.data = data.clone();
+        this.hash = Arrays.hashCode(this.data);
     }
 
+    /** Returns a defensive copy of the retained key bytes. */
     public byte[] array() {
-        return data;
+        return data.clone();
     }
 
     public int length() {

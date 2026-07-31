@@ -24,9 +24,14 @@ import dev.folesium.core.Keyspace;
 import dev.folesium.core.util.UuidKeys;
 
 import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
@@ -203,60 +208,147 @@ public final class PlayerDataConverter {
     // ------------------------------------------------------- folesium -> vanilla
 
     /**
-     * Writes every stored player record back out as a vanilla file. Existing vanilla
-     * files are overwritten, because the store is the authoritative copy at that point.
-     *
-     * <p>Like cesium-fabric's converter, <em>nothing is deleted</em>: the player store is
-     * left in place as a backup. Delete it manually once the restored files have been
-     * verified -- and always before re-converting after having played on the restored
-     * files, because {@link #anvilToFolesium} merges and would keep the (older) store
-     * records over the newer vanilla files.</p>
+     * Materializes every player keyspace into a clean vanilla directory. The
+     * previous directory is moved to a unique sibling backup before the staged
+     * directory is published, so stale UUID files and empty-keyspace remnants
+     * cannot survive rollback.
      */
     public static Stats folesiumToAnvil(Path storeDir, Path worldRoot) throws IOException {
         long start = System.nanoTime();
         long entries = 0;
         long bytes = 0;
         if (!Files.isDirectory(storeDir)) {
-            // Nothing was ever imported; opening would create an empty store out of
-            // thin air (the converter must never create files it does not need).
             return new Stats(0, 0, (System.nanoTime() - start) / 1_000_000);
         }
 
         Path playerRoot = playerRootOf(worldRoot, storeDir);
-        // Export only: open the store exactly as it lies on disk (applyLayoutChanges=false),
-        // so a store whose shard count or codec differs from the defaults is read as-is
-        // instead of being rewritten first.
+        // Export only: read the existing layout without rewriting it first.
         try (FolesiumDatabase db = FolesiumDatabase.open(storeDir,
                 FolesiumConfig.defaults().withDurability(FolesiumConfig.DurabilityMode.EXPLICIT),
                 FolesiumDatabase.StoreRole.PLAYERS, false)) {
             for (Mapping m : mappingsFor(worldRoot, playerRoot)) {
                 Keyspace ks = db.keyspace(m.keyspace());
-                if (ks.count() == 0) {
+                Path out = playerRoot.resolve(m.dir());
+                if (ks.count() == 0 && !Files.exists(out)) {
+                    // Do not create empty vanilla roots on a brand-new world; an
+                    // existing root is still replaced by the empty authoritative tree.
                     continue;
                 }
-                Path out = playerRoot.resolve(m.dir());
-                Files.createDirectories(out);
-                // Keys first, values one at a time: buffering every record would hold the
-                // whole keyspace (all player .dat/.json payloads) in memory at once.
-                List<byte[]> keys = new ArrayList<>();
-                ks.forEachKey(keys::add);
-                for (byte[] key : keys) {
-                    if (key.length != UuidKeys.LENGTH) {
-                        continue; // not a player key; leave it alone rather than guess
+                Path staging = siblingPath(out, ".folesium-staging-");
+                Files.createDirectories(staging);
+                try {
+                    // Keys first: values are still read one at a time, while the
+                    // clean staging tree handles records deleted from the store.
+                    List<byte[]> keys = new ArrayList<>();
+                    ks.forEachKey(keys::add);
+                    for (byte[] key : keys) {
+                        if (key.length != UuidKeys.LENGTH) {
+                            continue; // not a player key; leave it out rather than guess
+                        }
+                        byte[] value = ks.get(key);
+                        if (value == null) {
+                            continue; // deleted between the key scan and the read
+                        }
+                        UUID id = UuidKeys.decode(key);
+                        writeAtomically(staging.resolve(id + m.extension()), value);
+                        entries++;
+                        bytes += value.length;
                     }
-                    byte[] value = ks.get(key);
-                    if (value == null) {
-                        continue; // deleted between the key scan and the read
-                    }
-                    UUID id = UuidKeys.decode(key);
-                    Path file = out.resolve(id + m.extension());
-                    Files.write(file, value);
-                    entries++;
-                    bytes += value.length;
+                    replaceDirectory(out, staging);
+                } catch (IOException | RuntimeException ex) {
+                    deleteTreeQuietly(staging);
+                    throw ex;
                 }
             }
         }
         return new Stats(entries, bytes, (System.nanoTime() - start) / 1_000_000);
+    }
+
+    private static Path siblingPath(Path destination, String marker) {
+        Path absolute = destination.toAbsolutePath().normalize();
+        Path parent = absolute.getParent();
+        if (parent == null) {
+            parent = absolute.getRoot();
+        }
+        return parent.resolve(destination.getFileName() + marker + UUID.randomUUID());
+    }
+
+    /** Writes and forces a sibling temporary file, then publishes it atomically. */
+    private static void writeAtomically(Path destination, byte[] value) throws IOException {
+        Path temporary = destination.resolveSibling(destination.getFileName() + ".tmp-" + UUID.randomUUID());
+        try {
+            Files.write(temporary, value, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+            try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE)) {
+                channel.force(true);
+            }
+            try {
+                Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException unsupported) {
+                // Explicit portability fallback: staging-directory publication still
+                // protects the existing vanilla tree from a partial write.
+                Files.move(temporary, destination, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(temporary);
+        }
+    }
+
+    private static void replaceDirectory(Path destination, Path staging) throws IOException {
+        Path parent = destination.toAbsolutePath().normalize().getParent();
+        if (parent == null) {
+            parent = destination.toAbsolutePath().normalize().getRoot();
+        }
+        Files.createDirectories(parent);
+        Path backup = siblingPath(destination, ".folesium-backup-");
+        boolean backedUp = false;
+        try {
+            if (Files.exists(destination)) {
+                movePath(destination, backup, false);
+                backedUp = true;
+            }
+            movePath(staging, destination, true);
+        } catch (IOException failure) {
+            if (Files.exists(destination)) {
+                deleteTreeQuietly(destination);
+            }
+            if (backedUp && Files.exists(backup)) {
+                try {
+                    movePath(backup, destination, false);
+                } catch (IOException restoreFailure) {
+                    failure.addSuppressed(restoreFailure);
+                }
+            }
+            throw failure;
+        }
+    }
+
+    private static void movePath(Path source, Path target, boolean atomicPreferred) throws IOException {
+        try {
+            if (atomicPreferred) {
+                Files.move(source, target, StandardCopyOption.ATOMIC_MOVE);
+            } else {
+                Files.move(source, target);
+            }
+        } catch (AtomicMoveNotSupportedException unsupported) {
+            Files.move(source, target);
+        }
+    }
+
+    private static void deleteTreeQuietly(Path root) {
+        if (!Files.exists(root)) {
+            return;
+        }
+        try (var paths = Files.walk(root)) {
+            paths.sorted(Comparator.reverseOrder()).forEach(path -> {
+                try {
+                    Files.deleteIfExists(path);
+                } catch (IOException ignored) {
+                    // The previous destination remains available in its backup.
+                }
+            });
+        } catch (IOException ignored) {
+            // Best effort cleanup of an uncommitted staging tree.
+        }
     }
 
     // ------------------------------------------------------------------ helpers

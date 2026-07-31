@@ -95,39 +95,43 @@ final class StoreResharder {
         Path backup = dir.resolve(BACKUP_DIR);
         boolean hasStaging = Files.isDirectory(staging);
         boolean hasBackup = Files.isDirectory(backup);
+        Path movedMarker = backup.resolve(MOVED_MARKER);
         if (!hasStaging && !hasBackup) {
             return;
         }
         if (hasStaging && Files.isRegularFile(staging.resolve(COMMIT_MARKER))) {
+            Integer newCount = committedShardCountIfValid(staging);
+            if (newCount != null && validStagedLayout(staging, newCount)) {
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Folesium: resuming an interrupted reshard of {0}", dir);
+                finishSwap(dir, staging, backup);
+                // The marker precedes metadata, so a crash in that window leaves metadata
+                // naming the old count while the files use the new layout.
+                applyShardCountMetadata(dir, newCount);
+                return;
+            }
             LOGGER.log(System.Logger.Level.WARNING,
-                    "Folesium: resuming an interrupted reshard of {0}", dir);
-            int newCount = readCommittedShardCount(staging);
-            finishSwap(dir, staging, backup);
-            // The COMMIT marker was written *before* the metadata was updated, so a crash in
-            // that window leaves the metadata naming the old count while the files on disk use
-            // the new layout. Re-apply the count now (idempotent) so the next open does not
-            // reject the store as a topology mismatch. finishSwap deletes the staging dir, so
-            // the count must be read first.
-            applyShardCountMetadata(dir, newCount);
-            return;
+                    "Folesium: ignoring malformed or mismatched reshard COMMIT marker in {0}", dir);
+            if (Files.isRegularFile(movedMarker)) {
+                // MOVED is durable evidence that the old set was already displaced; never
+                // restore it merely because a stale marker is malformed.
+                deleteRecursively(staging);
+                deleteRecursively(backup);
+                fsyncDirectory(dir);
+                return;
+            }
         }
-        if (!hasStaging && Files.isRegularFile(backup.resolve(MOVED_MARKER))) {
-            // Staging is gone but the backup survived: the swap already completed and the
-            // crash happened during the final cleanup. The new shard set is live; the
-            // backup only holds the superseded old files.
+        if (!hasStaging && Files.isRegularFile(movedMarker)) {
             LOGGER.log(System.Logger.Level.INFO,
                     "Folesium: removing the backup of a completed reshard of {0}", dir);
             deleteRecursively(backup);
             return;
         }
-        // No COMMIT marker: the new shard set was never complete, so the original files are
-        // still the authoritative copy. They may however have been half moved aside already
-        // (crash inside phase 3 before the MOVED marker became durable), so put anything the
-        // backup still holds back before dropping the scratch -- deleting it outright would
-        // destroy live shards.
+        // No valid COMMIT marker: the new set was never authoritative. Restore any old files
+        // moved aside before deleting scratch state, rather than destroying live shards.
         LOGGER.log(System.Logger.Level.WARNING,
                 "Folesium: discarding an incomplete reshard of {0} (store is unchanged)", dir);
-        if (hasBackup) {
+        if (hasBackup && !Files.isRegularFile(movedMarker)) {
             restoreFromBackup(dir, backup);
         }
         deleteRecursively(staging);
@@ -198,8 +202,7 @@ final class StoreResharder {
 
             // Phase 2 - commit. After the marker is durable the new layout wins, and any
             // later crash resumes the swap rather than rolling back.
-            Files.writeString(staging.resolve(COMMIT_MARKER),
-                    Integer.toString(newShardCount), StandardCharsets.UTF_8);
+            FolesiumDatabase.writeAtomically(staging.resolve(COMMIT_MARKER), Integer.toString(newShardCount));
             fsyncDirectory(staging);
             updateShardCountMetadata(metadataFile, oldShardCount, newShardCount);
 
@@ -264,7 +267,7 @@ final class StoreResharder {
                     Files.move(old, backup.resolve(old.getFileName().toString()),
                             StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
                 }
-                Files.writeString(movedMarker, "ok", StandardCharsets.UTF_8);
+                FolesiumDatabase.writeAtomically(movedMarker, "ok");
                 fsyncDirectory(backup);
                 fsyncDirectory(dir);
             }
@@ -318,12 +321,42 @@ final class StoreResharder {
         }
     }
 
-    private static int readCommittedShardCount(Path staging) {
+    private static Integer committedShardCountIfValid(Path staging) {
+        Path marker = staging.resolve(COMMIT_MARKER);
         try {
-            return Integer.parseInt(
-                    Files.readString(staging.resolve(COMMIT_MARKER), StandardCharsets.UTF_8).trim());
-        } catch (IOException e) {
-            throw new FolesiumException("Cannot read reshard COMMIT marker in " + staging.getParent(), e);
+            if (Files.size(marker) > 64) {
+                return null;
+            }
+            String raw = Files.readString(marker, StandardCharsets.UTF_8).trim();
+            int count = Integer.parseInt(raw);
+            return Integer.bitCount(count) == 1 && count >= 1 && count <= 1024 ? count : null;
+        } catch (IOException | NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /** Ensures the staged files represent exactly the count named by COMMIT. */
+    private static boolean validStagedLayout(Path staging, int count) {
+        try {
+            for (String name : discoverKeyspaces(staging)) {
+                for (int i = 0; i < count; i++) {
+                    if (!Files.isRegularFile(staging.resolve(String.format("%s-%04d.flog", name, i)))) {
+                        return false;
+                    }
+                }
+                try (Stream<Path> files = Files.list(staging)) {
+                    long actual = files.filter(Files::isRegularFile)
+                            .filter(p -> p.getFileName().toString().startsWith(name + "-")
+                                    && p.getFileName().toString().endsWith(".flog"))
+                            .count();
+                    if (actual != count) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        } catch (IOException | RuntimeException e) {
+            return false;
         }
     }
 
@@ -343,7 +376,7 @@ final class StoreResharder {
                 try {
                     oldCount = Integer.parseInt(raw.trim());
                 } catch (RuntimeException ignore) {
-                    // keep newCount as both old and new; updateShardCountMetadata tolerates this.
+                    // keep newCount as both old and new; metadata remains complete.
                 }
             }
         }
@@ -364,10 +397,7 @@ final class StoreResharder {
         p.setProperty("store.shardCount", Integer.toString(newCount));
         p.setProperty("store.previousShardCount", Integer.toString(oldCount));
         p.setProperty("store.reshardedAt", Long.toString(System.currentTimeMillis()));
-        try (var writer = Files.newBufferedWriter(meta, StandardCharsets.UTF_8)) {
-            p.store(writer, "Folesium store metadata - do not edit while the server is running");
-        }
-        fsyncDirectory(meta.getParent());
+        FolesiumDatabase.writeMetadataAtomically(meta, p);
     }
 
     private static void closeQuietly(ShardFile[] shards) {

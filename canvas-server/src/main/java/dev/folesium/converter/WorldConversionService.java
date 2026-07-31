@@ -128,7 +128,7 @@ public final class WorldConversionService {
         }
         for (Path dim : dimensionDirs) {
             Path folesiumStore = dim.resolve(FolesiumDatabase.STORE_DIR_NAME);
-            boolean hasAnvil = Files.isDirectory(dim.resolve("region"));
+            boolean hasAnvil = hasAnvilData(dim);
             boolean hasFolesium = isDimensionStore(folesiumStore);
             WorldConverter.Stats stats;
             switch (dir) {
@@ -228,23 +228,23 @@ public final class WorldConversionService {
     /**
      * Returns the directory of every dimension in {@code worldRoot}. Folia 26.x uses
      * {@code dimensions/<namespace>/<path>}; the world root itself is included iff it is
-     * a pre-1.21.x single-dimension layout (it has an Anvil {@code region/} directory or
-     * an already-converted dimension store).
+     * a pre-1.21.x single-dimension layout (it has an Anvil {@code region/},
+     * {@code entities/} or {@code poi/} directory, or an already-converted dimension
+     * store).
      *
-     * <p>A directory counts as a dimension when it contains an Anvil {@code region/}
-     * directory, or a {@code folesium/} store whose recorded role is
+     * <p>A directory counts as a dimension when it contains an Anvil data directory
+     * ({@code region/}, {@code entities/} or {@code poi/}), or a {@code folesium/} store
+     * whose recorded role is
      * {@link FolesiumDatabase.StoreRole#DIMENSION}. Checking the role -- not merely the
      * directory name -- is what keeps a world root holding a <em>player</em> store from
      * being converted as if it were a dimension.</p>
      *
      * <p>The scan is recursive and stops descending once a dimension directory is
      * found, so arbitrarily nested modded dimension layouts
-     * ({@code dimensions/<ns>/<path>/<path>/...}) are discovered correctly. Directories
-     * that can only ever hold leaf data ({@code region/}, {@code folesium/}, ...) are
-     * skipped outright: descending into them on a large save means stat-ing tens of
-     * thousands of {@code .mca} and shard files for nothing. Entries that cannot be
-     * read (permissions, a dangling symlink) are ignored instead of aborting the whole
-     * conversion.</p>
+     * ({@code dimensions/<ns>/<path>/<path>/...}) are discovered correctly. It does
+     * not classify path components by basename: names such as {@code data},
+     * {@code region}, {@code entities} and {@code poi} are all legal dimension
+     * components.</p>
      */
     static List<Path> discoverDimensions(Path worldRoot) throws IOException {
         List<Path> out = new ArrayList<>();
@@ -256,10 +256,13 @@ public final class WorldConversionService {
         Files.walkFileTree(worldRoot, new SimpleFileVisitor<Path>() {
             @Override
             public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
-                if (dir.equals(worldRoot) || seen.contains(dir)) {
-                    return FileVisitResult.CONTINUE;
+                if (dir.equals(worldRoot)) {
+                    // A root dimension was already recorded above; do not walk its
+                    // region files as if they were candidate dimensions.
+                    return isDimensionDirectory(dir)
+                            ? FileVisitResult.SKIP_SUBTREE : FileVisitResult.CONTINUE;
                 }
-                if (isDataLeafDirectory(dir)) {
+                if (seen.contains(dir)) {
                     return FileVisitResult.SKIP_SUBTREE;
                 }
                 if (isDimensionDirectory(dir)) {
@@ -278,24 +281,14 @@ public final class WorldConversionService {
         return out;
     }
 
-    /**
-     * Directories that hold data files rather than further dimensions. Walking into them
-     * can never discover a dimension, so the scan skips their whole subtree.
-     */
-    private static boolean isDataLeafDirectory(Path dir) {
-        Path name = dir.getFileName();
-        if (name == null) {
-            return false;
-        }
-        return switch (name.toString().toLowerCase(Locale.ROOT)) {
-            case FolesiumDatabase.STORE_DIR_NAME, "region", "entities", "poi", "data",
-                 "playerdata", "advancements", "stats", "datapacks", "serverconfig" -> true;
-            default -> false;
-        };
+    private static boolean hasAnvilData(Path dir) {
+        return Files.isDirectory(dir.resolve("region"))
+                || Files.isDirectory(dir.resolve("entities"))
+                || Files.isDirectory(dir.resolve("poi"));
     }
 
     private static boolean isDimensionDirectory(Path dir) {
-        return Files.isDirectory(dir.resolve("region"))
+        return hasAnvilData(dir)
                 || isDimensionStore(dir.resolve(FolesiumDatabase.STORE_DIR_NAME));
     }
 

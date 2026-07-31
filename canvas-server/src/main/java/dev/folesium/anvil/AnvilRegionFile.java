@@ -83,27 +83,53 @@ public final class AnvilRegionFile implements Closeable {
 
     public AnvilRegionFile(Path path) throws IOException {
         this.path = path;
-        this.channel = FileChannel.open(path,
-                StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE);
-        usedSectors.set(0, 2); // header sectors
-        if (channel.size() < 2L * SECTOR_BYTES) {
-            // fresh file: write empty header
-            channel.write(ByteBuffer.allocate(2 * SECTOR_BYTES), 0);
-        } else {
-            ByteBuffer header = ByteBuffer.allocate(2 * SECTOR_BYTES);
-            readFully(header, 0);
-            for (int i = 0; i < CHUNKS_PER_REGION; i++) {
-                int loc = header.getInt(i * 4);
-                locations[i] = loc;
-                if (loc != 0) {
-                    int off = loc >>> 8;
-                    int count = loc & 0xFF;
-                    usedSectors.set(off, off + count);
+        FileChannel opened = null;
+        try {
+            opened = FileChannel.open(path,
+                    StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE);
+            BitSet loadedSectors = new BitSet();
+            loadedSectors.set(0, 2); // header sectors
+            long size = opened.size();
+            if (size < 2L * SECTOR_BYTES) {
+                // A partial or fresh file is initialized as a complete empty header.
+                writeFully(opened, ByteBuffer.allocate(2 * SECTOR_BYTES), 0);
+            } else {
+                ByteBuffer header = ByteBuffer.allocate(2 * SECTOR_BYTES);
+                readFully(opened, header, 0);
+                long availableSectors = (size + SECTOR_BYTES - 1L) / SECTOR_BYTES;
+                int[] loadedLocations = new int[CHUNKS_PER_REGION];
+                int[] loadedTimestamps = new int[CHUNKS_PER_REGION];
+                for (int i = 0; i < CHUNKS_PER_REGION; i++) {
+                    int loc = header.getInt(i * 4);
+                    if (loc != 0) {
+                        int off = loc >>> 8;
+                        int count = loc & 0xFF;
+                        int firstUsed = loadedSectors.nextSetBit(off);
+                        if (count == 0 || off < 2
+                                || (long) off + count > availableSectors
+                                || (firstUsed >= 0 && firstUsed < off + count)) {
+                            throw new IOException("Invalid chunk location 0x"
+                                    + Integer.toHexString(loc) + " at header index " + i);
+                        }
+                        loadedSectors.set(off, off + count);
+                    }
+                    loadedLocations[i] = loc;
+                    loadedTimestamps[i] = header.getInt(SECTOR_BYTES + i * 4);
+                }
+                System.arraycopy(loadedLocations, 0, locations, 0, CHUNKS_PER_REGION);
+                System.arraycopy(loadedTimestamps, 0, timestamps, 0, CHUNKS_PER_REGION);
+            }
+            usedSectors.or(loadedSectors);
+            this.channel = opened;
+        } catch (IOException | RuntimeException failure) {
+            if (opened != null) {
+                try {
+                    opened.close();
+                } catch (IOException closeFailure) {
+                    failure.addSuppressed(closeFailure);
                 }
             }
-            for (int i = 0; i < CHUNKS_PER_REGION; i++) {
-                timestamps[i] = header.getInt(SECTOR_BYTES + i * 4);
-            }
+            throw failure;
         }
     }
 
@@ -149,12 +175,22 @@ public final class AnvilRegionFile implements Closeable {
             throw new IOException("Corrupt chunk payload length " + length + " at sector " + sectorOff);
         }
         int rawType = buf.get(4) & 0xFF;
+        boolean external = (rawType & EXTERNAL_FLAG) != 0;
         byte compressionType = (byte) (rawType & ~EXTERNAL_FLAG);
+        validateCompressionType(compressionType);
         byte[] data;
-        if ((rawType & EXTERNAL_FLAG) != 0) {
+        if (external) {
+            if (length != 1) {
+                throw new IOException("External chunk stub must have length 1, got " + length);
+            }
             // Oversized chunk: the region file holds only the header, the payload is in
-            // c.<chunkX>.<chunkZ>.mcc next to it.
-            data = java.nio.file.Files.readAllBytes(externalChunkPath(localX, localZ));
+            // c.<chunkX>.<chunkZ>.mcc next to it.  Do not accept a directory, stale link,
+            // or an unknown compression type as an external payload.
+            Path externalPath = externalChunkPath(localX, localZ);
+            if (!java.nio.file.Files.isRegularFile(externalPath)) {
+                throw new IOException("External chunk payload is not a regular file: " + externalPath);
+            }
+            data = java.nio.file.Files.readAllBytes(externalPath);
         } else {
             data = new byte[length - 1];
             buf.position(5);
@@ -197,41 +233,121 @@ public final class AnvilRegionFile implements Closeable {
             dos.write(uncompressed);
         }
         byte[] compressed = bos.toByteArray();
-
         int payloadLen = 4 + 1 + compressed.length;
-        // A chunk that needs more than 255 sectors cannot be addressed by the 8-bit sector
-        // count, so Anvil stores it in a sibling .mcc file and keeps only the header here.
         boolean external = (payloadLen + SECTOR_BYTES - 1) / SECTOR_BYTES > 255;
         int sectorsNeeded = external ? 1 : (payloadLen + SECTOR_BYTES - 1) / SECTOR_BYTES;
+        Path externalPath = external ? externalChunkPath(localX, localZ) : externalChunkPathOrNull(localX, localZ);
+        if (external && java.nio.file.Files.exists(externalPath)
+                && !java.nio.file.Files.isRegularFile(externalPath)) {
+            throw new IOException("External chunk payload is not a regular file: " + externalPath);
+        }
 
         int idx = indexOf(localX, localZ);
         int oldLoc = locations[idx];
-        if (oldLoc != 0) {
-            usedSectors.clear(oldLoc >>> 8, (oldLoc >>> 8) + (oldLoc & 0xFF));
-        }
-
-        int sectorOff = allocateSectors(sectorsNeeded);
+        int oldTimestamp = timestamps[idx];
+        int sectorOff = allocateSectors(sectorsNeeded); // old allocation remains reserved
+        int newLoc = (sectorOff << 8) | sectorsNeeded;
+        int newTimestamp = (int) (System.currentTimeMillis() / 1000L);
         ByteBuffer out = ByteBuffer.allocate(sectorsNeeded * SECTOR_BYTES);
         if (external) {
-            java.nio.file.Files.write(externalChunkPath(localX, localZ), compressed);
             out.putInt(1).put((byte) (COMPRESSION_ZLIB | EXTERNAL_FLAG));
         } else {
-            // A previous, larger version of this chunk may have been stored externally.
-            Path stale = externalChunkPathOrNull(localX, localZ);
-            if (stale != null) {
-                java.nio.file.Files.deleteIfExists(stale);
-            }
             out.putInt(compressed.length + 1).put(COMPRESSION_ZLIB).put(compressed);
         }
         out.position(0);
-        writeFully(out, (long) sectorOff * SECTOR_BYTES);
 
-        locations[idx] = (sectorOff << 8) | sectorsNeeded;
-        timestamps[idx] = (int) (System.currentTimeMillis() / 1000L);
-        usedSectors.set(sectorOff, sectorOff + sectorsNeeded);
-        writeHeaderEntry(idx);
+        Path staged = null;
+        Path backup = null;
+        boolean externalPublished = false;
+        boolean headerWriteStarted = false;
+        try {
+            writeFully(out, (long) sectorOff * SECTOR_BYTES);
+            channel.force(false);
+
+            if (external) {
+                staged = stageExternal(externalPath, compressed);
+                if (java.nio.file.Files.exists(externalPath)) {
+                    backup = temporarySibling(externalPath);
+                    java.nio.file.Files.move(externalPath, backup,
+                            java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+                }
+                java.nio.file.Files.move(staged, externalPath,
+                        java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                staged = null;
+                externalPublished = true;
+                forceParentDirectory(externalPath);
+            }
+            channel.force(false);
+
+            headerWriteStarted = true;
+            writeHeaderEntry(newLoc, newTimestamp, idx);
+            channel.force(false);
+            locations[idx] = newLoc;
+            timestamps[idx] = newTimestamp;
+            usedSectors.set(sectorOff, sectorOff + sectorsNeeded);
+            if (oldLoc != 0) {
+                usedSectors.clear(oldLoc >>> 8, (oldLoc >>> 8) + (oldLoc & 0xFF));
+            }
+            if (!external && externalPath != null) {
+                try {
+                    java.nio.file.Files.deleteIfExists(externalPath);
+                } catch (IOException ignored) {
+                    // The new inline header no longer references it.
+                }
+            }
+            if (backup != null) {
+                try {
+                    java.nio.file.Files.deleteIfExists(backup);
+                } catch (IOException ignored) {
+                    // A backup left behind is not referenced by the region file.
+                }
+            }
+        } catch (IOException failure) {
+            if (headerWriteStarted) {
+                try {
+                    writeHeaderEntry(oldLoc, oldTimestamp, idx);
+                    channel.force(false);
+                } catch (IOException rollbackFailure) {
+                    failure.addSuppressed(rollbackFailure);
+                }
+            }
+            if (externalPublished) {
+                try {
+                    java.nio.file.Files.deleteIfExists(externalPath);
+                    if (backup != null) {
+                        java.nio.file.Files.move(backup, externalPath,
+                                java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+                        backup = null;
+                    }
+                } catch (IOException rollbackFailure) {
+                    failure.addSuppressed(rollbackFailure);
+                }
+            } else if (backup != null) {
+                try {
+                    java.nio.file.Files.move(backup, externalPath,
+                            java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+                    backup = null;
+                } catch (IOException rollbackFailure) {
+                    failure.addSuppressed(rollbackFailure);
+                }
+            }
+            throw failure;
+        } finally {
+            deleteQuietly(staged);
+            deleteQuietly(backup);
+        }
     }
 
+    private static void deleteQuietly(Path path) {
+        if (path != null) {
+            try {
+                java.nio.file.Files.deleteIfExists(path);
+            } catch (IOException ignored) {
+                // Temporary cleanup must not replace the original write failure.
+            }
+        }
+    }
     private int allocateSectors(int count) {
         int start = 2;
         while (true) {
@@ -244,13 +360,58 @@ public final class AnvilRegionFile implements Closeable {
         }
     }
 
-    private void writeHeaderEntry(int idx) throws IOException {
+    private void writeHeaderEntry(int location, int timestamp, int idx) throws IOException {
         ByteBuffer b = ByteBuffer.allocate(4);
-        b.putInt(0, locations[idx]);
+        b.putInt(0, location);
         writeFully(b, idx * 4L);
         ByteBuffer t = ByteBuffer.allocate(4);
-        t.putInt(0, timestamps[idx]);
+        t.putInt(0, timestamp);
         writeFully(t, SECTOR_BYTES + idx * 4L);
+    }
+
+    private static void validateCompressionType(byte compressionType) throws IOException {
+        if (compressionType != COMPRESSION_GZIP && compressionType != COMPRESSION_ZLIB
+                && compressionType != COMPRESSION_NONE && compressionType != COMPRESSION_LZ4) {
+            throw new IOException("Unknown chunk compression type " + compressionType);
+        }
+    }
+
+    private static Path temporarySibling(Path target) throws IOException {
+        Path absolute = target.toAbsolutePath();
+        Path temporary = java.nio.file.Files.createTempFile(absolute.getParent(),
+                absolute.getFileName().toString() + ".backup-", ".tmp");
+        java.nio.file.Files.deleteIfExists(temporary);
+        return temporary;
+    }
+
+    private static Path stageExternal(Path target, byte[] compressed) throws IOException {
+        Path absolute = target.toAbsolutePath();
+        Path temporary = java.nio.file.Files.createTempFile(absolute.getParent(),
+                absolute.getFileName().toString() + ".stage-", ".tmp");
+        boolean complete = false;
+        try (FileChannel staged = FileChannel.open(temporary,
+                StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
+            writeFully(staged, ByteBuffer.wrap(compressed), 0);
+            staged.force(true);
+            complete = true;
+            return temporary;
+        } finally {
+            if (!complete) {
+                java.nio.file.Files.deleteIfExists(temporary);
+            }
+        }
+    }
+
+    private static void forceParentDirectory(Path path) throws IOException {
+        Path parent = path.toAbsolutePath().getParent();
+        if (parent == null) {
+            return;
+        }
+        try (FileChannel directory = FileChannel.open(parent, StandardOpenOption.READ)) {
+            directory.force(true);
+        } catch (IOException | UnsupportedOperationException ignored) {
+            // Directory handles cannot be forced on some Windows filesystems.
+        }
     }
 
     public void sync() throws IOException {
@@ -276,7 +437,7 @@ public final class AnvilRegionFile implements Closeable {
         return (int) (p - pos);
     }
 
-    private void readFully(ByteBuffer buf, long pos) throws IOException {
+    private static void readFully(FileChannel channel, ByteBuffer buf, long pos) throws IOException {
         long p = pos;
         while (buf.hasRemaining()) {
             int n = channel.read(buf, p);
@@ -288,11 +449,19 @@ public final class AnvilRegionFile implements Closeable {
         buf.flip();
     }
 
-    private void writeFully(ByteBuffer buf, long pos) throws IOException {
+    private void readFully(ByteBuffer buf, long pos) throws IOException {
+        readFully(channel, buf, pos);
+    }
+
+    private static void writeFully(FileChannel channel, ByteBuffer buf, long pos) throws IOException {
         long p = pos;
         while (buf.hasRemaining()) {
             p += channel.write(buf, p);
         }
+    }
+
+    private void writeFully(ByteBuffer buf, long pos) throws IOException {
+        writeFully(channel, buf, pos);
     }
 
     private static byte[] readAll(java.io.InputStream in) throws IOException {

@@ -4,9 +4,9 @@
 
 [Folesium](https://github.com/wosnxn123/Folesium) 是面向 Folia 26.2 / Canvas 的
 面向字节的世界存储后端，用于替换 Anvil `.mca` 区域文件**以及单玩家文件**
-（`players/data`、`players/advancements`、`players/stats`）。本目录是 Folesium 对该 fork
-添加的**全部**内容——不修改任何上游跟踪的文件，因此 `git pull upstream <分支>`
-不会因为 Folesium 产生冲突。
+（`players/data`、`players/advancements`、`players/stats`）。本集成**仅支持 Folia/Canvas**；
+不支持 Paper 风格检出，也不包含任何 Paper 集成代码。
+`folesium-integration/` 是引导与文档套件；集成载荷还会生成或更新下述 fork 中跟踪的文件。
 
 > **要开服？** 完整运维指南——启用方法、全部配置项、迁移路径、回滚、备份、
 > 故障排查——见 **[USAGE.zh.md](USAGE.zh.md)**（[English](USAGE.md)）。
@@ -17,14 +17,13 @@
 ./folesium-integration/setup-folesium.sh
 ```
 
-脚本会：
-
 1. 把 Folesium 克隆（或更新）到 `folesium-integration/.folesium-src`（已 gitignore）；
 2. 若反编译源码缺失，先执行 `./gradlew applyAllPatches`；
 3. 执行 Folesium 的 `scripts/apply-integration.sh`：
-   * 将 `dev.folesium.{core,anvil,converter,integration}` 内联进自动探测的
-     `<server-module>/src/main/java`（Folia 为 `folia-server`，Canvas 为
-     `canvas-server`，Paper 风格检出为 `paper-server`）；
+   * 对 Folia，重新生成并更新 `folia-server/paper-patches/files/src/main/java/dev/folesium/**`
+     下跟踪的 22 个引擎文件补丁，并将四个原版类补丁应用到生成的 Minecraft 源码；
+   * 对 Canvas，刷新 `canvas-server/src/main/java/dev/folesium/**` 下跟踪的 22 个引擎普通源码，
+     并将同样的四个原版类补丁应用到生成的 Minecraft 源码；
    * 给四个原版类打补丁：
 
    | 类 | 重定向的数据 | 存储 |
@@ -59,22 +58,40 @@ java -jar <paperclip>.jar --folesiumConvertToAnvil --nogui
 转换结束时会打印可手动删除的绝对（规范化）路径。详细说明、全部配置键与故障排查见
 [USAGE.zh.md](USAGE.zh.md)。
 
-## 保持可拉取上游更新
+## 保持 fork 可拉取上游更新
 
-* 所有 Folesium 改动只作用于**生成的**源码目录（`<server-module>/src/main/java`、
-  `*-server/src/minecraft/`），这些目录被 paperweight 忽略，不会提交到本仓库。
-* 更新上游：`git pull upstream <分支> && ./gradlew applyAllPatches`，
-  然后重新执行 `./folesium-integration/setup-folesium.sh`。
-* 若上游改动导致某个补丁冲突，可模糊应用：
+套件目录虽然加入 fork，但集成载荷并非全部是生成产物：Folia 跟踪
+`folia-server/paper-patches/files/src/main/java/dev/folesium/**` 下的 22 个引擎文件补丁；
+Canvas 跟踪 `canvas-server/src/main/java/dev/folesium/**` 下的 22 个引擎普通源码。
+paperweight 的反编译 Minecraft 源码与 `paper-server` 输出仍是生成的、被忽略的目录。
+请始终从 Folesium 检出同步这些跟踪文件；上游更新后可能需要处理补丁上下文再构建。
+
+* 更新上游：`git pull upstream <分支>`，执行 `./folesium-integration/setup-folesium.sh`
+  重新生成/应用 fork 载荷，然后重新构建。
+* 不要手改生成的 Minecraft 输出或 vendor 副本；Folesium 仓库才是源代码唯一来源。
+* 若上游改动导致补丁失败，先检查生成结果，再按需模糊应用：
   `patch -p5 --fuzz=3 -d <fork>-server/src/minecraft/java < .folesium-src/integration/folia-26.2/patches/<名称>.java.patch`。
 
 ## 撤销集成
 
+先停服；若 Folesium 中有更新数据，先转换回 Anvil，再修改源码。然后同时移除跟踪的
+集成载荷和生成输出；单独执行 `git checkout .` 不会删除未跟踪的生成文件，也不会删除
+已跟踪的 vendor/补丁文件：
+
 ```bash
-git -C <server-module> checkout .        # 丢弃内联源码与 Main 钩子
-./gradlew applyAllPatches                 # 还原干净的 minecraft 源码
+# 删除跟踪载荷（按当前检出实际存在的路径执行）
+git rm -r --ignore-unmatch folia-server/paper-patches/files/src/main/java/dev/folesium
+git rm -r --ignore-unmatch folia-server/minecraft-patches/sources
+git rm -r --ignore-unmatch canvas-server/src/main/java/dev/folesium
+
+# 删除生成副本和已打补丁的生成 Minecraft 源码
+rm -rf folia-server/src/main/java/dev/folesium canvas-server/src/main/java/dev/folesium
+./gradlew applyAllPatches
 rm -rf folesium-integration/.folesium-src
 ```
+
+若要得到不提交删除操作的干净检出，请恢复到上游分支或重新克隆，并移除 Folesium
+载荷。只有在下一次 `applyAllPatches` 不再带有 Folesium 补丁/源码载荷后，fork 才算恢复。
 
 完整文档见 Folesium 仓库：
 [`docs/zh/INTEGRATION.md`](https://github.com/wosnxn123/Folesium/blob/main/docs/zh/INTEGRATION.md)、

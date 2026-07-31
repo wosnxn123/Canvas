@@ -3,7 +3,8 @@
 > [English](USAGE.md) | **简体中文**
 
 这是在**本服务端 fork**（Folia 26.2 / Canvas）上运行 Folesium 存储后端的完整
-运维指南。引擎内部原理见 [Folesium 仓库](https://github.com/wosnxn123/Folesium)
+运维指南。当前集成**仅支持 Folia/Canvas**：不支持 Paper 风格检出，也不提供 Paper
+集成代码。引擎内部原理见 [Folesium 仓库](https://github.com/wosnxn123/Folesium)
 （`docs/zh/ARCHITECTURE.md`、`docs/zh/SCHEMA.md`）。
 
 ---
@@ -34,10 +35,15 @@
 
 ## 2. 获取服务端 jar
 
+本套件只能从 Folia 26.2 或 Canvas 检出中运行：
+
 ```bash
 ./folesium-integration/setup-folesium.sh          # 克隆/更新引擎、打补丁、构建
 # 产物：<fork>-server/build/libs/<fork>-paperclip-*.jar
 ```
+
+脚本会刷新 fork 中跟踪的 Folia 文件补丁或 Canvas vendor 源码，并在构建前将原版钩子
+应用到生成源码。Paper 风格检出不会被检测或支持。
 
 选项：`--no-build`（只打补丁不构建），环境变量 `FOLESIUM_REPO` /
 `FOLESIUM_REF` / `FOLESIUM_HOME`（使用本地 Folesium 检出而非克隆）。
@@ -78,11 +84,14 @@ Folesium: opened PLAYERS store .../world/players/folesium
 
 ## 4. 配置项参考
 
-所有键既可写成 `-Dfolesium.<key>`，也可写在 `folesium.properties` 里。
-无法解析**以及超出取值范围**的值都会回退到默认值并记录警告——绝不会中断启动。
+所有由配置文件承载的键既可写成 `-Dfolesium.<key>=<value>`，也可写成
+`folesium.properties` 中的 `<key>`。例外是 `logging.utf8`：它仅支持 JVM 系统属性，
+从不读取 `folesium.properties`。
+配置文件中无法解析**以及超出取值范围**的值都会回退到默认值并记录警告——绝不会中断启动。
 
 「生效方式」一列说明改动如何作用到**已存在**的存储：**实时** = 数秒内生效、无需重启（见 §4.1）；
-**下次启动** = 下次打开该存储时物理改写；**加载世界时** = 世界在加载时绑定其存储后端。
+**下次启动** = 下次打开该存储时物理改写；**加载世界时** = 世界在加载时绑定其存储后端；
+**启动时** = 在创建配置监视器前读取。
 
 | 键 | 默认 | 生效方式 | 含义 |
 |---|---|---|---|
@@ -96,8 +105,9 @@ Folesium: opened PLAYERS store .../world/players/folesium
 | `compactRatio` | `0.5` | 实时 | 分片死字节超过文件的该比例时触发压实 |
 | `compactMinBytes` | `8388608` | 实时 | 小于该大小（8 MiB）的分片不压实 |
 | `verifyChecksums` | `false` | 实时 | 每次读取重校验 CRC32C（约 2 倍读 I/O；恢复扫描始终校验） |
-| `autoReload` | `true` | 实时 | 监视 `folesium.properties`，把改动应用到运行中的服务端 |
+| `autoReload` | `true` | 启动时 | 创建 `folesium.properties` 监视器；改文件中的此键不会停止已经运行的监视器 |
 | `autoReloadSeconds` | `10` | 实时 | 多久检查一次文件改动 |
+| `logging.utf8` | `true` | 启动时 | 仅 JVM 系统属性控制已有 Folesium/JUL handler 的编码；不是文件键，也不覆盖完整服务端日志 |
 
 ### 4.1 给运行中的服务器重新调参
 
@@ -113,7 +123,16 @@ Folesium: opened PLAYERS store .../world/players/folesium
 `shards` 会在下次启动时通过自动重分片落地（分阶段三段式提交：崩溃后要么旧存储原封不动，
 要么下次打开时续做并完成换入）。在大世界上做布局变更前，请照常先备份。
 
-设 `autoReload=false` 可恢复「改完重启才生效」的旧行为。
+必须在启动前设置 `autoReload=false` 才能禁止创建监视器。运行中把文件改为 `false`
+不会停止已经存在的监视器，因此改完后需要重启。
+
+### 4.2 JVM/JUL 日志编码
+
+在 JVM 默认字符集不是 UTF-8 的平台上，`-Dfolesium.logging.utf8=true`（默认）会在 Folesium
+首次加载配置时，将**现有的** `java.util.logging` handler 重新编码为 UTF-8。这只覆盖
+Folesium 自己的 JUL 消息；Folia/Canvas 随后会把正常服务端输出交给 ForwardLogHandler/Log4j，
+因此该设置不承诺重配置完整服务端日志。用 `-Dfolesium.logging.utf8=false` 关闭；该设置
+仅支持系统属性。
 
 ### 持久性选择
 
@@ -175,7 +194,7 @@ folesium-converter/build/install/folesium-converter/bin/folesium-converter \
     convert /srv/world to-folesium
 ```
 
-同一工具还提供 `inspect`（各键空间记录数）与 `diff`（字节级比较两个存储，
+同一工具还提供 `inspect`（各键空间记录数）与 `diff`（字节级比较两个存储、
 一致时输出 `STORES-EQUAL`）。
 
 ### 旧文件去哪了？
@@ -183,8 +202,8 @@ folesium-converter/build/install/folesium-converter/bin/folesium-converter \
 **永远不会删除任何文件**——与原版模组 cesium-fabric 的转换器同一约定。`.mca`
 与玩家文件留在磁盘上作为备份，Folesium 启用期间服务器会忽略它们。验证转换后的
 世界无误后，可自行删除以回收磁盘空间：各维度的 `region/`、`entities/`、`poi/`，
-以及 `players/data|advancements|stats`（26.x）或 `playerdata/ advancements/
-stats/`（26 之前）。
+以及 `players/data|advancements|stats`（26.x）或 `playerdata/ advancements/ stats/`
+（26 之前）。
 
 ---
 
@@ -250,7 +269,7 @@ world/
 | 转换后 `.mca` 还在 | 符合预期——转换器不删文件；验证后手动删除（§5） |
 | 回滚后 `folesium/` 还在 | 符合预期——同一策略；手动删除（§6） |
 | 存储目录持续变大 | 死记录由压实回收：引擎最多每 5 分钟检查一次每个已打开的存储，分片死字节超过 `compactRatio` × 大小且大于 `compactMinBytes` 时改写该分片；调低这两项可更早压实 |
-| 想验证完整性 | 用 `-Dfolesium.verifyChecksums=true` 启动，或 `folesium-converter … inspect <store>` |
+| 想验证完整性 | 用 `-Dfolesium.verifyChecksums=true` 启动，或 `folesium-converter inspect <store>` |
 
 需要认识的日志行：
 

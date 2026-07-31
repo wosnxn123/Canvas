@@ -32,7 +32,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.BiConsumer;
@@ -82,6 +84,7 @@ public final class ShardFile implements AutoCloseable {
             return recordOffset + RECORD_HEADER_LEN + keyLen;
         }
     }
+    private record IterationEntry(byte[] key, byte[] value) {}
 
     private final Path path;
     private final Path hintPath;
@@ -127,8 +130,27 @@ public final class ShardFile implements AutoCloseable {
                     scanAndRecover();
                 }
             }
-        } catch (IOException e) {
-            throw new FolesiumException("Failed to open shard " + path, e);
+        } catch (Throwable e) {
+            closeAfterOpenFailure(e);
+            if (e instanceof IOException io) {
+                throw new FolesiumException("Failed to open shard " + path, io);
+            }
+            if (e instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            if (e instanceof Error error) {
+                throw error;
+            }
+            throw new AssertionError(e);
+        }
+    }
+    private void closeAfterOpenFailure(Throwable failure) {
+        if (channel != null) {
+            try {
+                channel.close();
+            } catch (IOException closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
         }
     }
 
@@ -166,10 +188,7 @@ public final class ShardFile implements AutoCloseable {
 
     private void validateFileHeader() throws IOException {
         ByteBuffer b = ByteBuffer.allocate(FILE_HEADER_LEN);
-        if (channel.read(b, 0) != FILE_HEADER_LEN) {
-            throw new FolesiumException("Shard header truncated: " + path);
-        }
-        b.flip();
+        readFully(b, 0);
         byte[] magic = new byte[4];
         b.get(magic);
         if (!java.util.Arrays.equals(magic, FILE_MAGIC)) {
@@ -198,11 +217,12 @@ public final class ShardFile implements AutoCloseable {
         while (pos < fileSize) {
             long recordStart = pos;
             header.clear();
-            if (channel.read(header, pos) != RECORD_HEADER_LEN) {
+            try {
+                readFully(header, pos);
+            } catch (EOFException e) {
                 truncateAt(recordStart, "torn record header");
                 return;
             }
-            header.flip();
             byte magic = header.get();
             byte flags = header.get();
             int keyLen = header.getShort() & 0xFFFF;
@@ -219,11 +239,12 @@ public final class ShardFile implements AutoCloseable {
 
             int bodyLen = keyLen + storedValLen;
             ByteBuffer body = ByteBuffer.allocate(bodyLen + 4);
-            if (channel.read(body, recordStart + RECORD_HEADER_LEN) != bodyLen + 4) {
+            try {
+                readFully(body, recordStart + RECORD_HEADER_LEN);
+            } catch (EOFException e) {
                 truncateAt(recordStart, "torn record body");
                 return;
             }
-            body.flip();
 
             crc.reset();
             header.rewind();
@@ -356,23 +377,7 @@ public final class ShardFile implements AutoCloseable {
             if (loc == null) {
                 return null;
             }
-            byte[] stored;
-            if (config.verifyChecksums()) {
-                ByteBuffer whole = ByteBuffer.allocate(loc.recordLength);
-                readFully(whole, loc.recordOffset);
-                CRC32C crc = new CRC32C();
-                crc.update(whole.array(), 0, loc.recordLength - 4);
-                int expected = ByteBuffer.wrap(whole.array(), loc.recordLength - 4, 4).getInt();
-                if ((int) crc.getValue() != expected) {
-                    throw new FolesiumException("CRC mismatch reading " + path + " @" + loc.recordOffset);
-                }
-                stored = java.util.Arrays.copyOfRange(whole.array(),
-                        RECORD_HEADER_LEN + loc.keyLen, RECORD_HEADER_LEN + loc.keyLen + loc.storedValLen);
-            } else {
-                ByteBuffer vb = ByteBuffer.allocate(loc.storedValLen);
-                readFully(vb, loc.valueOffset());
-                stored = vb.array();
-            }
+            byte[] stored = readStoredValue(loc, config.verifyChecksums());
             Compression c = Compression.byId((byte) (loc.flags & 0x0F));
             return Compressors.decompress(c, stored, loc.rawValLen);
         } catch (IOException e) {
@@ -380,6 +385,33 @@ public final class ShardFile implements AutoCloseable {
         } finally {
             lock.readLock().unlock();
         }
+    }
+
+    private byte[] readStoredValue(Loc loc, boolean verifyChecksums) throws IOException {
+        if (verifyChecksums) {
+            byte[] whole = readWholeRecord(loc, true);
+            return java.util.Arrays.copyOfRange(whole, RECORD_HEADER_LEN + loc.keyLen,
+                    RECORD_HEADER_LEN + loc.keyLen + loc.storedValLen);
+        }
+        ByteBuffer value = ByteBuffer.allocate(loc.storedValLen);
+        readFully(value, loc.valueOffset());
+        return value.array();
+    }
+
+    /** Reads a complete indexed record and optionally validates its CRC. */
+    private byte[] readWholeRecord(Loc loc, boolean verifyChecksums) throws IOException {
+        ByteBuffer whole = ByteBuffer.allocate(loc.recordLength);
+        readFully(whole, loc.recordOffset);
+        byte[] bytes = whole.array();
+        if (verifyChecksums) {
+            CRC32C crc = new CRC32C();
+            crc.update(bytes, 0, loc.recordLength - 4);
+            int expected = ByteBuffer.wrap(bytes, loc.recordLength - 4, 4).getInt();
+            if ((int) crc.getValue() != expected) {
+                throw new FolesiumException("CRC mismatch reading " + path + " @" + loc.recordOffset);
+            }
+        }
+        return bytes;
     }
 
     public boolean contains(Bytes key) {
@@ -478,7 +510,7 @@ public final class ShardFile implements AutoCloseable {
     public void delete(Bytes key) {
         lock.writeLock().lock();
         try {
-            Loc old = index.remove(key);
+            Loc old = index.get(key);
             if (old == null) {
                 return; // nothing to shadow
             }
@@ -486,12 +518,13 @@ public final class ShardFile implements AutoCloseable {
             long off = writePos;
             writeFully(ByteBuffer.wrap(record), off);
             writePos = off + record.length;
-            deadBytes += old.recordLength + record.length;
             dirty = true;
             if (config.durability() == FolesiumConfig.DurabilityMode.ALWAYS) {
                 channel.force(false);
                 dirty = false;
             }
+            index.remove(key);
+            deadBytes += old.recordLength + record.length;
         } catch (IOException e) {
             throw new FolesiumException("Delete failed in " + path, e);
         } finally {
@@ -566,8 +599,8 @@ public final class ShardFile implements AutoCloseable {
                 }
                 for (Map.Entry<Bytes, Loc> e : index.entrySet()) {
                     Loc loc = e.getValue();
-                    ByteBuffer whole = ByteBuffer.allocate(loc.recordLength);
-                    readFully(whole, loc.recordOffset); // readFully flips: buffer ready to write out
+                    byte[] record = readWholeRecord(loc, config.verifyChecksums());
+                    ByteBuffer whole = ByteBuffer.wrap(record);
                     long written = 0;
                     while (whole.hasRemaining()) {
                         written += out.write(whole, pos + written);
@@ -610,22 +643,27 @@ public final class ShardFile implements AutoCloseable {
             lock.writeLock().unlock();
         }
     }
-
     /** Iterates all live entries (key, decompressed value). */
     public void forEach(BiConsumer<byte[], byte[]> consumer) {
+        List<IterationEntry> snapshot;
         lock.readLock().lock();
         try {
+            snapshot = new ArrayList<>(index.size());
+            boolean verifyChecksums = config.verifyChecksums();
             for (Map.Entry<Bytes, Loc> e : index.entrySet()) {
                 Loc loc = e.getValue();
-                ByteBuffer vb = ByteBuffer.allocate(loc.storedValLen);
-                readFully(vb, loc.valueOffset());
+                byte[] stored = readStoredValue(loc, verifyChecksums);
                 Compression c = Compression.byId((byte) (loc.flags & 0x0F));
-                consumer.accept(e.getKey().array(), Compressors.decompress(c, vb.array(), loc.rawValLen));
+                byte[] value = Compressors.decompress(c, stored, loc.rawValLen);
+                snapshot.add(new IterationEntry(e.getKey().array(), value));
             }
         } catch (IOException e) {
             throw new FolesiumException("Iteration failed in " + path, e);
         } finally {
             lock.readLock().unlock();
+        }
+        for (IterationEntry entry : snapshot) {
+            consumer.accept(entry.key(), entry.value());
         }
     }
 
@@ -634,13 +672,18 @@ public final class ShardFile implements AutoCloseable {
      * set (grouping, counting, export planning) skip reading and decompressing every value.
      */
     public void forEachKey(java.util.function.Consumer<byte[]> consumer) {
+        List<byte[]> snapshot;
         lock.readLock().lock();
         try {
+            snapshot = new ArrayList<>(index.size());
             for (Bytes k : index.keySet()) {
-                consumer.accept(k.array());
+                snapshot.add(k.array());
             }
         } finally {
             lock.readLock().unlock();
+        }
+        for (byte[] key : snapshot) {
+            consumer.accept(key);
         }
     }
 

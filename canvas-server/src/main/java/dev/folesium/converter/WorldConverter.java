@@ -26,15 +26,22 @@ import dev.folesium.core.util.LongKeys;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.CompletionService;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -136,14 +143,10 @@ public final class WorldConverter {
     // ------------------------------------------------------- folesium -> anvil
 
     /**
-     * Converts a Folesium store back into Anvil directories. Regions are
-     * grouped first so each region file is written by exactly one task.
-     *
-     * <p>Like cesium-fabric's converter, <em>nothing is deleted</em>: the Folesium
-     * store is left in place as a backup. Delete it manually once the restored Anvil
-     * world has been verified -- and always before re-converting to Folesium after
-     * having played on Anvil, because {@link #anvilToFolesium} merges and would keep
-     * the (older) store records over the newer Anvil chunks.</p>
+     * Materializes the Folesium keyspaces as authoritative Anvil directories.
+     * Each keyspace is built in a sibling staging directory and then replaces
+     * the old directory. The old directory is retained under a unique backup
+     * name, so records absent from the store cannot survive in the restored tree.
      */
     public Stats folesiumToAnvil(Path folesiumDir, Path dimensionDir) throws IOException {
         long start = System.nanoTime();
@@ -154,58 +157,122 @@ public final class WorldConverter {
             return new Stats(0, 0, (System.nanoTime() - start) / 1_000_000);
         }
 
-        // Export only: open the store exactly as it lies on disk (applyLayoutChanges=false),
-        // so a shard count or codec that differs from the defaults is read as-is instead of
-        // triggering a pointless rewrite of a store we read once and then abandon.
+        // Export only: read the store's existing layout without rewriting it first.
         try (FolesiumDatabase db = FolesiumDatabase.open(folesiumDir,
                 FolesiumConfig.defaults().withDurability(FolesiumConfig.DurabilityMode.EXPLICIT),
                 FolesiumDatabase.StoreRole.DIMENSION, false)) {
             for (Map.Entry<String, String> e : DIR_TO_KEYSPACE.entrySet()) {
-                String anvilDir = e.getKey();
+                Path out = dimensionDir.resolve(e.getKey());
                 Keyspace ks = db.keyspace(e.getValue());
-                if (ks.count() == 0) {
+                if (ks.count() == 0 && !Files.exists(out)) {
+                    // Keep brand-new worlds free of meaningless empty Anvil roots;
+                    // an existing root is still replaced by an empty authoritative tree.
                     continue;
                 }
-                Path out = dimensionDir.resolve(anvilDir);
-                Files.createDirectories(out);
+                Path staging = siblingPath(out, ".folesium-staging-");
+                Files.createDirectories(staging);
+                try {
+                    // Group chunk keys by region. The clean staging tree remains empty
+                    // when the authoritative keyspace is empty.
+                    Map<Long, List<Long>> byRegion = new ConcurrentHashMap<>();
+                    ks.forEachKey(k -> {
+                        long key = LongKeys.decode(k);
+                        int cx = LongKeys.chunkX(key);
+                        int cz = LongKeys.chunkZ(key);
+                        long regionKey = LongKeys.chunkKey(cx >> 5, cz >> 5);
+                        byRegion.computeIfAbsent(regionKey, r -> new ArrayList<>()).add(key);
+                    });
 
-                // Group chunk keys by region. Keys only: forEach would read back and
-                // decompress every chunk here, and each one is read again below anyway -
-                // that is a full extra decompression pass over the whole dimension.
-                Map<Long, List<Long>> byRegion = new ConcurrentHashMap<>();
-                ks.forEachKey(k -> {
-                    long key = LongKeys.decode(k);
-                    int cx = LongKeys.chunkX(key);
-                    int cz = LongKeys.chunkZ(key);
-                    long regionKey = LongKeys.chunkKey(cx >> 5, cz >> 5);
-                    byRegion.computeIfAbsent(regionKey, r -> new ArrayList<>()).add(key);
-                });
-
-                runParallel(new ArrayList<>(byRegion.keySet()), regionKey -> {
-                    int rx = LongKeys.chunkX(regionKey);
-                    int rz = LongKeys.chunkZ(regionKey);
-                    Path mca = out.resolve("r." + rx + "." + rz + ".mca");
-                    try (AnvilRegionFile rf = new AnvilRegionFile(mca)) {
-                        for (long key : byRegion.get(regionKey)) {
-                            byte[] payload = ks.get(key);
-                            if (payload == null) {
-                                continue;
+                    runParallel(new ArrayList<>(byRegion.keySet()), regionKey -> {
+                        int rx = LongKeys.chunkX(regionKey);
+                        int rz = LongKeys.chunkZ(regionKey);
+                        Path mca = staging.resolve("r." + rx + "." + rz + ".mca");
+                        try (AnvilRegionFile rf = new AnvilRegionFile(mca)) {
+                            for (long key : byRegion.get(regionKey)) {
+                                byte[] payload = ks.get(key);
+                                if (payload == null) {
+                                    continue;
+                                }
+                                rf.writeChunk(LongKeys.chunkX(key) & 31, LongKeys.chunkZ(key) & 31, payload);
+                                chunkCount.incrementAndGet();
+                                byteCount.addAndGet(payload.length);
                             }
-                            rf.writeChunk(LongKeys.chunkX(key) & 31, LongKeys.chunkZ(key) & 31, payload);
-                            chunkCount.incrementAndGet();
-                            byteCount.addAndGet(payload.length);
+                            rf.sync();
+                        } catch (IOException ex) {
+                            throw new UncheckedIOException("Failed writing " + mca, ex);
                         }
-                        rf.sync();
-                    } catch (IOException ex) {
-                        throw new UncheckedIOException("Failed writing " + mca, ex);
-                    }
-                });
+                    });
+                    replaceDirectory(out, staging);
+                } catch (RuntimeException | IOException ex) {
+                    deleteTreeQuietly(staging);
+                    throw ex;
+                }
             }
         }
-        // Like cesium-fabric, the converter never deletes anything: the Anvil directories
-        // now hold a complete copy of the world and the store stays behind as a backup
-        // for the user to delete manually.
         return new Stats(chunkCount.get(), byteCount.get(), (System.nanoTime() - start) / 1_000_000);
+    }
+
+    private static Path siblingPath(Path destination, String marker) {
+        Path parent = destination.toAbsolutePath().normalize().getParent();
+        if (parent == null) {
+            parent = destination.toAbsolutePath().normalize().getRoot();
+        }
+        return parent.resolve(destination.getFileName() + marker + UUID.randomUUID());
+    }
+
+    /** Replaces a destination directory while retaining the previous tree as a backup. */
+    private static void replaceDirectory(Path destination, Path staging) throws IOException {
+        Files.createDirectories(destination.toAbsolutePath().normalize().getParent());
+        Path backup = siblingPath(destination, ".folesium-backup-");
+        boolean backedUp = false;
+        try {
+            if (Files.exists(destination)) {
+                movePath(destination, backup, false);
+                backedUp = true;
+            }
+            movePath(staging, destination, true);
+        } catch (IOException failure) {
+            if (Files.exists(destination)) {
+                deleteTreeQuietly(destination);
+            }
+            if (backedUp && Files.exists(backup)) {
+                try {
+                    movePath(backup, destination, false);
+                } catch (IOException restoreFailure) {
+                    failure.addSuppressed(restoreFailure);
+                }
+            }
+            throw failure;
+        }
+    }
+
+    private static void movePath(Path source, Path target, boolean atomicPreferred) throws IOException {
+        try {
+            if (atomicPreferred) {
+                Files.move(source, target, StandardCopyOption.ATOMIC_MOVE);
+            } else {
+                Files.move(source, target);
+            }
+        } catch (AtomicMoveNotSupportedException unsupported) {
+            Files.move(source, target);
+        }
+    }
+
+    private static void deleteTreeQuietly(Path root) {
+        if (!Files.exists(root)) {
+            return;
+        }
+        try (var paths = Files.walk(root)) {
+            paths.sorted(Comparator.reverseOrder()).forEach(path -> {
+                try {
+                    Files.deleteIfExists(path);
+                } catch (IOException ignored) {
+                    // The original destination remains in its backup if cleanup fails.
+                }
+            });
+        } catch (IOException ignored) {
+            // Best effort cleanup of an uncommitted staging tree.
+        }
     }
 
     private <T> void runParallel(List<T> items, java.util.function.Consumer<T> task) {
@@ -217,22 +284,54 @@ public final class WorldConverter {
             items.forEach(task);
             return;
         }
-        ExecutorService pool = Executors.newFixedThreadPool(n, Thread.ofPlatform().name("folesium-convert-", 0).factory());
+        ExecutorService pool = Executors.newFixedThreadPool(n,
+                Thread.ofPlatform().name("folesium-convert-", 0).factory());
+        List<Future<?>> futures = new ArrayList<>(items.size());
+        CompletionService<Void> completed = new ExecutorCompletionService<>(pool);
+        RuntimeException failure = null;
+        boolean interrupted = false;
         try {
-            List<Future<?>> futures = new ArrayList<>(items.size());
             for (T item : items) {
-                futures.add(pool.submit(() -> task.accept(item)));
+                futures.add(completed.submit(() -> {
+                    task.accept(item);
+                    return null;
+                }));
             }
-            for (Future<?> f : futures) {
-                f.get();
+            for (int i = 0; i < items.size(); i++) {
+                completed.take().get();
             }
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("Conversion interrupted", e);
+            failure = new RuntimeException("Conversion interrupted", e);
+            interrupted = true;
+            futures.forEach(f -> f.cancel(true));
         } catch (java.util.concurrent.ExecutionException e) {
-            throw new RuntimeException("Conversion task failed", e.getCause());
+            failure = new RuntimeException("Conversion task failed", e.getCause());
+            futures.forEach(f -> f.cancel(true));
         } finally {
-            pool.shutdownNow();
+            if (failure != null) {
+                futures.forEach(f -> f.cancel(true));
+                pool.shutdownNow();
+            } else {
+                pool.shutdown();
+            }
+            for (;;) {
+                try {
+                    if (pool.awaitTermination(1, TimeUnit.DAYS)) {
+                        break;
+                    }
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                    failure = failure != null ? failure : new RuntimeException("Conversion interrupted", e);
+                    futures.forEach(f -> f.cancel(true));
+                    pool.shutdownNow();
+                }
+            }
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        if (failure != null) {
+            throw failure;
         }
     }
 }

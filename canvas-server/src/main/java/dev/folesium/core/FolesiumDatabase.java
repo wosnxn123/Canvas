@@ -19,8 +19,15 @@
 package dev.folesium.core;
 
 import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.io.Writer;
+import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -252,11 +259,11 @@ public final class FolesiumDatabase implements AutoCloseable {
             p.setProperty("store.shardCount", Integer.toString(requested.shardCount()));
             p.setProperty("store.compression", requested.compression().name());
             p.setProperty("store.created", Long.toString(System.currentTimeMillis()));
-            writeMetadata(meta, p);
+            writeMetadataAtomically(meta, p);
             return requested;
         }
 
-        try (var reader = Files.newBufferedReader(meta, java.nio.charset.StandardCharsets.UTF_8)) {
+        try (var reader = Files.newBufferedReader(meta, StandardCharsets.UTF_8)) {
             p.load(reader);
         } catch (IOException e) {
             throw new FolesiumException("Cannot read " + meta, e);
@@ -292,33 +299,100 @@ public final class FolesiumDatabase implements AutoCloseable {
         }
 
         if (!applyLayoutChanges) {
-            // Read-as-is: the store's recorded layout and codec win and nothing is written.
             return requested.withShardCount(shards).withCompression(comp);
         }
 
         if (comp != requested.compression()) {
-            // Safe without any migration: each record header carries its own compression id,
-            // so old records keep decoding with the codec they were written with.
             LOGGER.log(System.Logger.Level.INFO,
                     "Folesium: {0} switches compression {1} -> {2}; existing records keep their own codec",
                     dir, comp, requested.compression());
             p.setProperty("store.compression", requested.compression().name());
-            writeMetadata(meta, p);
+            writeMetadataAtomically(meta, p);
         }
 
         if (shards == requested.shardCount()) {
             return requested;
         }
-        // The store's own layout is what the data is in, so that is what the resharder reads.
         StoreResharder.reshard(dir, meta, requested.withShardCount(shards), requested.shardCount());
         return requested;
     }
 
-    private void writeMetadata(Path meta, Properties p) {
-        try (var writer = Files.newBufferedWriter(meta, java.nio.charset.StandardCharsets.UTF_8)) {
-            p.store(writer, "Folesium store metadata - do not edit while the server is running");
+    /** Writes metadata through a forced sibling temporary file and atomic replacement. */
+    static void writeMetadataAtomically(Path meta, Properties p) {
+        Path temp = null;
+        try {
+            temp = newTempFile(meta);
+            try (FileChannel channel = FileChannel.open(temp,
+                    StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
+                 Writer writer = new OutputStreamWriter(java.nio.channels.Channels.newOutputStream(channel),
+                         StandardCharsets.UTF_8)) {
+                p.store(writer, "Folesium store metadata - do not edit while the server is running");
+                writer.flush();
+                channel.force(true);
+            }
+            replaceAtomically(temp, meta);
+            temp = null;
+            fsyncDirectory(meta.getParent());
         } catch (IOException e) {
             throw new FolesiumException("Cannot write " + meta, e);
+        } finally {
+            if (temp != null) {
+                try {
+                    Files.deleteIfExists(temp);
+                } catch (IOException ignored) {
+                    // Preserve the original write failure.
+                }
+            }
+        }
+    }
+
+    /** Writes and forces a small marker using the same replacement protocol as metadata. */
+    static void writeAtomically(Path target, String contents) throws IOException {
+        Path temp = newTempFile(target);
+        boolean moved = false;
+        try {
+            try (FileChannel channel = FileChannel.open(temp,
+                    StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
+                 Writer writer = new OutputStreamWriter(java.nio.channels.Channels.newOutputStream(channel),
+                         StandardCharsets.UTF_8)) {
+                writer.write(contents);
+                writer.flush();
+                channel.force(true);
+            }
+            replaceAtomically(temp, target);
+            moved = true;
+            fsyncDirectory(target.getParent());
+        } finally {
+            if (!moved) {
+                Files.deleteIfExists(temp);
+            }
+        }
+    }
+
+    private static Path newTempFile(Path target) throws IOException {
+        Path parent = target.toAbsolutePath().getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+        return Files.createTempFile(parent, "." + target.getFileName() + ".", ".tmp");
+    }
+
+    private static void replaceAtomically(Path source, Path target) throws IOException {
+        try {
+            Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } catch (AtomicMoveNotSupportedException e) {
+            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    private static void fsyncDirectory(Path dir) {
+        if (dir == null) {
+            return;
+        }
+        try (FileChannel channel = FileChannel.open(dir, StandardOpenOption.READ)) {
+            channel.force(true);
+        } catch (IOException | UnsupportedOperationException ignored) {
+            // Directory fsync is unavailable on some Windows filesystems.
         }
     }
 
@@ -327,14 +401,14 @@ public final class FolesiumDatabase implements AutoCloseable {
         Path meta = dir.resolve(METADATA_FILE);
         Properties p = new Properties();
         if (Files.isRegularFile(meta)) {
-            try (var reader = Files.newBufferedReader(meta, java.nio.charset.StandardCharsets.UTF_8)) {
+            try (var reader = Files.newBufferedReader(meta, StandardCharsets.UTF_8)) {
                 p.load(reader);
             } catch (IOException e) {
                 throw new FolesiumException("Cannot read " + meta, e);
             }
         }
         p.setProperty("store.compression", compression.name());
-        writeMetadata(meta, p);
+        writeMetadataAtomically(meta, p);
     }
 
     public Path directory() {
@@ -395,52 +469,50 @@ public final class FolesiumDatabase implements AutoCloseable {
      */
     public ConfigReloadResult applyRuntimeConfig(FolesiumConfig next) {
         Objects.requireNonNull(next, "next");
-        if (closed.get()) {
-            throw new FolesiumException("Database is closed: " + dir);
-        }
-        List<String> notes = new ArrayList<>();
-        FolesiumConfig current = this.config;
-
-        boolean reshardRequired = next.shardCount() != current.shardCount();
-        FolesiumConfig effective = next.withShardCount(current.shardCount());
-
-        if (effective.compression() == FolesiumConfig.Compression.ZSTD && !ZstdNative.available()) {
-            notes.add("compression=ZSTD ignored: zstd-jni is not available; keeping " + current.compression());
-            effective = effective.withCompression(current.compression())
-                    .withCompressionLevel(FolesiumConfig.clampCompressionLevel(
-                            current.compression(), effective.compressionLevel()));
-        }
-        if (reshardRequired) {
-            notes.add("shards=" + next.shardCount() + " will be applied by an automatic reshard on the next"
-                    + " server start (currently " + current.shardCount() + ")");
-        }
-
-        List<String> changes = current.diff(effective);
-        if (changes.isEmpty()) {
-            return new ConfigReloadResult(current, changes, notes, reshardRequired);
-        }
-
-        if (effective.compression() != current.compression()) {
-            persistCompression(effective.compression());
-        }
-
+        FolesiumConfig requestedBaseline = this.config;
+        ConfigReloadResult result;
         synchronized (keyspaceLock) {
+            if (closed.get()) {
+                throw new FolesiumException("Database is closed: " + dir);
+            }
+            List<String> notes = new ArrayList<>();
+            FolesiumConfig current = this.config;
+            FolesiumConfig merged = mergeRuntimeConfig(current, requestedBaseline, next);
+            boolean reshardRequired = next.shardCount() != requestedBaseline.shardCount();
+            FolesiumConfig effective = merged.withShardCount(current.shardCount());
+
+            if (effective.compression() == FolesiumConfig.Compression.ZSTD && !ZstdNative.available()) {
+                notes.add("compression=ZSTD ignored: zstd-jni is not available; keeping " + current.compression());
+                effective = effective.withCompression(current.compression())
+                        .withCompressionLevel(FolesiumConfig.clampCompressionLevel(
+                                current.compression(), effective.compressionLevel()));
+            }
+            if (reshardRequired) {
+                notes.add("shards=" + next.shardCount() + " will be applied by an automatic reshard on the next"
+                        + " server start (currently " + current.shardCount() + ")");
+            }
+
+            List<String> changes = current.diff(effective);
+            if (changes.isEmpty()) {
+                return new ConfigReloadResult(current, changes, notes, reshardRequired);
+            }
+            if (effective.compression() != current.compression()) {
+                persistCompression(effective.compression());
+            }
             this.config = effective;
             for (Keyspace ks : keyspaces.values()) {
                 ks.applyRuntimeConfig(effective);
             }
+            result = new ConfigReloadResult(effective, changes, notes, reshardRequired);
         }
 
-        if (effective.durability() == FolesiumConfig.DurabilityMode.BATCH) {
+        if (result.applied().durability() == FolesiumConfig.DurabilityMode.BATCH) {
             startFlusherIfNeeded();
-            // Wake the group-commit thread so a shortened interval applies right away.
             synchronized (flusherLock) {
                 flusherLock.notifyAll();
             }
         } else {
             stopFlusher();
-            // Leaving BATCH must not silently drop whatever the last window buffered. A
-            // concurrent close() could have already closed the shards, so guard the flush.
             try {
                 flush();
             } catch (RuntimeException e) {
@@ -448,9 +520,38 @@ public final class FolesiumDatabase implements AutoCloseable {
                         "Folesium: flush during durability change failed for " + dir, e);
             }
         }
+        LOGGER.log(System.Logger.Level.INFO, "Folesium: {0} reconfigured - {1}",
+                dir, String.join(", ", result.changes()));
+        return result;
+    }
 
-        LOGGER.log(System.Logger.Level.INFO, "Folesium: {0} reconfigured - {1}", dir, String.join(", ", changes));
-        return new ConfigReloadResult(effective, changes, notes, reshardRequired);
+    /** Merges only fields changed by this caller from its pre-lock snapshot. */
+    private static FolesiumConfig mergeRuntimeConfig(FolesiumConfig current,
+                                                       FolesiumConfig baseline,
+                                                       FolesiumConfig next) {
+        FolesiumConfig merged = current;
+        if (next.durability() != baseline.durability()) {
+            merged = merged.withDurability(next.durability());
+        }
+        if (next.batchFlushMillis() != baseline.batchFlushMillis()) {
+            merged = merged.withBatchFlushMillis(next.batchFlushMillis());
+        }
+        if (next.compression() != baseline.compression()) {
+            merged = merged.withCompression(next.compression());
+        }
+        if (next.compressionLevel() != baseline.compressionLevel()) {
+            merged = merged.withCompressionLevel(next.compressionLevel());
+        }
+        if (Double.compare(next.compactRatio(), baseline.compactRatio()) != 0) {
+            merged = merged.withCompactRatio(next.compactRatio());
+        }
+        if (next.compactMinBytes() != baseline.compactMinBytes()) {
+            merged = merged.withCompactMinBytes(next.compactMinBytes());
+        }
+        if (next.verifyChecksums() != baseline.verifyChecksums()) {
+            merged = merged.withVerifyChecksums(next.verifyChecksums());
+        }
+        return merged;
     }
 
     public Keyspace chunks() {
@@ -621,24 +722,28 @@ public final class FolesiumDatabase implements AutoCloseable {
         }
         stopFlusher();
         FolesiumException first = null;
-        // Taken for the same reason as in keyspace(): a concurrent first-use of a keyspace
-        // that slipped past the closed check would otherwise register a fresh Keyspace after
-        // the map was cleared, leaking its shard file handles for the lifetime of the JVM.
         synchronized (keyspaceLock) {
-            for (Keyspace ks : keyspaces.values()) {
+            for (var entry : keyspaces.entrySet()) {
                 try {
-                    ks.close();
-                } catch (FolesiumException e) {
+                    entry.getValue().close();
+                    keyspaces.remove(entry.getKey(), entry.getValue());
+                } catch (RuntimeException e) {
                     if (first == null) {
-                        first = e;
+                        first = e instanceof FolesiumException fe
+                                ? fe : new FolesiumException("Cannot close keyspace " + entry.getKey(), e);
                     } else {
                         first.addSuppressed(e);
                     }
                 }
             }
-            keyspaces.clear();
+            if (first != null) {
+                closed.set(false);
+            }
         }
         if (first != null) {
+            if (config.durability() == FolesiumConfig.DurabilityMode.BATCH) {
+                startFlusherIfNeeded();
+            }
             throw first;
         }
     }
