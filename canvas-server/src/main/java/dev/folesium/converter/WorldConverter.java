@@ -92,11 +92,20 @@ public final class WorldConverter {
      * "enable Folesium on an un-converted world, then convert later" path safe: no
      * player edits are clobbered by the older Anvil bytes. A fresh (empty) store
      * behaves exactly like a full overwrite.</p>
+     *
+     * <p>With {@code backupOnConvert} the existing store is moved to a
+     * {@code .folesium-backup-*} sibling before the fresh store is created, turning
+     * the merge into a full rebuild of the store (the previous store is preserved
+     * under the backup name).</p>
      */
     public Stats anvilToFolesium(Path dimensionDir, Path folesiumDir, FolesiumConfig config) throws IOException {
         long start = System.nanoTime();
         AtomicLong chunkCount = new AtomicLong();
         AtomicLong byteCount = new AtomicLong();
+
+        if (config.backupOnConvert() && Files.isDirectory(folesiumDir)) {
+            movePath(folesiumDir, backupPath(folesiumDir), false);
+        }
 
         try (FolesiumDatabase db = FolesiumDatabase.open(folesiumDir,
                 config.withDurability(FolesiumConfig.DurabilityMode.EXPLICIT))) {
@@ -144,11 +153,19 @@ public final class WorldConverter {
 
     /**
      * Materializes the Folesium keyspaces as authoritative Anvil directories.
-     * Each keyspace is built in a sibling staging directory and then replaces
-     * the old directory. The old directory is retained under a unique backup
-     * name, so records absent from the store cannot survive in the restored tree.
+     *
+     * <p>Default (cesium-fabric parity): each keyspace is written <em>in place</em>
+     * into the target directory - existing {@code .mca} files are opened and the
+     * stored chunks overwrite their slots, so no backup or staging tree is left
+     * behind and a repeated conversion simply overwrites the previous result.</p>
+     *
+     * <p>With {@code backupOnConvert} each keyspace is built in a sibling staging
+     * directory first and then atomically swapped in; the previous directory is
+     * retained under a unique {@code .folesium-backup-*} name (older backup trees
+     * are pruned), so records absent from the store cannot survive in the restored
+     * tree.</p>
      */
-    public Stats folesiumToAnvil(Path folesiumDir, Path dimensionDir) throws IOException {
+    public Stats folesiumToAnvil(Path folesiumDir, Path dimensionDir, FolesiumConfig config) throws IOException {
         long start = System.nanoTime();
         AtomicLong chunkCount = new AtomicLong();
         AtomicLong byteCount = new AtomicLong();
@@ -165,51 +182,70 @@ public final class WorldConverter {
                 Path out = dimensionDir.resolve(e.getKey());
                 Keyspace ks = db.keyspace(e.getValue());
                 if (ks.count() == 0 && !Files.exists(out)) {
-                    // Keep brand-new worlds free of meaningless empty Anvil roots;
-                    // an existing root is still replaced by an empty authoritative tree.
+                    // Keep brand-new worlds free of meaningless empty Anvil roots.
                     continue;
                 }
-                Path staging = siblingPath(out, ".folesium-staging-");
-                Files.createDirectories(staging);
-                try {
-                    // Group chunk keys by region. The clean staging tree remains empty
-                    // when the authoritative keyspace is empty.
-                    Map<Long, List<Long>> byRegion = new ConcurrentHashMap<>();
-                    ks.forEachKey(k -> {
-                        long key = LongKeys.decode(k);
-                        int cx = LongKeys.chunkX(key);
-                        int cz = LongKeys.chunkZ(key);
-                        long regionKey = LongKeys.chunkKey(cx >> 5, cz >> 5);
-                        byRegion.computeIfAbsent(regionKey, r -> new ArrayList<>()).add(key);
-                    });
-
-                    runParallel(new ArrayList<>(byRegion.keySet()), regionKey -> {
-                        int rx = LongKeys.chunkX(regionKey);
-                        int rz = LongKeys.chunkZ(regionKey);
-                        Path mca = staging.resolve("r." + rx + "." + rz + ".mca");
-                        try (AnvilRegionFile rf = new AnvilRegionFile(mca)) {
-                            for (long key : byRegion.get(regionKey)) {
-                                byte[] payload = ks.get(key);
-                                if (payload == null) {
-                                    continue;
-                                }
-                                rf.writeChunk(LongKeys.chunkX(key) & 31, LongKeys.chunkZ(key) & 31, payload);
-                                chunkCount.incrementAndGet();
-                                byteCount.addAndGet(payload.length);
-                            }
-                            rf.sync();
-                        } catch (IOException ex) {
-                            throw new UncheckedIOException("Failed writing " + mca, ex);
-                        }
-                    });
-                    replaceDirectory(out, staging);
-                } catch (RuntimeException | IOException ex) {
-                    deleteTreeQuietly(staging);
-                    throw ex;
+                if (config.backupOnConvert()) {
+                    convertKeyspaceViaStaging(out, ks, chunkCount, byteCount);
+                } else {
+                    convertKeyspaceInPlace(out, ks, chunkCount, byteCount);
                 }
             }
         }
         return new Stats(chunkCount.get(), byteCount.get(), (System.nanoTime() - start) / 1_000_000);
+    }
+
+    /** Backup-mode path: write a clean staging tree, swap it in, keep the old tree as backup. */
+    private void convertKeyspaceViaStaging(Path out, Keyspace ks, AtomicLong chunkCount, AtomicLong byteCount)
+            throws IOException {
+        Path staging = siblingPath(out, ".folesium-staging-");
+        Files.createDirectories(staging);
+        try {
+            writeKeyspace(staging, ks, chunkCount, byteCount);
+            replaceDirectory(out, staging);
+        } catch (RuntimeException | IOException ex) {
+            deleteTreeQuietly(staging);
+            throw ex;
+        }
+    }
+
+    /** Default path: write chunks straight into the target directory, reusing existing region files. */
+    private void convertKeyspaceInPlace(Path out, Keyspace ks, AtomicLong chunkCount, AtomicLong byteCount)
+            throws IOException {
+        Files.createDirectories(out);
+        writeKeyspace(out, ks, chunkCount, byteCount);
+    }
+
+    private void writeKeyspace(Path writeRoot, Keyspace ks,
+                               AtomicLong chunkCount, AtomicLong byteCount) throws IOException {
+        Map<Long, List<Long>> byRegion = new ConcurrentHashMap<>();
+        ks.forEachKey(k -> {
+            long key = LongKeys.decode(k);
+            int cx = LongKeys.chunkX(key);
+            int cz = LongKeys.chunkZ(key);
+            long regionKey = LongKeys.chunkKey(cx >> 5, cz >> 5);
+            byRegion.computeIfAbsent(regionKey, r -> new ArrayList<>()).add(key);
+        });
+
+        runParallel(new ArrayList<>(byRegion.keySet()), regionKey -> {
+            int rx = LongKeys.chunkX(regionKey);
+            int rz = LongKeys.chunkZ(regionKey);
+            Path mca = writeRoot.resolve("r." + rx + "." + rz + ".mca");
+            try (AnvilRegionFile rf = new AnvilRegionFile(mca)) {
+                for (long key : byRegion.get(regionKey)) {
+                    byte[] payload = ks.get(key);
+                    if (payload == null) {
+                        continue;
+                    }
+                    rf.writeChunk(LongKeys.chunkX(key) & 31, LongKeys.chunkZ(key) & 31, payload);
+                    chunkCount.incrementAndGet();
+                    byteCount.addAndGet(payload.length);
+                }
+                rf.sync();
+            } catch (IOException ex) {
+                throw new UncheckedIOException("Failed writing " + mca, ex);
+            }
+        });
     }
 
     private static Path siblingPath(Path destination, String marker) {
@@ -218,6 +254,12 @@ public final class WorldConverter {
             parent = destination.toAbsolutePath().normalize().getRoot();
         }
         return parent.resolve(destination.getFileName() + marker + UUID.randomUUID());
+    }
+
+    /** The (pruned) {@code .folesium-backup-*} sibling name for a target path. */
+    private static Path backupPath(Path destination) throws IOException {
+        pruneOldBackups(destination);
+        return siblingPath(destination, ".folesium-backup-");
     }
 
     /** Replaces a destination directory while retaining the previous tree as a backup. */

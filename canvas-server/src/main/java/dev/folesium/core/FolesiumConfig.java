@@ -55,6 +55,10 @@ import java.util.Objects;
  * @param compactRatio      shard is compacted when {@code deadBytes > compactRatio * fileSize}.
  * @param compactMinBytes   never compact shards smaller than this.
  * @param verifyChecksums   verify the record CRC32C on every read (always verified on open/scan).
+ * @param backupOnConvert   when converting a world, keep the previous tree at the target location
+ *                          under a {@code .folesium-backup-*} sibling name instead of overwriting it
+ *                          in place. Default {@code false} (cesium-fabric parity: targets are
+ *                          written in place); only the converter reads this flag.
  */
 public record FolesiumConfig(
         int shardCount,
@@ -64,7 +68,8 @@ public record FolesiumConfig(
         int compressionLevel,
         double compactRatio,
         long compactMinBytes,
-        boolean verifyChecksums
+        boolean verifyChecksums,
+        boolean backupOnConvert
 ) {
     public enum DurabilityMode {
         /** fsync on every write. Safest, slowest. */
@@ -144,16 +149,17 @@ public record FolesiumConfig(
                 4,
                 0.5,
                 8L * 1024 * 1024,
+                false,
                 false
         );
     }
 
     public FolesiumConfig withShardCount(int n) {
-        return new FolesiumConfig(n, durability, batchFlushMillis, compression, compressionLevel, compactRatio, compactMinBytes, verifyChecksums);
+        return new FolesiumConfig(n, durability, batchFlushMillis, compression, compressionLevel, compactRatio, compactMinBytes, verifyChecksums, backupOnConvert);
     }
 
     public FolesiumConfig withDurability(DurabilityMode d) {
-        return new FolesiumConfig(shardCount, d, batchFlushMillis, compression, compressionLevel, compactRatio, compactMinBytes, verifyChecksums);
+        return new FolesiumConfig(shardCount, d, batchFlushMillis, compression, compressionLevel, compactRatio, compactMinBytes, verifyChecksums, backupOnConvert);
     }
 
     /**
@@ -163,27 +169,31 @@ public record FolesiumConfig(
      */
     public FolesiumConfig withCompression(Compression c) {
         return new FolesiumConfig(shardCount, durability, batchFlushMillis, c,
-                clampCompressionLevel(c, compressionLevel), compactRatio, compactMinBytes, verifyChecksums);
+                clampCompressionLevel(c, compressionLevel), compactRatio, compactMinBytes, verifyChecksums, backupOnConvert);
     }
 
     public FolesiumConfig withCompressionLevel(int level) {
-        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, level, compactRatio, compactMinBytes, verifyChecksums);
+        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, level, compactRatio, compactMinBytes, verifyChecksums, backupOnConvert);
     }
 
     public FolesiumConfig withBatchFlushMillis(int millis) {
-        return new FolesiumConfig(shardCount, durability, millis, compression, compressionLevel, compactRatio, compactMinBytes, verifyChecksums);
+        return new FolesiumConfig(shardCount, durability, millis, compression, compressionLevel, compactRatio, compactMinBytes, verifyChecksums, backupOnConvert);
     }
 
     public FolesiumConfig withCompactRatio(double ratio) {
-        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, compressionLevel, ratio, compactMinBytes, verifyChecksums);
+        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, compressionLevel, ratio, compactMinBytes, verifyChecksums, backupOnConvert);
     }
 
     public FolesiumConfig withCompactMinBytes(long bytes) {
-        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, compressionLevel, compactRatio, bytes, verifyChecksums);
+        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, compressionLevel, compactRatio, bytes, verifyChecksums, backupOnConvert);
     }
 
     public FolesiumConfig withVerifyChecksums(boolean v) {
-        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, compressionLevel, compactRatio, compactMinBytes, v);
+        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, compressionLevel, compactRatio, compactMinBytes, v, backupOnConvert);
+    }
+
+    public FolesiumConfig withBackupOnConvert(boolean v) {
+        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, compressionLevel, compactRatio, compactMinBytes, verifyChecksums, v);
     }
 
     /**
@@ -216,6 +226,9 @@ public record FolesiumConfig(
         }
         if (verifyChecksums != other.verifyChecksums) {
             out.add("verifyChecksums: " + verifyChecksums + " -> " + other.verifyChecksums);
+        }
+        if (backupOnConvert != other.backupOnConvert) {
+            out.add("backupOnConvert: " + backupOnConvert + " -> " + other.backupOnConvert);
         }
         return out;
     }

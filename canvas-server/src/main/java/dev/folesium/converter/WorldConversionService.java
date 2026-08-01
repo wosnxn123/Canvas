@@ -151,7 +151,7 @@ public final class WorldConversionService {
                 }
                 case TO_ANVIL -> {
                     if (!hasFolesium) continue;
-                    stats = converter.folesiumToAnvil(folesiumStore, dim);
+                    stats = converter.folesiumToAnvil(folesiumStore, dim, config);
                     keptStores.add(folesiumStore);
                 }
                 default -> throw new IllegalStateException();
@@ -163,19 +163,22 @@ public final class WorldConversionService {
             bytes += stats.bytes();
             converted++;
         }
-        printRetentionNote(worldRoot, dir, converted, players, keptStores);
+        printRetentionNote(worldRoot, dir, converted, players, keptStores, config.backupOnConvert());
         long millis = (System.nanoTime() - t0) / 1_000_000L;
         return new Report(converted, chunks, bytes, players, millis);
     }
 
     /**
-     * cesium-fabric parity: the converter never deletes files, it only tells the
-     * operator what is now redundant and safe to remove by hand.
+     * cesium-fabric parity: the converter never deletes the <em>source</em> data, it
+     * only tells the operator what is now redundant and safe to remove by hand.
+     * With {@code backupOnConvert} it also keeps the previous target trees under
+     * {@code .folesium-backup-*} names and says so.
      */
     private static void printRetentionNote(Path worldRoot, Direction dir,
-                                           int dimensions, long players, Set<Path> keptStores) {
+                                           int dimensions, long players, Set<Path> keptStores,
+                                           boolean backupOnConvert) {
         if (dir == Direction.TO_ANVIL) {
-            printRetainedStores(keptStores);
+            printRetainedStores(keptStores, backupOnConvert);
         } else if (dimensions > 0 || players > 0) {
             System.out.println("Folesium: no files were deleted. The vanilla files (region/, entities/, poi/ and the");
             System.out.println("Folesium: per-player files) were kept as a backup; the server ignores them while Folesium");
@@ -191,7 +194,7 @@ public final class WorldConversionService {
      * player store) collapse into a single line via a {@link LinkedHashSet} so the
      * output order is stable and never misleading.
      */
-    public static void printRetainedStores(Collection<? extends Path> stores) {
+    public static void printRetainedStores(Collection<? extends Path> stores, boolean backupOnConvert) {
         LinkedHashSet<Path> kept = new LinkedHashSet<>();
         for (Path p : stores) {
             if (p != null) {
@@ -205,11 +208,16 @@ public final class WorldConversionService {
         for (Path p : kept) {
             System.out.println("    " + p);
         }
-        System.out.println("Folesium: replaced vanilla trees were kept too, as .folesium-backup-* siblings of the");
-        System.out.println("Folesium: restored directories (e.g. <dir>.folesium-backup-<id>/); backup trees from");
-        System.out.println("Folesium: earlier conversions are pruned, so backups do not accumulate across runs.");
-        System.out.println("Folesium: delete them manually once the restored world is verified - and always BEFORE");
-        System.out.println("Folesium: converting back to Folesium if you have played on Anvil in the meantime.");
+        if (backupOnConvert) {
+            System.out.println("Folesium: replaced vanilla trees were kept too, as .folesium-backup-* siblings of the");
+            System.out.println("Folesium: restored directories (e.g. <dir>.folesium-backup-<id>/); backup trees from");
+            System.out.println("Folesium: earlier conversions are pruned, so backups do not accumulate across runs.");
+            System.out.println("Folesium: delete them manually once the restored world is verified - and always BEFORE");
+            System.out.println("Folesium: converting back to Folesium if you have played on Anvil in the meantime.");
+        } else {
+            System.out.println("Folesium: targets were overwritten in place (backupOnConvert=false), so no .folesium-backup-*");
+            System.out.println("Folesium: trees exist; the stores above are the only redundant data left on disk.");
+        }
     }
 
     /**
@@ -230,7 +238,7 @@ public final class WorldConversionService {
                 if (FolesiumDatabase.readRole(store) != FolesiumDatabase.StoreRole.PLAYERS) {
                     return 0;
                 }
-                stats = PlayerDataConverter.folesiumToAnvil(store, worldRoot);
+                stats = PlayerDataConverter.folesiumToAnvil(store, worldRoot, config);
             }
             default -> throw new IllegalStateException();
         }

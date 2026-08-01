@@ -202,6 +202,10 @@ public final class FolesiumRegistry {
         sb.append("# Re-verify each record's CRC32C on every read (~2x read I/O). Leave false unless diagnosing corruption.\n");
         sb.append("verifyChecksums=").append(defaults.verifyChecksums()).append('\n');
         sb.append('\n');
+        sb.append("# When converting a world, keep the previous tree at the target location under a\n");
+        sb.append("# '.folesium-backup-*' sibling name (both directions) instead of overwriting it in place.\n");
+        sb.append("backupOnConvert=").append(defaults.backupOnConvert()).append('\n');
+        sb.append('\n');
         sb.append("# Watch this file and apply edits to the running server without a restart.\n");
         sb.append("autoReload=true\n");
         sb.append('\n');
@@ -257,6 +261,7 @@ public final class FolesiumRegistry {
         double compactRatio = 0.5;
         long compactMinBytes = 8L * 1024 * 1024;
         boolean verifyChecksums = false;
+        boolean backupOnConvert = false; // cesium parity: converters write targets in place
 
         return new FolesiumConfig(
                 shards,
@@ -266,7 +271,8 @@ public final class FolesiumRegistry {
                 compressionLevel,
                 compactRatio,
                 compactMinBytes,
-                verifyChecksums
+                verifyChecksums,
+                backupOnConvert
         );
     }
 
@@ -405,7 +411,8 @@ public final class FolesiumRegistry {
                 level,
                 compactRatio,
                 compactMinBytes,
-                boolProperty("verifyChecksums", d.verifyChecksums())
+                boolProperty("verifyChecksums", d.verifyChecksums()),
+                boolProperty("backupOnConvert", d.backupOnConvert())
         );
     }
 

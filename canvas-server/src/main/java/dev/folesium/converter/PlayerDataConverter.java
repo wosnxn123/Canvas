@@ -169,11 +169,19 @@ public final class PlayerDataConverter {
      * players missing from the store are taken from disk. Re-running the conversion after
      * playing therefore never rolls a player back to an older file. The vanilla files are
      * left in place as a backup.</p>
+     *
+     * <p>With {@code backupOnConvert} an existing store is moved to a
+     * {@code .folesium-backup-*} sibling first, turning the merge into a full rebuild of
+     * the store.</p>
      */
     public static Stats anvilToFolesium(Path worldRoot, Path storeDir, FolesiumConfig config) throws IOException {
         long start = System.nanoTime();
         long entries = 0;
         long bytes = 0;
+
+        if (config.backupOnConvert() && Files.isDirectory(storeDir)) {
+            movePath(storeDir, backupPath(storeDir), false);
+        }
 
         Path playerRoot = playerRootFor(worldRoot);
         try (FolesiumDatabase db = FolesiumDatabase.open(storeDir,
@@ -205,12 +213,18 @@ public final class PlayerDataConverter {
     // ------------------------------------------------------- folesium -> vanilla
 
     /**
-     * Materializes every player keyspace into a clean vanilla directory. The
-     * previous directory is moved to a unique sibling backup before the staged
-     * directory is published, so stale UUID files and empty-keyspace remnants
-     * cannot survive rollback.
+     * Materializes every player keyspace back into the vanilla per-player files.
+     *
+     * <p>Default (cesium-fabric parity): each record is written straight into the
+     * target directory, atomically replacing any existing file of the same name;
+     * files that are not in the store are left untouched.</p>
+     *
+     * <p>With {@code backupOnConvert} a clean staging directory is built first and
+     * swapped in, and the previous directory is moved to a unique
+     * {@code .folesium-backup-*} sibling, so stale UUID files and empty-keyspace
+     * remnants cannot survive the rollback.</p>
      */
-    public static Stats folesiumToAnvil(Path storeDir, Path worldRoot) throws IOException {
+    public static Stats folesiumToAnvil(Path storeDir, Path worldRoot, FolesiumConfig config) throws IOException {
         long start = System.nanoTime();
         long entries = 0;
         long bytes = 0;
@@ -227,38 +241,66 @@ public final class PlayerDataConverter {
                 Keyspace ks = db.keyspace(m.keyspace());
                 Path out = playerRoot.resolve(m.dir());
                 if (ks.count() == 0 && !Files.exists(out)) {
-                    // Do not create empty vanilla roots on a brand-new world; an
-                    // existing root is still replaced by the empty authoritative tree.
+                    // Do not create empty vanilla roots on a brand-new world.
                     continue;
                 }
-                Path staging = siblingPath(out, ".folesium-staging-");
-                Files.createDirectories(staging);
-                try {
-                    // Keys first: values are still read one at a time, while the
-                    // clean staging tree handles records deleted from the store.
-                    List<byte[]> keys = new ArrayList<>();
-                    ks.forEachKey(keys::add);
-                    for (byte[] key : keys) {
-                        if (key.length != UuidKeys.LENGTH) {
-                            continue; // not a player key; leave it out rather than guess
-                        }
-                        byte[] value = ks.get(key);
-                        if (value == null) {
-                            continue; // deleted between the key scan and the read
-                        }
-                        UUID id = UuidKeys.decode(key);
-                        writeAtomically(staging.resolve(id + m.extension()), value);
-                        entries++;
-                        bytes += value.length;
-                    }
-                    replaceDirectory(out, staging);
-                } catch (IOException | RuntimeException ex) {
-                    deleteTreeQuietly(staging);
-                    throw ex;
-                }
+                long[] inc = config.backupOnConvert()
+                        ? convertMappingViaStaging(out, ks, m)
+                        : convertMappingInPlace(out, ks, m);
+                entries += inc[0];
+                bytes += inc[1];
             }
         }
         return new Stats(entries, bytes, (System.nanoTime() - start) / 1_000_000);
+    }
+
+    /** Backup-mode path: clean staging tree + atomic swap, previous dir kept as backup. */
+    private static long[] convertMappingViaStaging(Path out, Keyspace ks, Mapping m) throws IOException {
+        Path staging = siblingPath(out, ".folesium-staging-");
+        Files.createDirectories(staging);
+        try {
+            long[] inc = writeMapping(staging, ks, m);
+            replaceDirectory(out, staging);
+            return inc;
+        } catch (IOException | RuntimeException ex) {
+            deleteTreeQuietly(staging);
+            throw ex;
+        }
+    }
+
+    /** Default path: write each record straight into the target directory, replacing existing files. */
+    private static long[] convertMappingInPlace(Path out, Keyspace ks, Mapping m) throws IOException {
+        Files.createDirectories(out);
+        return writeMapping(out, ks, m);
+    }
+
+    private static long[] writeMapping(Path writeRoot, Keyspace ks, Mapping m) throws IOException {
+        long entries = 0;
+        long bytes = 0;
+        // Keys first: values are still read one at a time, while a clean
+        // staging tree handles records deleted from the store.
+        List<byte[]> keys = new ArrayList<>();
+        ks.forEachKey(keys::add);
+        for (byte[] key : keys) {
+            if (key.length != UuidKeys.LENGTH) {
+                continue; // not a player key; leave it out rather than guess
+            }
+            byte[] value = ks.get(key);
+            if (value == null) {
+                continue; // deleted between the key scan and the read
+            }
+            UUID id = UuidKeys.decode(key);
+            writeAtomically(writeRoot.resolve(id + m.extension()), value);
+            entries++;
+            bytes += value.length;
+        }
+        return new long[]{entries, bytes};
+    }
+
+    /** The (pruned) {@code .folesium-backup-*} sibling name for a target path. */
+    private static Path backupPath(Path destination) throws IOException {
+        pruneOldBackups(destination);
+        return siblingPath(destination, ".folesium-backup-");
     }
 
     private static Path siblingPath(Path destination, String marker) {
