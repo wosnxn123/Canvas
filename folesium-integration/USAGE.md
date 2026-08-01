@@ -111,6 +111,7 @@ configuration watcher is created.
 | `compactRatio` | `0.5` | live | compact a shard when dead bytes exceed this fraction of the file |
 | `compactMinBytes` | `8388608` | live | never compact shards smaller than this (8 MiB) |
 | `verifyChecksums` | `false` | live | re-verify record CRC32C on every read (~2× read I/O; recovery scans always verify) |
+| `backupOnConvert` | `false` | converter runs | when converting a world, keep the previous tree at the target location under a `.folesium-backup-*` sibling name (both directions) instead of overwriting it in place. Off (default) = cesium-fabric parity: targets are written in place, nothing is renamed. |
 | `autoReload` | `true` | startup | create the watcher for `folesium.properties`; changing this file key does not stop a watcher already running |
 | `autoReloadSeconds` | `10` | live | how often the file is checked for edits |
 | `logging.utf8` | `true` | startup | JVM system-property-only switch for existing Folesium/JUL handler encoding; not a file-backed key and not the complete server log |
@@ -225,6 +226,13 @@ yourself to reclaim disk space: `region/`, `entities/`, `poi/` in every dimensio
 
 ### Conversion artifacts (expected, not errors)
 
+By default (`backupOnConvert=false`, cesium-fabric parity) a conversion **overwrites its
+target in place** and leaves nothing behind: existing `.mca` / player files are reused
+and their slots overwritten, so there are no backup or staging trees. The source data
+(the stores for TO_ANVIL, the vanilla files for TO_FOLESIUM) is never deleted.
+
+With `backupOnConvert=true` the previous tree at the target is kept:
+
 * **Backup dirs** — `*.folesium-backup-<uuid>` hold the *old* Anvil files/dirs the
   converter renamed aside before restoring fresh ones (a same-volume rename, so no
   extra I/O). Delete them once the restore is verified
@@ -242,7 +250,9 @@ yourself to reclaim disk space: `region/`, `entities/`, `poi/` in every dimensio
 
 A full re-codec of an existing store is the same two-step conversion:
 `--folesiumConvertToAnvil` (store → `.mca`), edit `folesium.properties`, then
-`--folesiumConvertToFolesium` (`.mca` → store in the new codec).
+`--folesiumConvertToFolesium` (`.mca` → store in the new codec). With the default
+settings both steps overwrite their targets in place; enable `backupOnConvert` if you
+want each step to keep the previous target under a backup name.
 
 ---
 

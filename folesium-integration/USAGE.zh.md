@@ -105,6 +105,7 @@ Folesium: opened PLAYERS store .../world/players/folesium
 | `compactRatio` | `0.5` | 实时 | 分片死字节超过文件的该比例时触发压实 |
 | `compactMinBytes` | `8388608` | 实时 | 小于该大小（8 MiB）的分片不压实 |
 | `verifyChecksums` | `false` | 实时 | 每次读取重校验 CRC32C（约 2 倍读 I/O；恢复扫描始终校验） |
+| `backupOnConvert` | `false` | 转换时 | 转换世界时，把目标位置的旧内容改名为 `.folesium-backup-*` 保留（双向），而不是就地覆盖。默认关（cesium-fabric 同款：目标就地写入，不改名不留目录）。 |
 | `autoReload` | `true` | 启动时 | 创建 `folesium.properties` 监视器；改文件中的此键不会停止已经运行的监视器 |
 | `autoReloadSeconds` | `10` | 实时 | 多久检查一次文件改动 |
 | `logging.utf8` | `true` | 启动时 | 仅 JVM 系统属性控制已有 Folesium/JUL handler 的编码；不是文件键，也不覆盖完整服务端日志 |
@@ -208,6 +209,12 @@ stats/`（26 之前）。
 
 ### 转换期间的目录产物（预期现象，不是错误）
 
+默认（`backupOnConvert=false`，与 cesium-fabric 一致）转换会**就地覆盖目标**，
+不留下任何东西：已有的 `.mca` / 玩家文件被复用、槽位被覆盖，因此没有备份目录
+也没有暂存目录。源数据（TO_ANVIL 的 store、TO_FOLESIUM 的原版文件）从不删除。
+
+开启 `backupOnConvert=true` 后，目标位置的旧内容会被保留：
+
 * **备份目录** —— `*.folesium-backup-<uuid>` 是转换器先改名挪走的**旧版** Anvil
   文件/目录，之后才恢复新的（同卷改名，不产生额外 IO）。验证恢复无误后可删
   （`find <world> -name '*.folesium-backup-*' -exec rm -rf {} +`）。
@@ -222,7 +229,8 @@ stats/`（26 之前）。
 
 已有存储整体换编码就是同一条两步转换：`--folesiumConvertToAnvil`（store → `.mca`）
 → 编辑 `folesium.properties` → `--folesiumConvertToFolesium`（`.mca` → store，
-全量新编码）。
+全量新编码）。默认设置下两步都是就地覆盖；想要每步保留旧目标，开启
+`backupOnConvert`。
 
 ---
 
