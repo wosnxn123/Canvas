@@ -22,7 +22,9 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.EOFException;
+import java.io.FilterInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
@@ -198,6 +200,13 @@ public final class AnvilRegionFile implements Closeable {
             if (!java.nio.file.Files.isRegularFile(externalPath)) {
                 throw new IOException("External chunk payload is not a regular file: " + externalPath);
             }
+            // Bound the read before materializing it: the .mcc file holds the compressed
+            // payload, so a file beyond the payload cap is either corrupt or a bomb.
+            long size = java.nio.file.Files.size(externalPath);
+            if (size > MAX_CHUNK_PAYLOAD_BYTES) {
+                throw new IOException("External chunk payload of " + size + " bytes exceeds the "
+                        + MAX_CHUNK_PAYLOAD_BYTES + " byte limit");
+            }
             data = java.nio.file.Files.readAllBytes(externalPath);
         } else {
             data = new byte[length - 1];
@@ -205,10 +214,12 @@ public final class AnvilRegionFile implements Closeable {
             buf.get(data);
         }
         byte[] payload = switch (compressionType) {
-            case COMPRESSION_GZIP -> readAll(new GZIPInputStream(new ByteArrayInputStream(data)));
-            case COMPRESSION_ZLIB -> readAll(new InflaterInputStream(new ByteArrayInputStream(data)));
+            case COMPRESSION_GZIP -> readBounded(new GZIPInputStream(new ByteArrayInputStream(data)),
+                    MAX_CHUNK_PAYLOAD_BYTES);
+            case COMPRESSION_ZLIB -> readBounded(new InflaterInputStream(new ByteArrayInputStream(data)),
+                    MAX_CHUNK_PAYLOAD_BYTES);
             case COMPRESSION_NONE -> data;
-            case COMPRESSION_LZ4 -> Lz4Native.decompress(data);
+            case COMPRESSION_LZ4 -> decompressLz4Bounded(data);
             default -> throw new IOException("Unknown chunk compression type " + compressionType);
         };
         if (payload.length > MAX_CHUNK_PAYLOAD_BYTES) {
@@ -477,9 +488,78 @@ public final class AnvilRegionFile implements Closeable {
         writeFully(channel, buf, pos);
     }
 
-    private static byte[] readAll(java.io.InputStream in) throws IOException {
-        try (in) {
-            return in.readAllBytes();
+    /**
+     * Reads a decompressing stream, throwing an {@link IOException} as soon as more
+     * than {@code limit} bytes have been produced. This bounds the decompression
+     * itself: the size check in {@link #readChunk} is only the second line of
+     * defense, because by then the expansion has already been materialized.
+     */
+    private static byte[] readBounded(InputStream in, int limit) throws IOException {
+        try (InputStream limited = new LimitedInputStream(in, limit)) {
+            return limited.readAllBytes();
+        }
+    }
+
+    /**
+     * Decompresses an LZ4 chunk with the same output bound as {@link #readBounded}.
+     * Mirrors {@link Lz4Native}'s reflection bridge (lz4-java is an optional runtime
+     * dependency) but reads through a {@link LimitedInputStream}, because
+     * {@link Lz4Native#decompress} has no size bound and would materialize the whole
+     * expansion before returning. The error behavior for a missing or broken lz4
+     * library matches {@link Lz4Native} exactly.
+     */
+    private static byte[] decompressLz4Bounded(byte[] data) throws IOException {
+        try {
+            Class<?> cls = Class.forName("net.jpountz.lz4.LZ4BlockInputStream");
+            InputStream in = (InputStream) cls.getConstructor(InputStream.class)
+                    .newInstance(new ByteArrayInputStream(data));
+            return readBounded(in, MAX_CHUNK_PAYLOAD_BYTES);
+        } catch (IOException e) {
+            throw e; // includes the bounded-read limit violation
+        } catch (RuntimeException e) {
+            throw e; // LZ4Exception on corrupt data, exactly like Lz4Native
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            throw new IllegalStateException("LZ4 decompression failed", e.getCause());
+        } catch (ClassNotFoundException e) {
+            throw new UnsupportedOperationException(
+                    "Cannot read LZ4-compressed Anvil chunk: lz4-java is not on the classpath. "
+                            + "Run the conversion on a Folia/Canvas server, or add net.jpountz.lz4:lz4.");
+        } catch (Exception e) {
+            throw new IllegalStateException("LZ4 decompression failed", e);
+        }
+    }
+
+    /** Throws an {@link IOException} once more than {@code limit} bytes have been read. */
+    private static final class LimitedInputStream extends FilterInputStream {
+        private final int limit;
+        private int count;
+
+        LimitedInputStream(InputStream in, int limit) {
+            super(in);
+            this.limit = limit;
+        }
+
+        @Override
+        public int read() throws IOException {
+            int b = super.read();
+            if (b >= 0 && ++count > limit) {
+                throw tooLarge();
+            }
+            return b;
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) throws IOException {
+            int n = super.read(b, off, len);
+            if (n > 0 && (count += n) > limit) {
+                throw tooLarge();
+            }
+            return n;
+        }
+
+        private IOException tooLarge() {
+            return new IOException("Decompressed chunk payload of " + count + " bytes exceeds the "
+                    + MAX_CHUNK_PAYLOAD_BYTES + " byte limit");
         }
     }
 }

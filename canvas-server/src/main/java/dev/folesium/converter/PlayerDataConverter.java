@@ -297,6 +297,7 @@ public final class PlayerDataConverter {
         }
         Files.createDirectories(parent);
         Path backup = siblingPath(destination, ".folesium-backup-");
+        pruneOldBackups(destination);
         boolean backedUp = false;
         try {
             if (Files.exists(destination)) {
@@ -316,6 +317,38 @@ public final class PlayerDataConverter {
                 }
             }
             throw failure;
+        }
+    }
+
+    /**
+     * Repeated conversions would otherwise accumulate one {@code .folesium-backup-*}
+     * tree per restored directory forever. Delete the backup trees left by previous
+     * runs, keeping only the newest (the one a failed current run may still restore
+     * from); the fresh backup dir is created by {@link #replaceDirectory} right
+     * after this call. Mirrors the pruning in {@link WorldConverter#replaceDirectory}.
+     */
+    private static void pruneOldBackups(Path destination) throws IOException {
+        Path parent = destination.toAbsolutePath().normalize().getParent();
+        if (parent == null) {
+            parent = destination.toAbsolutePath().normalize().getRoot();
+        }
+        String prefix = destination.getFileName() + ".folesium-backup-";
+        List<Path> backups = new ArrayList<>();
+        try (var s = Files.list(parent)) {
+            s.filter(p -> p.getFileName().toString().startsWith(prefix))
+                    .forEach(backups::add);
+        }
+        backups.sort(Comparator.comparingLong(PlayerDataConverter::lastModifiedMillis).reversed());
+        for (int i = 1; i < backups.size(); i++) {
+            deleteTreeQuietly(backups.get(i));
+        }
+    }
+
+    private static long lastModifiedMillis(Path p) {
+        try {
+            return Files.getLastModifiedTime(p).toMillis();
+        } catch (IOException e) {
+            return 0L;
         }
     }
 

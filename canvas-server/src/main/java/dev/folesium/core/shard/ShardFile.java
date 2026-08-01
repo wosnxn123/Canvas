@@ -129,12 +129,15 @@ public final class ShardFile implements AutoCloseable {
             } else {
                 try {
                     validateFileHeader();
-                } catch (FolesiumException | EOFException tornHeader) {
-                    // The file is non-empty but its header is unusable - a crash tore the shard
-                    // before a valid header was ever written (or the file is garbage). There is
-                    // no valid header to anchor the record-level scan below, so treat the whole
-                    // shard as torn: discard it and start fresh. Shards with a valid header are
-                    // unaffected - scanAndRecover() keeps handling torn tails.
+                } catch (EOFException tornHeader) {
+                    // The file is non-empty but too short to hold a header - a crash tore the
+                    // shard before a valid header was ever written. There is no valid header to
+                    // anchor the record-level scan below, so treat the whole shard as torn:
+                    // discard it and start fresh. Any FolesiumException from validateFileHeader()
+                    // (bad magic, unsupported version, or a topology mismatch against the count
+                    // the store opens with) propagates and fails the open with the file's data
+                    // intact - a mismatched shard is valid data, not torn debris. Shards with a
+                    // valid header are unaffected - scanAndRecover() keeps handling torn tails.
                     discardTornShard(tornHeader.toString());
                 }
                 if (!tryLoadHint()) {

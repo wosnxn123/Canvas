@@ -146,9 +146,25 @@ final class StoreResharder {
             }
         }
         if (!hasStaging && Files.isRegularFile(movedMarker)) {
-            LOGGER.log(System.Logger.Level.INFO,
-                    "Folesium: removing the backup of a completed reshard of {0}", dir);
-            deleteRecursively(backup);
+            // MOVED alone does not prove the swap completed: a crash mid-phase-3 can leave a
+            // staged shard lost, and an earlier open that discarded the staging directory
+            // would have recreated the missing shard empty. Only delete the backup - which
+            // may be the only surviving copy of those records - once the on-disk layout is
+            // the complete new set, i.e. the files uniformly hold the shard count the
+            // metadata names. Otherwise the swap was never finished: keep the backup.
+            Integer metaCount = metadataShardCount(dir);
+            int fileCount = consistentOnDiskShardCount(dir);
+            if (metaCount != null && fileCount == metaCount) {
+                LOGGER.log(System.Logger.Level.INFO,
+                        "Folesium: removing the backup of a completed reshard of {0}", dir);
+                deleteRecursively(backup);
+            } else {
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Folesium: keeping the backup {0} of {1}: the reshard swap was never "
+                                + "completed (shard files hold {2}, metadata says {3})",
+                        backup, dir, fileCount < 0 ? "no consistent layout" : Integer.toString(fileCount),
+                        metaCount == null ? "nothing" : Integer.toString(metaCount));
+            }
             // The swap evidence is gone, so bring the metadata in line with the files
             // before the store is opened.
             reconcileStaleMetadata(dir);
@@ -163,6 +179,11 @@ final class StoreResharder {
         }
         deleteRecursively(staging);
         deleteRecursively(backup);
+        // The COMMIT evidence is gone, but the shard-count metadata may still have been
+        // updated before the crash (or the restored files may disagree with it). Realign the
+        // metadata with the files before any keyspace opens, so a valid shard is never
+        // opened under a mismatched shard count.
+        reconcileStaleMetadata(dir);
     }
 
     /**
@@ -497,6 +518,25 @@ final class StoreResharder {
             updateShardCountMetadata(meta, metaCount, fileCount);
         } catch (IOException e) {
             throw new FolesiumException("Cannot repair shard count metadata in " + dir, e);
+        }
+    }
+
+    /**
+     * {@code store.shardCount} recorded in the metadata, or {@code null} when the metadata
+     * is absent, unreadable, or does not carry the property.
+     */
+    private static Integer metadataShardCount(Path dir) {
+        Path meta = dir.resolve(FolesiumDatabase.METADATA_FILE);
+        if (!Files.isRegularFile(meta)) {
+            return null;
+        }
+        try (var reader = Files.newBufferedReader(meta, StandardCharsets.UTF_8)) {
+            Properties p = new Properties();
+            p.load(reader);
+            String raw = p.getProperty("store.shardCount");
+            return raw == null ? null : Integer.parseInt(raw.trim());
+        } catch (IOException | RuntimeException e) {
+            return null;
         }
     }
 
