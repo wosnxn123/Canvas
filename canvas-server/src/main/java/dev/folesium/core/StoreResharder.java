@@ -29,6 +29,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Properties;
 import java.util.TreeSet;
@@ -65,6 +66,12 @@ import java.util.stream.Stream;
  * driven to completion. The {@code MOVED} marker is what makes phase 3 re-runnable - without
  * it, a retry could mistake already-swapped-in new files for leftovers of the old set.</p>
  *
+ * <p>Two ordering invariants make recovery safe. The shard-count metadata is updated before
+ * the swap evidence is destroyed, so a crash can never leave the metadata and the shard
+ * files disagreeing. And the old shard files are only deleted once every new shard is
+ * confirmed present in the store directory, so a crash in the middle of phase 3 can never
+ * destroy the only surviving copy of the records.</p>
+ *
  * <p>Not thread-safe and not multi-process safe: it is only ever called from the
  * {@link FolesiumDatabase} constructor, before any keyspace exists and before the store is
  * published to other threads.</p>
@@ -79,7 +86,7 @@ final class StoreResharder {
     private static final String MOVED_MARKER = "MOVED";
 
     /** {@code <keyspace>-<NNNN>.flog}, matching {@link Keyspace}'s naming. */
-    private static final Pattern SHARD_FILE = Pattern.compile("^(.+)-\\d{4}\\.flog$");
+    private static final Pattern SHARD_FILE = Pattern.compile("^(.+)-(\\d{4})\\.flog$");
 
     private StoreResharder() {
     }
@@ -87,8 +94,9 @@ final class StoreResharder {
     // --------------------------------------------------------------- recovery
 
     /**
-     * Completes or discards an interrupted reshard. Cheap no-op (two {@code exists} checks)
-     * when no reshard is in flight, so it is safe to call on every open.
+     * Completes or discards an interrupted reshard. Cheap no-op when no reshard is in
+     * flight, so it is safe to call on every open; it also repairs metadata that a crash
+     * left disagreeing with the shard files (see {@link #reconcileStaleMetadata}).
      */
     static void recover(Path dir) {
         Path staging = dir.resolve(STAGING_DIR);
@@ -97,26 +105,42 @@ final class StoreResharder {
         boolean hasBackup = Files.isDirectory(backup);
         Path movedMarker = backup.resolve(MOVED_MARKER);
         if (!hasStaging && !hasBackup) {
+            // No reshard is in flight. The only possible damage is metadata that still
+            // names the old shard count while the files already use the new layout - a
+            // crash that destroyed the swap evidence before the metadata was updated.
+            reconcileStaleMetadata(dir);
             return;
         }
         if (hasStaging && Files.isRegularFile(staging.resolve(COMMIT_MARKER))) {
             Integer newCount = committedShardCountIfValid(staging);
-            if (newCount != null && validStagedLayout(staging, newCount)) {
+            boolean moved = Files.isRegularFile(movedMarker);
+            // MOVED distinguishes the two ways the staged set can be incomplete: before it
+            // exists everything in dir is the old set and the staging itself must hold the
+            // whole new set; after it exists some staged files may already sit in dir, so
+            // the new layout is judged across dir and staging together. Either way the swap
+            // is only finished once every new shard is present in dir.
+            boolean swappable = newCount != null && (moved
+                    ? completeNewLayout(dir, staging, newCount)
+                    : validStagedLayout(staging, newCount));
+            if (swappable) {
                 LOGGER.log(System.Logger.Level.WARNING,
                         "Folesium: resuming an interrupted reshard of {0}", dir);
-                finishSwap(dir, staging, backup);
-                // The marker precedes metadata, so a crash in that window leaves metadata
-                // naming the old count while the files use the new layout.
+                // Make the metadata durable BEFORE finishSwap destroys the COMMIT evidence:
+                // a crash after this point leaves files and metadata agreeing even if the
+                // swap itself still has to be re-run.
                 applyShardCountMetadata(dir, newCount);
+                finishSwap(dir, staging, backup);
                 return;
             }
             LOGGER.log(System.Logger.Level.WARNING,
                     "Folesium: ignoring malformed or mismatched reshard COMMIT marker in {0}", dir);
-            if (Files.isRegularFile(movedMarker)) {
-                // MOVED is durable evidence that the old set was already displaced; never
-                // restore it merely because a stale marker is malformed.
+            if (moved) {
+                // MOVED is durable evidence that the old set was already displaced, so it
+                // must not be restored over the freshly swapped-in new files. But with the
+                // new set incomplete, the old files are also the only surviving copy of the
+                // records the missing new shards would have held: keep them. Deleting them
+                // while any new shard is still missing would silently destroy data.
                 deleteRecursively(staging);
-                deleteRecursively(backup);
                 fsyncDirectory(dir);
                 return;
             }
@@ -125,6 +149,9 @@ final class StoreResharder {
             LOGGER.log(System.Logger.Level.INFO,
                     "Folesium: removing the backup of a completed reshard of {0}", dir);
             deleteRecursively(backup);
+            // The swap evidence is gone, so bring the metadata in line with the files
+            // before the store is opened.
+            reconcileStaleMetadata(dir);
             return;
         }
         // No valid COMMIT marker: the new set was never authoritative. Restore any old files
@@ -360,6 +387,45 @@ final class StoreResharder {
         }
     }
 
+    /**
+     * True when every shard of the new layout is present in {@code dir} or still in
+     * {@code staging}, i.e. the staged-to-dir move was interrupted rather than lost and
+     * {@link #finishSwap} can drive it to completion. Only consulted once the {@code MOVED}
+     * marker exists, so the shard files in {@code dir} are freshly swapped-in new files
+     * rather than the old set.
+     */
+    private static boolean completeNewLayout(Path dir, Path staging, int count) {
+        try {
+            TreeSet<String> names = new TreeSet<>();
+            names.addAll(discoverKeyspaces(dir));
+            names.addAll(discoverKeyspaces(staging));
+            for (String name : names) {
+                for (int i = 0; i < count; i++) {
+                    if (!Files.isRegularFile(dir.resolve(String.format("%s-%04d.flog", name, i)))
+                            && !Files.isRegularFile(staging.resolve(String.format("%s-%04d.flog", name, i)))) {
+                        return false;
+                    }
+                }
+                if (countShardFiles(dir, name) + countShardFiles(staging, name) != count) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (IOException | RuntimeException e) {
+            return false;
+        }
+    }
+
+    /** Number of {@code .flog} shard files of one keyspace directly inside {@code dir}. */
+    private static long countShardFiles(Path dir, String keyspace) throws IOException {
+        try (Stream<Path> files = Files.list(dir)) {
+            return files.filter(Files::isRegularFile)
+                    .filter(p -> p.getFileName().toString().startsWith(keyspace + "-")
+                            && p.getFileName().toString().endsWith(".flog"))
+                    .count();
+        }
+    }
+
     /** Idempotently records {@code store.shardCount = newCount} (see {@link #recover}). */
     private static void applyShardCountMetadata(Path dir, int newCount) {
         Path meta = dir.resolve(FolesiumDatabase.METADATA_FILE);
@@ -384,6 +450,92 @@ final class StoreResharder {
             updateShardCountMetadata(meta, oldCount, newCount);
         } catch (IOException e) {
             throw new FolesiumException("Cannot update shard count metadata in " + dir, e);
+        }
+    }
+
+    /**
+     * Repairs metadata that was left naming the old shard count after the swap evidence
+     * was destroyed. Heals exactly one damage pattern: every keyspace on disk is uniformly
+     * laid out with a valid power-of-two shard count that differs from
+     * {@code store.shardCount} - i.e. the swap finished but the metadata update did not
+     * survive. The metadata is brought in line with the files and the store proceeds to
+     * open; a store whose files already match the metadata is left untouched.
+     */
+    private static void reconcileStaleMetadata(Path dir) {
+        Path meta = dir.resolve(FolesiumDatabase.METADATA_FILE);
+        if (!Files.isRegularFile(meta)) {
+            return;
+        }
+        int fileCount = consistentOnDiskShardCount(dir);
+        if (fileCount < 0) {
+            return;
+        }
+        Properties p = new Properties();
+        try (var reader = Files.newBufferedReader(meta, StandardCharsets.UTF_8)) {
+            p.load(reader);
+        } catch (IOException e) {
+            throw new FolesiumException("Cannot read " + meta, e);
+        }
+        String raw = p.getProperty("store.shardCount");
+        if (raw == null) {
+            return;
+        }
+        int metaCount;
+        try {
+            metaCount = Integer.parseInt(raw.trim());
+        } catch (RuntimeException e) {
+            return;
+        }
+        if (metaCount == fileCount) {
+            return;
+        }
+        LOGGER.log(System.Logger.Level.WARNING,
+                "Folesium: shard files of {0} hold {1} shards but the metadata says {2}; "
+                        + "repairing the metadata to match the files",
+                dir, fileCount, metaCount);
+        try {
+            updateShardCountMetadata(meta, metaCount, fileCount);
+        } catch (IOException e) {
+            throw new FolesiumException("Cannot repair shard count metadata in " + dir, e);
+        }
+    }
+
+    /**
+     * The shard count every keyspace's on-disk files agree on, or -1 when the layout is
+     * not uniform: keyspaces disagree with each other, a keyspace is missing shard
+     * indices, or there are no shard files at all.
+     */
+    private static int consistentOnDiskShardCount(Path dir) {
+        try (Stream<Path> files = Files.list(dir)) {
+            HashMap<String, TreeSet<Integer>> indices = new HashMap<>();
+            files.filter(Files::isRegularFile).forEach(p -> {
+                Matcher m = SHARD_FILE.matcher(p.getFileName().toString());
+                if (m.matches()) {
+                    indices.computeIfAbsent(m.group(1), k -> new TreeSet<>())
+                            .add(Integer.parseInt(m.group(2)));
+                }
+            });
+            if (indices.isEmpty()) {
+                return -1;
+            }
+            int count = -1;
+            for (TreeSet<Integer> set : indices.values()) {
+                int size = set.size();
+                if (set.first() != 0 || set.last() != size - 1) {
+                    return -1;
+                }
+                if (count == -1) {
+                    count = size;
+                } else if (count != size) {
+                    return -1;
+                }
+            }
+            if (Integer.bitCount(count) != 1 || count < 1 || count > 1024) {
+                return -1;
+            }
+            return count;
+        } catch (IOException e) {
+            return -1;
         }
     }
 

@@ -65,11 +65,11 @@ import net.minecraft.nbt.NbtIo;
  * be named {@code folesium/} without any tool confusing one for the other, and opening
  * the wrong kind fails loudly instead of corrupting data.</p>
  *
- * <h2>Lazy migration</h2>
- * <p>A player missing from the store is served from the vanilla file, exactly like
- * {@link FolesiumRegionStorage} falls back to {@code .mca}. Enabling Folesium on a world
- * that was never converted therefore keeps every player's inventory and progress intact;
- * records migrate into the store as players are saved. Vanilla files are never deleted.</p>
+ * <h2>No lazy migration</h2>
+ * <p>There is <em>no</em> vanilla-file fallback: a player absent from the store is a new
+ * player, and an existing world must be converted with {@code --folesiumConvertToFolesium}
+ * before Folesium is enabled. The vanilla per-player files are never read while Folesium
+ * is on (they are kept on disk only as a backup by the converter).</p>
  *
  * <h2>Thread model</h2>
  * <p>Safe to call from any thread. Keyspaces are sharded with per-shard locks, and player
@@ -80,24 +80,15 @@ public final class FolesiumPlayerStorage implements AutoCloseable {
     private static final System.Logger LOGGER = System.getLogger("Folesium");
 
     /**
-     * Vanilla directory names, used for the lazy-migration fallback reads. The player
-     * NBT directory is {@code <root>/data} since Minecraft 26.x
-     * ({@code LevelResource.PLAYER_DATA_DIR = "players/data"}, and this class receives
-     * {@code players/} as its root) and {@code <root>/playerdata} on older layouts --
-     * both are tried, in that order.
-     */
-    static final String DIR_DATA = "data";
-    static final String DIR_PLAYERDATA = "playerdata";
-    static final String DIR_ADVANCEMENTS = "advancements";
-    static final String DIR_STATS = "stats";
-
-    /**
      * The storage for the running server. A server has exactly one player data
      * directory, so a single handle is enough -- and it lets {@link FolesiumPlayerFiles}
      * redirect the advancement/statistics JSON without threading a reference through
      * {@code PlayerAdvancements} and {@code ServerStatsCounter}.
      */
     private static volatile FolesiumPlayerStorage active;
+
+    /** Vanilla directory grouping the per-player files on the 26.x layout. */
+    private static final String DIR_PLAYERS_26 = "players";
 
     private final Path worldRoot;
     private final Path storeDir;
@@ -150,9 +141,27 @@ public final class FolesiumPlayerStorage implements AutoCloseable {
         return storage == null || storage.closed ? null : storage;
     }
 
-    /** {@code <world>} -> {@code <world>/folesium}. */
+    /**
+     * The store directory for a world root: {@code <world>/players/folesium} on the 26.x
+     * layout, {@code <world>/folesium} on the older one. An existing store with
+     * {@code store.role=PLAYERS} at either location wins, so a world converted under one
+     * layout keeps using its store even if the directory shape changes around it (a
+     * pre-26 world upgraded to 26.x must not boot against a fresh empty store). Mirrors
+     * {@code PlayerDataConverter.storeDirectoryFor()}.
+     */
     public static Path storeDirectoryFor(Path worldRoot) {
-        return worldRoot.toAbsolutePath().normalize().resolve(FolesiumDatabase.STORE_DIR_NAME);
+        Path root = worldRoot.toAbsolutePath().normalize();
+        Path modern = root.resolve(DIR_PLAYERS_26).resolve(FolesiumDatabase.STORE_DIR_NAME);
+        Path legacy = root.resolve(FolesiumDatabase.STORE_DIR_NAME);
+        if (FolesiumDatabase.readRole(modern) == FolesiumDatabase.StoreRole.PLAYERS) {
+            return modern;
+        }
+        if (FolesiumDatabase.readRole(legacy) == FolesiumDatabase.StoreRole.PLAYERS) {
+            return legacy;
+        }
+        // Default follows the world's layout: next to players/ when present (26.x),
+        // at the world root otherwise (pre-26 layout).
+        return Files.isDirectory(root.resolve(DIR_PLAYERS_26)) ? modern : legacy;
     }
 
     /**
@@ -178,19 +187,14 @@ public final class FolesiumPlayerStorage implements AutoCloseable {
     /* ------------------------------------------------------------------ */
 
     /**
-     * Loads a player's NBT, falling back to {@code playerdata/<uuid>.dat} when the store
-     * has no record yet.
+     * Loads a player's NBT from the store. There is <em>no lazy migration</em>: a
+     * player absent from the store is a new player, and an existing world must be
+     * converted with {@code --folesiumConvertToFolesium} before Folesium is enabled.
      *
      * @return the tag, or {@code null} for a player that has never been saved
      */
     public CompoundTag loadPlayer(UUID id) throws IOException {
         byte[] raw = playerData.get(id);
-        if (raw == null) {
-            raw = readVanillaFile(DIR_DATA, id, ".dat");
-        }
-        if (raw == null) {
-            raw = readVanillaFile(DIR_PLAYERDATA, id, ".dat");
-        }
         if (raw == null) {
             return null;
         }
@@ -214,29 +218,26 @@ public final class FolesiumPlayerStorage implements AutoCloseable {
     /* advancements + statistics (JSON text)                               */
     /* ------------------------------------------------------------------ */
 
-    /** @return the stored advancement JSON, the vanilla file's contents, or {@code null} */
+    /** @return the stored advancement JSON, or {@code null} */
     public String loadAdvancements(UUID id) throws IOException {
-        return loadJson(advancements, DIR_ADVANCEMENTS, id);
+        return loadJson(advancements, id);
     }
 
     public void saveAdvancements(UUID id, String json) {
         saveJson(advancements, id, json);
     }
 
-    /** @return the stored statistics JSON, the vanilla file's contents, or {@code null} */
+    /** @return the stored statistics JSON, or {@code null} */
     public String loadStats(UUID id) throws IOException {
-        return loadJson(stats, DIR_STATS, id);
+        return loadJson(stats, id);
     }
 
     public void saveStats(UUID id, String json) {
         saveJson(stats, id, json);
     }
 
-    private String loadJson(Keyspace keyspace, String vanillaDir, UUID id) throws IOException {
+    private String loadJson(Keyspace keyspace, UUID id) throws IOException {
         byte[] raw = keyspace.get(id);
-        if (raw == null) {
-            raw = readVanillaFile(vanillaDir, id, ".json");
-        }
         return raw == null ? null : new String(raw, StandardCharsets.UTF_8);
     }
 
@@ -245,31 +246,6 @@ public final class FolesiumPlayerStorage implements AutoCloseable {
             keyspace.delete(id);
         } else {
             keyspace.put(id, json.getBytes(StandardCharsets.UTF_8));
-        }
-    }
-
-    /* ------------------------------------------------------------------ */
-    /* lazy migration                                                      */
-    /* ------------------------------------------------------------------ */
-
-    /**
-     * Reads the vanilla file for a player that is not in the store yet. A read failure is
-     * logged and treated as "no data" rather than propagated: refusing to let a player log
-     * in because their old file is unreadable would be worse than letting vanilla's own
-     * missing-file path create a fresh profile, which is exactly what would happen without
-     * Folesium.
-     */
-    private byte[] readVanillaFile(String dirName, UUID id, String extension) {
-        Path file = worldRoot.resolve(dirName).resolve(id + extension);
-        if (!Files.isRegularFile(file)) {
-            return null;
-        }
-        try {
-            return Files.readAllBytes(file);
-        } catch (IOException e) {
-            LOGGER.log(System.Logger.Level.WARNING,
-                    "Folesium: could not read vanilla player file {0}: {1}", file, e.getMessage());
-            return null;
         }
     }
 

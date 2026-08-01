@@ -99,19 +99,16 @@ public final class PlayerDataConverter {
         return Files.isDirectory(players) ? players : worldRoot;
     }
 
+    /**
+     * The mapping set follows the world's layout, not the store's location: a world
+     * with a {@code players/} directory uses the 26.x directories even when an
+     * existing PLAYERS store sits at the legacy world-root location (see
+     * {@link #storeDirectoryFor}). The vanilla root is therefore always derived
+     * from the world layout via {@link #playerRootFor}; the store location is used
+     * for the store itself only.
+     */
     private static List<Mapping> mappingsFor(Path worldRoot, Path playerRoot) {
         return playerRoot.equals(worldRoot) ? LEGACY_MAPPINGS : MODERN_MAPPINGS;
-    }
-
-    /**
-     * The vanilla files always live next to the store, so once a store location is
-     * fixed the store's parent is the player root -- this keeps a conversion coherent
-     * even if a world somehow has both a {@code players/} directory and a legacy
-     * world-root store.
-     */
-    private static Path playerRootOf(Path worldRoot, Path storeDir) {
-        Path parent = storeDir.getParent();
-        return parent != null ? parent : playerRootFor(worldRoot);
     }
 
     private static final Pattern UUID_FILE = Pattern.compile(
@@ -178,7 +175,7 @@ public final class PlayerDataConverter {
         long entries = 0;
         long bytes = 0;
 
-        Path playerRoot = playerRootOf(worldRoot, storeDir);
+        Path playerRoot = playerRootFor(worldRoot);
         try (FolesiumDatabase db = FolesiumDatabase.open(storeDir,
                 config.withDurability(FolesiumConfig.DurabilityMode.EXPLICIT),
                 FolesiumDatabase.StoreRole.PLAYERS)) {
@@ -221,7 +218,7 @@ public final class PlayerDataConverter {
             return new Stats(0, 0, (System.nanoTime() - start) / 1_000_000);
         }
 
-        Path playerRoot = playerRootOf(worldRoot, storeDir);
+        Path playerRoot = playerRootFor(worldRoot);
         // Export only: read the existing layout without rewriting it first.
         try (FolesiumDatabase db = FolesiumDatabase.open(storeDir,
                 FolesiumConfig.defaults().withDurability(FolesiumConfig.DurabilityMode.EXPLICIT),

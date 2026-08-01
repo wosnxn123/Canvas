@@ -122,8 +122,8 @@ public final class FolesiumPlayerFiles {
             return Files.isRegularFile(path);
         }
         try {
-            // load() already falls back to the vanilla file, so a `true` here means
-            // "there is data to read", whether it lives in the store or still on disk.
+            // `true` means "there is data to read" in the store; there is no
+            // vanilla-file fallback (no lazy migration).
             return load(t) != null;
         } catch (IOException e) {
             return Files.isRegularFile(path);

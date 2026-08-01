@@ -18,7 +18,6 @@
 
 package dev.folesium.integration;
 
-import dev.folesium.anvil.AnvilRegionFile;
 import dev.folesium.core.FolesiumDatabase;
 import dev.folesium.core.FolesiumRegistry;
 import dev.folesium.core.Keyspace;
@@ -29,11 +28,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtAccounter;
@@ -56,13 +52,10 @@ import net.minecraft.nbt.NbtIo;
  * Nothing in this class touches the main thread or any region-specific state, and no
  * lock is held across an NBT (de)serialisation.</p>
  *
- * <h2>Lazy migration</h2>
- * <p>When Folesium is enabled on a world that has not yet been converted, chunks
- * missing from the store are served from the original Anvil region files on read.
- * This keeps an un-converted world fully playable the moment Folesium is switched on,
- * and--combined with the merge-mode converter--makes the "enable Folesium, then convert
- * later" workflow data-safe: chunks a running server has already migrated (or edited)
- * are never clobbered by the older Anvil bytes.</p>
+ * <p>There is <em>no lazy migration</em>: a chunk missing from the store is simply
+ * absent (the world is generated fresh), and an existing Anvil world must be
+ * converted with {@code --folesiumConvertToFolesium} <em>before</em> Folesium is
+ * enabled. The vanilla {@code .mca} files are never read once Folesium is on.</p>
  */
 public final class FolesiumRegionStorage implements AutoCloseable {
 
@@ -70,8 +63,6 @@ public final class FolesiumRegionStorage implements AutoCloseable {
 
     /** Directory of the shared per-dimension store (used to release the registry reference). */
     private final Path storeDir;
-    /** The original Anvil folder this store was created from (used for lazy migration reads). */
-    private final Path anvilFolder;
     private final String keyspaceName;
     private final FolesiumDatabase database;
     private final Keyspace keyspace;
@@ -83,15 +74,7 @@ public final class FolesiumRegionStorage implements AutoCloseable {
     private final java.util.concurrent.atomic.AtomicBoolean closed =
             new java.util.concurrent.atomic.AtomicBoolean();
 
-    /**
-     * Region keys whose {@code .mca} file is known to be absent. Used to skip the
-     * stat/opens for regions already proven missing during lazy migration, avoiding
-     * repeated filesystem probes for chunks that will never be found in Anvil.
-     */
-    private final Set<Long> anvilMissing = ConcurrentHashMap.newKeySet();
-
-    private FolesiumRegionStorage(Path anvilFolder, Path storeDir, String keyspaceName, FolesiumDatabase database) {
-        this.anvilFolder = anvilFolder;
+    private FolesiumRegionStorage(Path storeDir, String keyspaceName, FolesiumDatabase database) {
         this.storeDir = storeDir;
         this.keyspaceName = keyspaceName;
         this.database = database;
@@ -110,7 +93,7 @@ public final class FolesiumRegionStorage implements AutoCloseable {
         String keyspaceName = keyspaceFor(folder);
         FolesiumDatabase db = FolesiumRegistry.acquire(storeDir);
         LOGGER.log(System.Logger.Level.INFO, "Folesium: {0} -> {1}#{2}", folder, storeDir, keyspaceName);
-        return new FolesiumRegionStorage(folder, storeDir, keyspaceName, db);
+        return new FolesiumRegionStorage(storeDir, keyspaceName, db);
     }
 
     /**
@@ -119,15 +102,15 @@ public final class FolesiumRegionStorage implements AutoCloseable {
      * <p>The world root's player store is called {@code folesium/} too; the two are told
      * apart by the {@code store.role} recorded in each store's metadata, never by path.</p>
      */
-    public static Path storeDirectoryFor(Path anvilFolder) {
-        Path parent = anvilFolder.toAbsolutePath().normalize().getParent();
+    public static Path storeDirectoryFor(Path folder) {
+        Path parent = folder.toAbsolutePath().normalize().getParent();
         String name = FolesiumDatabase.STORE_DIR_NAME;
-        return parent == null ? anvilFolder.resolve(name) : parent.resolve(name);
+        return parent == null ? folder.resolve(name) : parent.resolve(name);
     }
 
     /** {@code region} -> {@code chunks}, {@code poi} -> {@code poi}, {@code entities} -> {@code entities}. */
-    public static String keyspaceFor(Path anvilFolder) {
-        Path name = anvilFolder.getFileName();
+    public static String keyspaceFor(Path folder) {
+        Path name = folder.getFileName();
         String raw = name == null ? "misc" : name.toString().toLowerCase(Locale.ROOT);
         return switch (raw) {
             case "region" -> FolesiumDatabase.KS_CHUNKS;
@@ -186,43 +169,13 @@ public final class FolesiumRegionStorage implements AutoCloseable {
 
     public CompoundTag read(int chunkX, int chunkZ) throws IOException {
         byte[] data = readRaw(chunkX, chunkZ);
-        if (data != null) {
-            return deserialise(data);
-        }
-        // Lazy migration: a chunk absent from the Folesium store is served from the
-        // original Anvil region file. This keeps an un-converted world fully playable
-        // the instant Folesium is enabled, and together with the merge-mode converter
-        // it makes the "enable Folesium, then convert later" workflow data-safe.
-        return readFromAnvil(chunkX, chunkZ);
-    }
-
-    private CompoundTag readFromAnvil(int chunkX, int chunkZ) throws IOException {
-        if (anvilFolder == null) {
+        if (data == null) {
+            // No lazy migration: a chunk absent from the store is absent. An existing
+            // Anvil world must be converted with --folesiumConvertToFolesium before
+            // Folesium is enabled; the .mca files are never read while Folesium is on.
             return null;
         }
-        int regionX = chunkX >> 5;
-        int regionZ = chunkZ >> 5;
-        long regionKey = (((long) regionX) << 32) | (regionZ & 0xFFFFFFFFL);
-        if (anvilMissing.contains(regionKey)) {
-            return null;
-        }
-        Path mca = anvilFolder.resolve(String.format("r.%d.%d.mca", regionX, regionZ));
-        if (!Files.isRegularFile(mca)) {
-            anvilMissing.add(regionKey);
-            return null;
-        }
-        // Open the region file on demand and close it immediately: keeping a reader
-        // cached per region would leak file descriptors on a large, long-running,
-        // un-converted world. The cost of re-opening is a couple of header reads, which
-        // is negligible next to the chunk load itself.
-        try (AnvilRegionFile rf = new AnvilRegionFile(mca)) {
-            byte[] raw = rf.readChunk(chunkX & 31, chunkZ & 31);
-            return raw == null ? null : deserialise(raw);
-        } catch (IOException e) {
-            LOGGER.log(System.Logger.Level.WARNING,
-                    "Folesium: Anvil fallback read failed for {0}: {1}", mca, e.getMessage());
-            return null;
-        }
+        return deserialise(data);
     }
 
     public void writeRaw(int chunkX, int chunkZ, byte[] data) {
@@ -251,7 +204,6 @@ public final class FolesiumRegionStorage implements AutoCloseable {
         if (!closed.compareAndSet(false, true)) {
             return;
         }
-        anvilMissing.clear();
         keyspace.flush();
         // Pass the instance we actually hold: if the registry has since reopened the store
         // (e.g. after closeAll()), this release must not decrement the new one.

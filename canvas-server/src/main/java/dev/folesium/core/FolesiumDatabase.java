@@ -584,12 +584,18 @@ public final class FolesiumDatabase implements AutoCloseable {
 
     /** fsyncs every dirty shard of every open keyspace. */
     public void flush() {
+        if (closed.get()) {
+            return; // close() already forced every shard; nothing left to flush
+        }
         for (Keyspace ks : keyspaces.values()) {
             ks.flush();
         }
     }
 
     public void compactIfNeeded() {
+        if (closed.get()) {
+            return; // do not touch shards that close() is tearing down
+        }
         for (Keyspace ks : keyspaces.values()) {
             ks.compactIfNeeded();
         }

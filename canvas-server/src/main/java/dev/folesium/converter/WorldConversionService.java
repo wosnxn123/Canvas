@@ -134,6 +134,19 @@ public final class WorldConversionService {
             switch (dir) {
                 case TO_FOLESIUM -> {
                     if (!hasAnvil) continue;
+                    // A pre-1.21 world root is both a dimension (it holds region/ etc.)
+                    // and the host of the legacy player store: the dimension store the
+                    // converter would open here is the very same directory as the player
+                    // store, and opening it as a DIMENSION store would throw ("Refusing to
+                    // mix player data and chunk data in one store"). Skip the root
+                    // dimension and say why; its Anvil data stays on disk unconverted.
+                    if (FolesiumDatabase.readRole(folesiumStore) == FolesiumDatabase.StoreRole.PLAYERS) {
+                        System.out.println("Folesium: skipped dimension " + dim + ": " + folesiumStore
+                                + " already holds the player store (role=PLAYERS). On a pre-1.21 world");
+                        System.out.println("Folesium: the root dimension cannot get its own store (path collision with");
+                        System.out.println("Folesium: the player store), so its Anvil data (region/, entities/, poi/) is left unconverted.");
+                        continue;
+                    }
                     stats = converter.anvilToFolesium(dim, folesiumStore, config);
                 }
                 case TO_ANVIL -> {
@@ -192,6 +205,9 @@ public final class WorldConversionService {
         for (Path p : kept) {
             System.out.println("    " + p);
         }
+        System.out.println("Folesium: replaced vanilla trees were kept too, as .folesium-backup-* siblings of the");
+        System.out.println("Folesium: restored directories (e.g. <dir>.folesium-backup-<id>/); backup trees from");
+        System.out.println("Folesium: earlier conversions are pruned, so backups do not accumulate across runs.");
         System.out.println("Folesium: delete them manually once the restored world is verified - and always BEFORE");
         System.out.println("Folesium: converting back to Folesium if you have played on Anvil in the meantime.");
     }
@@ -241,10 +257,13 @@ public final class WorldConversionService {
      *
      * <p>The scan is recursive and stops descending once a dimension directory is
      * found, so arbitrarily nested modded dimension layouts
-     * ({@code dimensions/<ns>/<path>/<path>/...}) are discovered correctly. It does
-     * not classify path components by basename: names such as {@code data},
-     * {@code region}, {@code entities} and {@code poi} are all legal dimension
-     * components.</p>
+     * ({@code dimensions/<ns>/<path>/<path>/...}) are discovered correctly. A world
+     * root that is itself a dimension is still walked: only its well-known data
+     * directories ({@code region/}, {@code entities/}, {@code poi/},
+     * {@code folesium/}) are pruned by name, so pre-1.21 sibling dimensions
+     * ({@code DIM1/}, {@code DIM-1/}) and a {@code dimensions/} sub-tree are
+     * discovered too. Basenames are otherwise not classified: names such as
+     * {@code data} are legal dimension components.</p>
      */
     static List<Path> discoverDimensions(Path worldRoot) throws IOException {
         List<Path> out = new ArrayList<>();
@@ -257,10 +276,12 @@ public final class WorldConversionService {
             @Override
             public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
                 if (dir.equals(worldRoot)) {
-                    // A root dimension was already recorded above; do not walk its
-                    // region files as if they were candidate dimensions.
-                    return isDimensionDirectory(dir)
-                            ? FileVisitResult.SKIP_SUBTREE : FileVisitResult.CONTINUE;
+                    // A root dimension was already recorded above, but its children must
+                    // still be visited: a pre-1.21 world root (region/ etc.) also has
+                    // sibling dimensions (DIM1/, DIM-1/) and possibly a dimensions/
+                    // sub-tree. Only the root's own data directories are pruned, by
+                    // name, in the generic branch below.
+                    return FileVisitResult.CONTINUE;
                 }
                 if (seen.contains(dir)) {
                     return FileVisitResult.SKIP_SUBTREE;
@@ -268,6 +289,13 @@ public final class WorldConversionService {
                 if (isDimensionDirectory(dir)) {
                     out.add(dir);
                     seen.add(dir);
+                    return FileVisitResult.SKIP_SUBTREE;
+                }
+                // Prune the world root's own data directories (region/ etc. and the
+                // folesium/ player store) by name so the walk does not descend into
+                // them; anything deeper keeps the generic discovery, because a
+                // dimension may legitimately be nested under such a name.
+                if (dir.getParent().equals(worldRoot) && isWellKnownDataDir(dir)) {
                     return FileVisitResult.SKIP_SUBTREE;
                 }
                 return FileVisitResult.CONTINUE;
@@ -279,6 +307,22 @@ public final class WorldConversionService {
             }
         });
         return out;
+    }
+
+    /**
+     * The well-known data directories of a dimension ({@code region/},
+     * {@code entities/}, {@code poi/}) and the Folesium store directories
+     * ({@code folesium/}) are never candidate dimensions. They are pruned by name
+     * only when they are direct children of the world root (a root dimension's own
+     * data, or a legacy root player store); a directory that <em>is</em> a
+     * dimension is matched by {@link #isDimensionDirectory} before this check, so
+     * a dimension legitimately named {@code region} or similar is never hidden by
+     * it.
+     */
+    private static boolean isWellKnownDataDir(Path dir) {
+        String name = dir.getFileName().toString();
+        return name.equals("region") || name.equals("entities") || name.equals("poi")
+                || name.equals(FolesiumDatabase.STORE_DIR_NAME);
     }
 
     private static boolean hasAnvilData(Path dir) {

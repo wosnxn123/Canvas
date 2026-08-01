@@ -28,6 +28,8 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -125,7 +127,16 @@ public final class ShardFile implements AutoCloseable {
                 writeFileHeader();
                 this.writePos = FILE_HEADER_LEN;
             } else {
-                validateFileHeader();
+                try {
+                    validateFileHeader();
+                } catch (FolesiumException | EOFException tornHeader) {
+                    // The file is non-empty but its header is unusable - a crash tore the shard
+                    // before a valid header was ever written (or the file is garbage). There is
+                    // no valid header to anchor the record-level scan below, so treat the whole
+                    // shard as torn: discard it and start fresh. Shards with a valid header are
+                    // unaffected - scanAndRecover() keeps handling torn tails.
+                    discardTornShard(tornHeader.toString());
+                }
                 if (!tryLoadHint()) {
                     scanAndRecover();
                 }
@@ -205,6 +216,26 @@ public final class ShardFile implements AutoCloseable {
             throw new FolesiumException("Shard topology mismatch in " + path
                     + " (file: " + idx + "/" + count + ", expected: " + shardIndex + "/" + shardCount + ")");
         }
+    }
+
+    /**
+     * Discards a shard whose header could not be validated: truncates the file to zero,
+     * writes a fresh header and rewinds the write position, so a header torn by a crash
+     * (or a garbage file) no longer prevents the store from opening.
+     */
+    private void discardTornShard(String detail) throws IOException {
+        LOGGER.log(System.Logger.Level.WARNING,
+                "Folesium recovery: shard {0} has a torn/corrupt header ({1}); truncating it and starting fresh",
+                path, detail);
+        try {
+            Files.deleteIfExists(hintPath); // stale hint describes the discarded log
+        } catch (IOException e) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium recovery: could not delete stale hint {0}: {1}", hintPath, e.toString());
+        }
+        channel.truncate(0);
+        writeFileHeader();
+        this.writePos = FILE_HEADER_LEN;
     }
 
     /** Full sequential scan; truncates at the first torn/corrupt record. */
@@ -362,7 +393,7 @@ public final class ShardFile implements AutoCloseable {
             b.putInt((int) crc.getValue());
             Path tmp = hintPath.resolveSibling(hintPath.getFileName() + ".tmp");
             Files.write(tmp, b.array());
-            Files.move(tmp, hintPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            moveReplacing(tmp, hintPath);
         } catch (IOException e) {
             LOGGER.log(System.Logger.Level.WARNING, "Folesium: failed to write hint {0}: {1}", hintPath, e.toString());
         }
@@ -552,6 +583,11 @@ public final class ShardFile implements AutoCloseable {
         lock.writeLock().lock();
         try {
             if (dirty) {
+                if (!channel.isOpen()) {
+                    // Closed concurrently (e.g. by a racing closeAll()): close() already
+                    // forced this shard, so there is nothing left to fsync.
+                    return;
+                }
                 channel.force(false);
                 dirty = false;
             }
@@ -578,8 +614,11 @@ public final class ShardFile implements AutoCloseable {
      * <p>The replacement is built beside the live file and only swapped in once it is
      * complete and fsynced, so a crash at any point leaves the original log intact (the
      * leftover {@code .compact} file is ignored by everything and removed on the next
-     * successful compaction). A failure <em>before</em> the swap reopens the original
-     * channel, so a shard that could not be compacted stays fully usable.</p>
+     * successful compaction). The swap is only declared complete after the compacted file
+     * has been reopened; if that reopen fails, the pre-compaction data is copied back over
+     * the compacted file and the shard keeps serving its old state. A failure before the
+     * swap leaves the original channel untouched, so a shard that could not be compacted
+     * stays fully usable.</p>
      */
     public void compact() {
         lock.writeLock().lock();
@@ -613,14 +652,30 @@ public final class ShardFile implements AutoCloseable {
             // The stale hint describes the pre-compaction log; drop it first so a crash in the
             // middle of the swap can never pair the new file with the old index.
             Files.deleteIfExists(hintPath);
-            channel.close();
-            Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-            swapped = true;
-            channel = FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE);
+            // The old channel stays open across the swap: it still refers to the pre-compaction
+            // data and is the fallback if the compacted file cannot be reopened.
+            moveReplacing(tmp, path);
+            FileChannel reopened;
+            try {
+                reopened = FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE);
+            } catch (IOException reopenFailure) {
+                // The swap must not be declared complete unless the compacted file is open again.
+                restoreOldShardAfterFailedReopen(reopenFailure);
+                return;
+            }
+            try {
+                channel.close();
+            } catch (IOException closeFailure) {
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Folesium: failed to close the pre-compaction channel of {0}: {1}",
+                        path, closeFailure.toString());
+            }
+            channel = reopened;
             index = newIndex;
             writePos = pos;
             deadBytes = 0;
             dirty = false;
+            swapped = true;
         } catch (IOException e) {
             FolesiumException failure = new FolesiumException("Compaction failed for " + path, e);
             if (!swapped && !channel.isOpen()) {
@@ -642,6 +697,44 @@ public final class ShardFile implements AutoCloseable {
             }
             lock.writeLock().unlock();
         }
+    }
+
+    /**
+     * Best-effort rollback when the compacted file was moved into place but could not be
+     * reopened: copies the pre-compaction data - still reachable through the old channel -
+     * back over {@code path} so the shard keeps serving its old state with the old channel.
+     * Throws when the restore itself fails, in which case the compaction failure propagates
+     * with both errors attached.
+     */
+    private void restoreOldShardAfterFailedReopen(IOException reopenFailure) throws IOException {
+        IOException restoreFailure = null;
+        try {
+            long oldSize = channel.size();
+            try (FileChannel restore = FileChannel.open(path,
+                    StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
+                long written = 0;
+                while (written < oldSize) {
+                    long n = channel.transferTo(written, oldSize - written, restore);
+                    if (n <= 0) {
+                        throw new EOFException("Could not copy the pre-compaction data back to " + path);
+                    }
+                    written += n;
+                }
+                restore.force(false);
+            }
+        } catch (IOException e) {
+            restoreFailure = e;
+        }
+        if (restoreFailure != null) {
+            restoreFailure.addSuppressed(reopenFailure);
+            throw new FolesiumException("Compaction failed for " + path
+                    + ": could not reopen the compacted shard, and restoring the previous shard failed too",
+                    restoreFailure);
+        }
+        LOGGER.log(System.Logger.Level.ERROR,
+                "Folesium: compaction of {0} could not reopen the compacted file ({1}); "
+                        + "the previous shard was restored and remains in use",
+                path, reopenFailure.toString());
     }
     /** Iterates all live entries (key, decompressed value). */
     public void forEach(BiConsumer<byte[], byte[]> consumer) {
@@ -731,6 +824,22 @@ public final class ShardFile implements AutoCloseable {
     }
 
     // ---------------------------------------------------------------- helpers
+
+    /**
+     * Moves {@code source} over {@code target}, preferring an atomic replace but falling back
+     * to a plain replace move on filesystems that do not support atomic moves (reported either
+     * as {@link AtomicMoveNotSupportedException} or as a generic filesystem error).
+     */
+    private static void moveReplacing(Path source, Path target) throws IOException {
+        try {
+            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException e) {
+            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
+        } catch (FileSystemException e) {
+            // Some platforms report missing atomic-replace support as a generic filesystem error.
+            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
 
     private void readFully(ByteBuffer buf, long pos) throws IOException {
         long p = pos;

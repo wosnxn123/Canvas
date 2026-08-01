@@ -71,6 +71,14 @@ public final class AnvilRegionFile implements Closeable {
      */
     private static final int EXTERNAL_FLAG = 0x80;
 
+    /**
+     * Upper bound for a decompressed chunk payload. Vanilla caps a single chunk at 1 MiB
+     * and routes anything larger to an external {@code .mcc} file, so 32 MiB is far above
+     * any legitimate payload while still stopping decompression bombs (a small stub can
+     * expand to gigabytes).
+     */
+    public static final int MAX_CHUNK_PAYLOAD_BYTES = 32 * 1024 * 1024;
+
     /** {@code r.<regionX>.<regionZ>.mca}, the only naming Anvil uses. */
     private static final java.util.regex.Pattern REGION_NAME =
             java.util.regex.Pattern.compile("^r\\.(-?\\d+)\\.(-?\\d+)\\.mc[ar]$");
@@ -196,13 +204,18 @@ public final class AnvilRegionFile implements Closeable {
             buf.position(5);
             buf.get(data);
         }
-        return switch (compressionType) {
+        byte[] payload = switch (compressionType) {
             case COMPRESSION_GZIP -> readAll(new GZIPInputStream(new ByteArrayInputStream(data)));
             case COMPRESSION_ZLIB -> readAll(new InflaterInputStream(new ByteArrayInputStream(data)));
             case COMPRESSION_NONE -> data;
             case COMPRESSION_LZ4 -> Lz4Native.decompress(data);
             default -> throw new IOException("Unknown chunk compression type " + compressionType);
         };
+        if (payload.length > MAX_CHUNK_PAYLOAD_BYTES) {
+            throw new IOException("Decompressed chunk payload of " + payload.length
+                    + " bytes exceeds the " + MAX_CHUNK_PAYLOAD_BYTES + " byte limit");
+        }
+        return payload;
     }
 
     /** Location of the external payload of an oversized chunk. */
