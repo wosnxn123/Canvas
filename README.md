@@ -1,3 +1,14 @@
+## Folesium 存储后端（本 fork）
+
+本 fork 通过 `folesium-integration/` 目录附带 [Folesium](https://github.com/wosnxn123/Folesium)
+世界存储后端，作为 Anvil `.mca` 文件的**可选**替代——覆盖区块、实体、POI **与**玩家数据。
+
+* **完整使用与配置指南：**
+  [`folesium-integration/USAGE.zh.md`](folesium-integration/USAGE.zh.md)
+  （[English](folesium-integration/USAGE.md)）
+* 构建带 Folesium 的服务端：`./folesium-integration/setup-folesium.sh`
+* 不加 `-Dfolesium.enabled=true` 时，服务端行为与不带 Folesium 的 Canvas 完全一致。
+
 ## Fork 修改说明
 
 本 fork 基于 Canvas（Folia 下游），针对上游 Canvas 的两个问题进行了修改：

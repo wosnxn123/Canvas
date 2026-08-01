@@ -174,16 +174,9 @@ verifyChecksums=true
 
 ## 5. Adopting Folesium on an existing world
 
-Three equivalent paths — pick one. **Back up your world first** in every case.
+One path. **Back up your world first.**
 
-### 5a. Lazy migration (zero downtime beyond a restart)
-
-Just enable Folesium and start. Any chunk or player missing from the store is read from
-the original `.mca`/player files on demand, and migrates into the store when saved. The
-world is fully playable from the first second; the store fills up as the world is
-visited.
-
-### 5b. One-shot conversion (Cesium-style startup flags, recommended)
+### 5a. One-shot conversion (Cesium-style startup flags, recommended)
 
 ```bash
 # server stopped:
@@ -193,8 +186,8 @@ java -Dfolesium.enabled=true -jar <fork>-paperclip-*.jar --nogui       # start o
 
 * Converts **all dimensions** (recursively discovered, modded layouts included) **and
   the player data** in one run, multi-threaded.
-* The conversion **merges**: records already in the store (e.g. written live under 5a)
-  always win over the older files — safe to run after having played with 5a.
+* The conversion **merges**: records already in the store always win over the older
+  files.
 * Idempotent and crash-safe: re-running fills only the gaps.
 * `--folesiumWorldDir <path>` overrides the world location; the level name otherwise
   comes from `server.properties`.
