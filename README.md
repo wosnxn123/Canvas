@@ -77,9 +77,15 @@
 
 2026-07-14 已与 `LophineCraft/Lophine` `dev/26.2@f4aea025` 复核：0048 仍覆盖相同的 17 个原版机制；0013 和已更名的 `0014-Old-leader-zombie-health-logic.patch` 与本 fork 的两个 OldFeature 选项语义一致。
 
-2026-07-26 复核（来源仓库已改组 + 硬分叉）：组织更名为 `LophineLabs/Lophine`（旧地址 301 重定向，`f4aea025` 仍可达）；2026-07-17 从 Luminol 硬分叉，默认分支变为 `dev/26.2-hardfork`，feature 补丁由 49 个增至 130 个，三个来源补丁因此被重新编号为 `0129` / `0094` / `0095`——但**内容与 `f4aea025` 逐字节相同**，本 fork 的 0003 无需重新移植。因 Lophine 会随补丁集变动重新编号，后续复核请按文件名关键词定位来源，不要按编号。详见 [`PROVENANCE.md`](PROVENANCE.md)。
+2026-07-26 复核（来源仓库已改组 + 硬分叉）：组织更名为 `LophineLabs/Lophine`（旧地址 301 重定向，`f4aea025` 仍可达）；2026-07-17 从 Luminol 硬分叉，默认分支变为 `ver/26.2-hardfork`（早期曾用名 `dev/26.2-hardfork`），feature 补丁由 49 个增至 130 个，三个来源补丁因此被重新编号为 `0129` / `0094` / `0095`——但**内容与 `f4aea025` 逐字节相同**，本 fork 的 0003 无需重新移植。因 Lophine 会随补丁集变动重新编号，后续复核请按文件名关键词定位来源，不要按编号。详见 [`PROVENANCE.md`](PROVENANCE.md)。
 
 同日补齐 `old-feature` 段剩余 4 个字段（`spawn-invulnerable-time` / `old-explosion-damage-calculator` / `old-raid-behavior` / `villager-void-trade`），至此与 Lophine `OldFeatureConfig` 的 6 字段完全对齐；0003 由 23 个文件扩到 28 个。同时复核确认 0129 未把任何机制拆分到硬分叉新增的其他补丁里——0129 触碰的 17 个文件全部仍在 0003 覆盖范围内，本 fork 没有漏移植。
+
+2026-08-01 复核（`ver/26.2-hardfork@302825cc`）：
+
+- 0129 与 0724ba3f 基线相比仅 `ServerPlayer.java`、`LivingEntity.java` 两个文件的 hunk 上下文/索引偏移，**+/- 行内容逐字符一致**；其余 15 个文件字节相同。无行为或配置变化，0003 无需重新移植。
+- 0094 / 0095 字节相同；0096（免伤）仅 `Update Folia` 提交造成的 git index 头重算，hunk 内容一致。
+- Leaves 侧三个来源在 `LeavesMC/Leaves` master 上已重编号：`0134-Old-wet-tnt-explode-behavior` → `0125`、`0114-Old-raid-behavior` → `0101`、`0088-Configurable-trading-with-the-void` → `0005-Configurable-void-trade`；注入逻辑与配置键（`tntWetExplosionNoItemDamage` / `oldRaidBehavior` / `voidTrade`）与 pin commit 语义一致，只有 1.21.11 rebase 带来的机械性上下文变化。
 
 **Canvas 自有源码改动**（`canvas-server/src/main/java/io/canvasmc/canvas/GlobalConfiguration.java`，非 patch）：新增 `VanillaLikeExperience` 配置段（`enabled` + `commandBlocks` 字段）。
 

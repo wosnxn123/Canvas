@@ -174,12 +174,13 @@ Two upstream changes affect how a reviewer locates these sources today:
    serves the old URLs via HTTP 301, and `f4aea025` remains reachable under the
    new organisation. Old links in git history must not be rewritten.
 2. **Hard fork and patch renumbering.** On 2026-07-17 Lophine hard-forked from
-   Luminol. The default branch became `dev/26.2-hardfork` and the feature patch
+   Luminol. The default branch became `ver/26.2-hardfork` (earlier documented as
+   `dev/26.2-hardfork`; renamed upstream) and the feature patch
    set grew from 49 to 130 files, which renumbered all three sources. The patch
    contents at the new numbers are byte-identical to the revisions ported here
-   (verified 2026-07-26 against `dev/26.2-hardfork@0724ba3f`):
+   (verified 2026-07-26 against `ver/26.2-hardfork@0724ba3f`):
 
-   | Ported source at `f4aea025` | Same patch on `dev/26.2-hardfork` | Content delta |
+   | Ported source at `f4aea025` | Same patch on `ver/26.2-hardfork` | Content delta |
    | --- | --- | --- |
    | `0048-Add-Vanilla-like-experience-Config.patch` | `0129-Add-Vanilla-like-experience-Config.patch` | none (identical) |
    | `0013-Old-zombie-reinforcement.patch` | `0094-Old-zombie-reinforcement.patch` | none (identical) |
@@ -190,13 +191,30 @@ re-verification must locate these sources **by file-name keyword**
 (`Vanilla-like-experience-Config`, `Old-zombie-reinforcement`,
 `Old-leader-zombie-health-logic`) rather than by patch number.
 
+Re-verified 2026-08-01 against `ver/26.2-hardfork@302825cc`:
+
+- `0129`: 15 of 17 files byte-identical; only `ServerPlayer.java` and
+  `LivingEntity.java` differ, and only in hunk context/index metadata — the
+  `+`/`-` lines are character-identical. No behavior or config-key change.
+- `0094` / `0095`: byte-identical. `0096` (`Spawn-invulnerable-time`): one
+  cosmetic `index` header regeneration from the `Update Folia` sync; hunks
+  identical.
+- Leaves-side sources were renumbered on `LeavesMC/Leaves` master
+  (`0134-Old-wet-tnt-explode-behavior` → `0125`, `0114-Old-raid-behavior` →
+  `0101`, `0088-Configurable-trading-with-the-void` → `0005-Configurable-void-trade`);
+  injected logic and config keys (`tntWetNoItemDamage`, `oldRaidBehavior`,
+  `voidTrade`) are semantically identical to the pinned commits — only
+  mechanical 1.21.11 rebase context changes.
+
+Conclusion: Canvas 0003 needs no re-port.
+
 The MIT opt-in for Helvetica Volubi `<suisuroru@blue-millennium.fun>` is still
 listed in the current
-[`LICENSE.md`](https://github.com/LophineLabs/Lophine/blob/dev/26.2-hardfork/LICENSE.md),
+[`LICENSE.md`](https://github.com/LophineLabs/Lophine/blob/ver/26.2-hardfork/LICENSE.md),
 whose full license texts now live in
-[`licenses/GPL.md`](https://github.com/LophineLabs/Lophine/blob/dev/26.2-hardfork/licenses/GPL.md)
+[`licenses/GPL.md`](https://github.com/LophineLabs/Lophine/blob/ver/26.2-hardfork/licenses/GPL.md)
 and
-[`licenses/MIT.md`](https://github.com/LophineLabs/Lophine/blob/dev/26.2-hardfork/licenses/MIT.md).
+[`licenses/MIT.md`](https://github.com/LophineLabs/Lophine/blob/ver/26.2-hardfork/licenses/MIT.md).
 
 ### License notices
 
