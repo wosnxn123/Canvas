@@ -168,8 +168,10 @@ clear message.
 better ratio — or 4 for the DEFLATE fallback.
 
 Changing `compression` / `compressionLevel` only affects **new** writes (every record
-stores its own codec, so no migration is needed). To re-codec an existing store
-entirely, rebuild it via the two-step conversion (§5).
+stores its own codec, so no migration is needed). Loading or saving chunks does **not**
+re-encode existing records; compaction rewrites a shard with the current settings when it
+has enough dead bytes (a gradual, opportunistic re-encode). The only reliable way to
+re-codec an entire store is to rebuild it via the two-step conversion (§5).
 
 Example of a durability-first setup:
 
