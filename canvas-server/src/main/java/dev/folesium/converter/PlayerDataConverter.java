@@ -306,7 +306,11 @@ public final class PlayerDataConverter {
             }
             movePath(staging, destination, true);
         } catch (IOException failure) {
-            if (Files.exists(destination)) {
+            if (backedUp && Files.exists(destination)) {
+                // The staging-to-destination move may have partially replaced the
+                // destination, so clean it up before restoring the backup. When the
+                // destination-to-backup move failed (backedUp == false), the
+                // destination is still the intact original and must NOT be deleted.
                 deleteTreeQuietly(destination);
             }
             if (backedUp && Files.exists(backup)) {
@@ -338,7 +342,10 @@ public final class PlayerDataConverter {
             s.filter(p -> p.getFileName().toString().startsWith(prefix))
                     .forEach(backups::add);
         }
-        backups.sort(Comparator.comparingLong(PlayerDataConverter::lastModifiedMillis).reversed());
+        backups.sort(Comparator
+                .comparingLong(PlayerDataConverter::lastModifiedMillis)
+                .reversed()
+                .thenComparing(Path::toString, Comparator.reverseOrder()));
         for (int i = 1; i < backups.size(); i++) {
             deleteTreeQuietly(backups.get(i));
         }

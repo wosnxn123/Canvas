@@ -72,7 +72,8 @@ public final class ShardFile implements AutoCloseable {
     private static final System.Logger LOGGER = System.getLogger("Folesium");
 
     static final byte[] FILE_MAGIC = {'F', 'L', 'S', 'M'};
-    static final int FILE_HEADER_LEN = 16;
+    /** Size of the fixed file header; a shard file larger than this actually holds records. */
+    public static final int FILE_HEADER_LEN = 16;
     static final short FORMAT_VERSION = 1;
 
     static final byte RECORD_MAGIC = (byte) 0xF5;

@@ -89,6 +89,12 @@ public final class Compressors {
                 }
                 off += n;
             }
+            if (!inf.finished()) {
+                // The stream still has input left after the declared rawLen was filled: the
+                // record is larger than its header claims. Previously this silently returned
+                // truncated data (only the CRC would catch it); fail loudly instead.
+                throw new IllegalStateException("Compressed record exceeds declared size: " + rawLen);
+            }
             if (off != rawLen) {
                 throw new IllegalStateException("Decompressed size mismatch: " + off + " != " + rawLen);
             }

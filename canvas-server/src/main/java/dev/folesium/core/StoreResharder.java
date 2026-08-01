@@ -151,9 +151,11 @@ final class StoreResharder {
             // would have recreated the missing shard empty. Only delete the backup - which
             // may be the only surviving copy of those records - once the on-disk layout is
             // the complete new set, i.e. the files uniformly hold the shard count the
-            // metadata names. Otherwise the swap was never finished: keep the backup.
+            // metadata names. Header-only shard files (empty, eagerly recreated on open) do
+            // not count as present: they mean the swap was never finished, so the backup
+            // (the only surviving copy of those records) must be kept.
             Integer metaCount = metadataShardCount(dir);
-            int fileCount = consistentOnDiskShardCount(dir);
+            int fileCount = consistentPopulatedShardCount(dir);
             if (metaCount != null && fileCount == metaCount) {
                 LOGGER.log(System.Logger.Level.INFO,
                         "Folesium: removing the backup of a completed reshard of {0}", dir);
@@ -413,7 +415,9 @@ final class StoreResharder {
      * {@code staging}, i.e. the staged-to-dir move was interrupted rather than lost and
      * {@link #finishSwap} can drive it to completion. Only consulted once the {@code MOVED}
      * marker exists, so the shard files in {@code dir} are freshly swapped-in new files
-     * rather than the old set.
+     * rather than the old set. A shard only counts as present when it actually holds
+     * records (see {@link #isPopulatedShard}): a header-only file is not evidence the
+     * swap reached that shard.
      */
     private static boolean completeNewLayout(Path dir, Path staging, int count) {
         try {
@@ -422,8 +426,8 @@ final class StoreResharder {
             names.addAll(discoverKeyspaces(staging));
             for (String name : names) {
                 for (int i = 0; i < count; i++) {
-                    if (!Files.isRegularFile(dir.resolve(String.format("%s-%04d.flog", name, i)))
-                            && !Files.isRegularFile(staging.resolve(String.format("%s-%04d.flog", name, i)))) {
+                    if (!isPopulatedShard(dir.resolve(String.format("%s-%04d.flog", name, i)))
+                            && !isPopulatedShard(staging.resolve(String.format("%s-%04d.flog", name, i)))) {
                         return false;
                     }
                 }
@@ -437,10 +441,28 @@ final class StoreResharder {
         }
     }
 
-    /** Number of {@code .flog} shard files of one keyspace directly inside {@code dir}. */
+    /**
+     * True for a shard file that demonstrably holds records: strictly larger than the
+     * file header. {@link Keyspace} eagerly creates header-only shard files on open, so
+     * their mere presence does not prove a reshard swap was completed - after a crash
+     * mid-swap a recreated empty shard could make a partial new layout look complete and
+     * get the backup (the only surviving copy of the records it should have held) deleted.
+     */
+    private static boolean isPopulatedShard(Path p) {
+        if (!Files.isRegularFile(p)) {
+            return false;
+        }
+        try {
+            return Files.size(p) > ShardFile.FILE_HEADER_LEN;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    /** Number of populated {@code .flog} shard files of one keyspace directly inside {@code dir}. */
     private static long countShardFiles(Path dir, String keyspace) throws IOException {
         try (Stream<Path> files = Files.list(dir)) {
-            return files.filter(Files::isRegularFile)
+            return files.filter(StoreResharder::isPopulatedShard)
                     .filter(p -> p.getFileName().toString().startsWith(keyspace + "-")
                             && p.getFileName().toString().endsWith(".flog"))
                     .count();
@@ -543,12 +565,28 @@ final class StoreResharder {
     /**
      * The shard count every keyspace's on-disk files agree on, or -1 when the layout is
      * not uniform: keyspaces disagree with each other, a keyspace is missing shard
-     * indices, or there are no shard files at all.
+     * indices, or there are no shard files at all. Every existing shard file counts -
+     * including header-only files eagerly recreated by {@link Keyspace} on open - because
+     * this is the physical layout the metadata must describe.
      */
     private static int consistentOnDiskShardCount(Path dir) {
+        return consistentShardCount(dir, Files::isRegularFile);
+    }
+
+    /**
+     * Like {@link #consistentOnDiskShardCount}, but header-only shard files do not count:
+     * a shard only proves the reshard swap reached it when it actually holds records. Used
+     * by the recovery guard that decides whether the backup (the only surviving copy of
+     * the records) may be deleted.
+     */
+    private static int consistentPopulatedShardCount(Path dir) {
+        return consistentShardCount(dir, StoreResharder::isPopulatedShard);
+    }
+
+    private static int consistentShardCount(Path dir, java.util.function.Predicate<Path> include) {
         try (Stream<Path> files = Files.list(dir)) {
             HashMap<String, TreeSet<Integer>> indices = new HashMap<>();
-            files.filter(Files::isRegularFile).forEach(p -> {
+            files.filter(include).forEach(p -> {
                 Matcher m = SHARD_FILE.matcher(p.getFileName().toString());
                 if (m.matches()) {
                     indices.computeIfAbsent(m.group(1), k -> new TreeSet<>())
