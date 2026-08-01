@@ -1195,10 +1195,10 @@ index 0000000000000000000000000000000000000000..42ae4a950bcfcc0fd724a09cfa8e406f
 +}
 diff --git a/io/canvasmc/canvas/threadedregions/SchedulerUtil.java b/io/canvasmc/canvas/threadedregions/SchedulerUtil.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..460bc93f493d001d100f91be252db0d135108c6b
+index 0000000000000000000000000000000000000000..5cae245725c51a3e1b8a95b0fd3929cd38bc616d
 --- /dev/null
 +++ b/io/canvasmc/canvas/threadedregions/SchedulerUtil.java
-@@ -0,0 +1,392 @@
+@@ -0,0 +1,390 @@
 +package io.canvasmc.canvas.threadedregions;
 +
 +import ca.spottedleaf.concurrentutil.numa.OSNuma;
@@ -1332,9 +1332,7 @@ index 0000000000000000000000000000000000000000..460bc93f493d001d100f91be252db0d1
 +                        (long) (affinityConfig.runTasksBufferMillis * 1_000_000L),
 +                        affinityConfig.stealThresholdMillis * 1_000_000L,
 +                        SchedulerUtil::doesSupportRegionProfiler,
-+                        affinityConfig.enableWorkStealing,
-+                        affinityConfig.enableAffinitySchedulerCpuAffinity,
-+                        affinityConfig.enableMidTickTasks
++                        affinityConfig.enableAffinitySchedulerCpuAffinity
 +                    );
 +                }
 +                default: {
@@ -3386,10 +3384,10 @@ index 0000000000000000000000000000000000000000..64f0e45eb4213ac153b56562acddf3b9
 +import java.util.function.Consumer;
 diff --git a/io/canvasmc/canvas/threadedregions/scheduler/AffinitySchedulerThreadPool.java b/io/canvasmc/canvas/threadedregions/scheduler/AffinitySchedulerThreadPool.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..f2e4e4c33284935296a23a85d9b30b02484235ea
+index 0000000000000000000000000000000000000000..be0bc8f502eb11614b50497e7b52fa759d711235
 --- /dev/null
 +++ b/io/canvasmc/canvas/threadedregions/scheduler/AffinitySchedulerThreadPool.java
-@@ -0,0 +1,744 @@
+@@ -0,0 +1,755 @@
 +package io.canvasmc.canvas.threadedregions.scheduler;
 +
 +import ca.spottedleaf.common.util.TimeUtil;
@@ -3441,7 +3439,7 @@ index 0000000000000000000000000000000000000000..f2e4e4c33284935296a23a85d9b30b02
 +public final class AffinitySchedulerThreadPool extends Scheduler {
 +
 +    public static final long DEFAULT_STEAL_THRESH_MILLIS = 3L;
-+    public static final double DEFAULT_RUN_TASKS_BUFFER_MILLIS = (double) 100_000 / 1_000_000;
++    public static final double DEFAULT_RUN_TASKS_BUFFER_MILLIS = (double) 80_000 / 1_000_000; // 0.08ms
 +
 +    private static final Comparator<AffinitySchedulerThreadPool.ScheduledState> TICK_COMPARATOR_BY_TIME = (final AffinitySchedulerThreadPool.ScheduledState s1, final AffinitySchedulerThreadPool.ScheduledState s2) -> {
 +        final SchedulableTick t1 = s1.tick;
@@ -3467,8 +3465,6 @@ index 0000000000000000000000000000000000000000..f2e4e4c33284935296a23a85d9b30b02
 +    private final long runTaskBuff;
 +    private final long stealThresh;
 +    private final BooleanSupplier linkingSupported;
-+    private final boolean enableWorkStealing;
-+    private final boolean enableIntermediateTasks;
 +
 +    private final AtomicInteger nextSteal = new AtomicInteger(0);
 +
@@ -3480,19 +3476,17 @@ index 0000000000000000000000000000000000000000..f2e4e4c33284935296a23a85d9b30b02
 +        final long runTaskBuff,
 +        final long stealThresh,
 +        final BooleanSupplier linkingSupported,
-+        final boolean enableWorkStealing,
-+        final boolean enableAffinity,
-+        final boolean enableIntermediateTasks
++        final boolean enableAffinity
 +    ) {
 +        this.runTaskBuff = runTaskBuff;
 +        this.stealThresh = stealThresh;
 +        this.linkingSupported = linkingSupported;
-+        this.enableWorkStealing = enableWorkStealing;
-+        this.enableIntermediateTasks = enableIntermediateTasks;
++
 +        final BitSet idleThreads = new BitSet(threads);
 +        for (int i = 0; i < threads; ++i) {
 +            idleThreads.set(i);
 +        }
++
 +        this.idleThreads = idleThreads;
 +
 +        final BitSet affinitySet;
@@ -3505,7 +3499,10 @@ index 0000000000000000000000000000000000000000..f2e4e4c33284935296a23a85d9b30b02
 +                affinitySet = getAffinity(GlobalConfiguration.getInstance().regionScheduler.affinityScheduler.tickRegionAffinity);
 +            }
 +        }
-+        else affinitySet = new BitSet();
++        else {
++            affinitySet = new BitSet();
++        }
++
 +        if (!affinitySet.isEmpty()) {
 +            if (affinitySet.cardinality() < threads) {
 +                throw new IllegalArgumentException("Affinity setting needs 1 allocated core per tick thread");
@@ -3515,6 +3512,7 @@ index 0000000000000000000000000000000000000000..f2e4e4c33284935296a23a85d9b30b02
 +
 +        final TickThreadRunner[] runners = new TickThreadRunner[threads];
 +        final Thread[] t = new Thread[threads];
++
 +        for (int i = 0; i < threads; ++i) {
 +            int cpuId = affinitySet.isEmpty() ? -1 : affinitySet.nextSetBit(0);
 +            if (cpuId != -1) affinitySet.clear(cpuId);
@@ -3526,13 +3524,15 @@ index 0000000000000000000000000000000000000000..f2e4e4c33284935296a23a85d9b30b02
 +        this.runners = runners;
 +    }
 +
-+    private BitSet getAffinity(int[] affinity) {
++    private BitSet getAffinity(final int[] affinity) {
 +        if (affinity.length == 0) {
 +            LOGGER.warn("No affinity set configured, backing off, logging CPU topology:\n{}", CpuInfoReport.gatherCPUReport());
 +            return new BitSet();
 +        }
++
 +        final int maxAvailable = Runtime.getRuntime().availableProcessors();
 +        final BitSet affinitySet = new BitSet(affinity.length);
++
 +        Arrays.stream(affinity)
 +            .distinct()
 +            .filter(cpuId -> {
@@ -3547,6 +3547,7 @@ index 0000000000000000000000000000000000000000..f2e4e4c33284935296a23a85d9b30b02
 +                }
 +            })
 +            .forEach(affinitySet::set);
++
 +        return affinitySet;
 +    }
 +
@@ -3558,11 +3559,13 @@ index 0000000000000000000000000000000000000000..f2e4e4c33284935296a23a85d9b30b02
 +
 +    public TickThreadRunner getCurrentTickThreadRunner() {
 +        final Thread current = Thread.currentThread();
++
 +        for (final TickThreadRunner runner : this.runners) {
 +            if (runner.thread == current) {
 +                return runner;
 +            }
 +        }
++
 +        throw new IllegalStateException("Not on tick runner");
 +    }
 +
@@ -3570,6 +3573,7 @@ index 0000000000000000000000000000000000000000..f2e4e4c33284935296a23a85d9b30b02
 +        final long nsToWait = TimeUnit.MILLISECONDS.toNanos(msToWait);
 +        final long start = System.nanoTime();
 +        final long deadline = start + nsToWait;
++
 +        boolean interrupted = false;
 +        try {
 +            for (final Thread thread : this.threads) {
@@ -3609,6 +3613,7 @@ index 0000000000000000000000000000000000000000..f2e4e4c33284935296a23a85d9b30b02
 +    @Override
 +    public Thread[] getAliveThreads() {
 +        final List<Thread> ret = new ArrayList<>(this.threads.length);
++
 +        for (final Thread thread : this.threads) {
 +            if (thread.isAlive()) {
 +                ret.add(thread);
@@ -3626,6 +3631,7 @@ index 0000000000000000000000000000000000000000..f2e4e4c33284935296a23a85d9b30b02
 +    @Override
 +    public void halt() {
 +        this.halted = true;
++
 +        for (final Thread thread : this.threads) {
 +            // force response to halt
 +            LockSupport.unpark(thread);
@@ -3694,23 +3700,22 @@ index 0000000000000000000000000000000000000000..f2e4e4c33284935296a23a85d9b30b02
 +        if (globalHead != null && globalHead == localHead) {
 +            throw new IllegalStateException("Global queue and local queue contain same element");
 +        }
-+        else {
-+            // handle the local and/or global head being overdue already
-+            final boolean localOverdue = localHead != null && localHead.isOverdue(now);
-+            final boolean globalOverdue = globalHead != null && globalHead.isOverdue(now);
-+            if (localOverdue && globalOverdue) {
-+                // we should pick the more urgent one
-+                if (TICK_COMPARATOR_BY_TIME.compare(localHead, globalHead) <= 0) {
-+                    return runner.localQueue.poll();
-+                }
-+                else return globalQueue.poll();
-+            }
-+            else if (localOverdue) {
++
++        // handle the local and/or global head being overdue already
++        final boolean localOverdue = localHead != null && localHead.isOverdue(now);
++        final boolean globalOverdue = globalHead != null && globalHead.isOverdue(now);
++        if (localOverdue && globalOverdue) {
++            // we should pick the more urgent one
++            if (TICK_COMPARATOR_BY_TIME.compare(localHead, globalHead) <= 0) {
 +                return runner.localQueue.poll();
 +            }
-+            else if (globalOverdue) {
-+                return globalQueue.poll();
-+            }
++            else return globalQueue.poll();
++        }
++        else if (localOverdue) {
++            return runner.localQueue.poll();
++        }
++        else if (globalOverdue) {
++            return globalQueue.poll();
 +        }
 +
 +        ScheduledState best = null;
@@ -3783,8 +3788,7 @@ index 0000000000000000000000000000000000000000..f2e4e4c33284935296a23a85d9b30b02
 +        if (reschedule != null) {
 +            // we don't wanna send this to the queue if linked
 +            if (linkedToRunner == null || linkedToRunner.state == null || linkedToRunner.state != reschedule) {
-+                if (enableWorkStealing) runner.localQueue.offer(reschedule);
-+                else globalQueue.offer(reschedule);
++                runner.localQueue.offer(reschedule);
 +            }
 +        }
 +
@@ -3794,18 +3798,16 @@ index 0000000000000000000000000000000000000000..f2e4e4c33284935296a23a85d9b30b02
 +            // pinned
 +            ret = (ScheduledState) linkedToRunner.state;
 +        }
-+        else if (enableWorkStealing) {
++        else {
 +            // not pinned, using work stealing
 +            ret = this.poll(runner);
-+        }
-+        else {
-+            // not work stealing, not pinned, use global
-+            ret = globalQueue.poll();
 +        }
 +
 +        if (ret == null && linkedToRunner == null) {
 +            this.idleThreads.set(runner.id);
++
 +            final int s = runner.localQueue.size();
++
 +            if (s != 0) {
 +                throw new IllegalStateException("Local queue must be drained before going idle. Currently " + s);
 +            }
@@ -3825,6 +3827,7 @@ index 0000000000000000000000000000000000000000..f2e4e4c33284935296a23a85d9b30b02
 +
 +        @Nullable
 +        private AffinitySchedulerThreadPool schedulerOwnedBy;
++
 +        @Nullable
 +        private volatile TickThreadRunner ownedBy;
 +
@@ -3907,6 +3910,7 @@ index 0000000000000000000000000000000000000000..f2e4e4c33284935296a23a85d9b30b02
 +
 +        @UnknownNullability("null until the runner starts on a thread")
 +        private volatile Thread thread;
++
 +        @Nullable
 +        private volatile SchedulableTick linked;
 +
@@ -4012,6 +4016,7 @@ index 0000000000000000000000000000000000000000..f2e4e4c33284935296a23a85d9b30b02
 +        @Override
 +        public void run() {
 +            this.thread = Thread.currentThread();
++
 +            if (affinity != -1) {
 +                Affinity.setAffinity(affinity);
 +                LOGGER.debug("{} bound to CPU {}", this, affinity);
@@ -4097,7 +4102,6 @@ index 0000000000000000000000000000000000000000..f2e4e4c33284935296a23a85d9b30b02
 +                // haven't hit deadline yet, try tasks and then try park
 +                final TickThreadRunnerState runTasksState = new TickThreadRunnerState(startStateTask, STATE_EXECUTING_TASKS);
 +                if (
-+                    scheduler.enableIntermediateTasks &&
 +                    adjustedForRunBuffer - System.nanoTime() > 0L &&
 +                    startStateTask.compareHasTasks() &&
 +                    tryExchangeState(startState, runTasksState)
@@ -4131,7 +4135,12 @@ index 0000000000000000000000000000000000000000..f2e4e4c33284935296a23a85d9b30b02
 +            return "AffinityRunner#" + id;
 +        }
 +
-+        private record TickThreadRunnerState(@UnknownNullability("null when state is idle") ScheduledState stateTarget, int state) {}
++        private record TickThreadRunnerState(
++            @UnknownNullability("null when state is idle")
++            ScheduledState stateTarget,
++            int state
++        ) {
++        }
 +    }
 +}
 diff --git a/io/canvasmc/canvas/threadedregions/scores/ObjectiveData.java b/io/canvasmc/canvas/threadedregions/scores/ObjectiveData.java
@@ -12284,18 +12293,9 @@ index 89b9d1a4122d502437d516f8affc5ba72f421f5f..587ec673a0821e91de67abaf3a559c78
      }
  
 diff --git a/net/minecraft/commands/Commands.java b/net/minecraft/commands/Commands.java
-index cbc15f9acee527682c37c0c42283bd740fc7d169..ef851c5a8c71f1dd4df7778ffc2bb42729972902 100644
+index cbc15f9acee527682c37c0c42283bd740fc7d169..19774a47830260d21751bc66eb1ac9bd551f61a7 100644
 --- a/net/minecraft/commands/Commands.java
 +++ b/net/minecraft/commands/Commands.java
-@@ -201,7 +201,7 @@ public class Commands {
-         CloneCommands.register(this.dispatcher, context);
-         DamageCommand.register(this.dispatcher, context);
-         DataCommands.register(this.dispatcher);
--        DataPackCommand.register(this.dispatcher, context);
-+        //DataPackCommand.register(this.dispatcher, context); // Folia - region threading - TODO
-         DefaultGameModeCommands.register(this.dispatcher);
-         DialogCommand.register(this.dispatcher, context);
-         DifficultyCommand.register(this.dispatcher);
 @@ -212,12 +212,12 @@ public class Commands {
          FillCommand.register(this.dispatcher, context);
          FillBiomeCommand.register(this.dispatcher, context);
@@ -12866,7 +12866,7 @@ index 144c18c08bf8f03d907b97f968aa171a9fbf997f..be9fdca704391f8d77b87b4d75e67bb6
          }
      }
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e3a852f36 100644
+index 1683ef2c8f31767d88d557766512a5db1606a2f1..86597e7a1388e84c99140f7ff47916b23f3ebbc1 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
 @@ -208,7 +208,6 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
@@ -13096,7 +13096,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
          new org.bukkit.event.world.WorldLoadEvent(level.getWorld()).callEvent(); // Paper - call WorldLoadEvent
      }
  
-@@ -987,7 +1021,35 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -987,7 +1021,29 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
      }
      // CraftBukkit end
  
@@ -13110,12 +13110,6 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
 +            return;
 +        }
 +        new io.papermc.paper.threadedregions.RegionShutdownThread("Region shutdown thread").start();
-+    }
-+
-+    public void haltCurrentRegion() {
-+        if (!ca.spottedleaf.moonrise.common.util.TickThread.isShutdownThread()) {
-+            throw new IllegalStateException();
-+        }
 +    }
 +
 +    public void stopServer() {
@@ -13133,7 +13127,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
          if (Thread.currentThread() == this.serverThread) this.executeAllRecentInternalTasks(); // Paper - execute tasks on stop
          // CraftBukkit start - prevent double stopping on multiple threads
          synchronized (this.stopLock) {
-@@ -998,7 +1060,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -998,7 +1054,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          this.shutdownThread = Thread.currentThread(); // Paper - Improved watchdog support
          org.spigotmc.WatchdogThread.doStop(); // Paper - Improved watchdog support
          // CraftBukkit end
@@ -13142,7 +13136,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
  
          LOGGER.info("Stopping server");
          Commands.COMMAND_SENDING_POOL.shutdownNow(); // Paper - Perf: Async command map building; Shutdown and don't bother finishing
-@@ -1009,15 +1071,13 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1009,15 +1065,13 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              this.server.waitForAsyncTasksShutdown(); // Paper - Wait for Async Tasks during shutdown
          }
          // CraftBukkit end
@@ -13164,7 +13158,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
  
          LOGGER.info("Saving worlds");
  
-@@ -1048,6 +1108,11 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1048,6 +1102,11 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          this.saveAllChunks(false, true, false, true); // Paper - rewrite chunk system
  
          this.isSaving = false;
@@ -13176,7 +13170,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
          this.savedDataStorage.close();
          this.resources.close();
  
-@@ -1102,6 +1167,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1102,6 +1161,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          if (this.isDebugging()) io.papermc.paper.util.TraceUtil.dumpTraceForThread("Server stopped"); // Paper - Debugging
          // Paper end
          this.running = false;
@@ -13184,7 +13178,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
          if (wait) {
              try {
                  this.serverThread.join();
-@@ -1234,6 +1300,14 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1234,6 +1294,14 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              this.status = this.buildServerStatus();
  
              this.server.spark.enableBeforePlugins(); // Paper - spark
@@ -13199,7 +13193,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
              // Spigot start
              // Paper start
              LOGGER.info("Running delayed init tasks");
-@@ -1294,7 +1368,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1294,7 +1362,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
                  this.lastOverloadWarningNanos = this.nextTickTimeNanos;
  
                  this.currentTickStart = tickStart;
@@ -13208,7 +13202,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
                  // Paper end - improve tick loop
  
                  boolean sprinting = thisTickNanos == 0L;
-@@ -1330,7 +1404,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1330,7 +1398,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              }
  
              this.onServerCrash(report);
@@ -13217,7 +13211,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
              try {
                  this.stopped = true;
                  this.stopServer();
-@@ -1428,41 +1502,21 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1428,41 +1496,21 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
      @Override
      // Paper start - anything that does try to post to main during watchdog crash, run on watchdog
      public TickTask wrapRunnable(Runnable runnable) {
@@ -13263,7 +13257,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
          if (super.pollTask()) {
              this.moonrise$executeMidTickTasks(); // Paper - rewrite chunk system
              return true;
-@@ -1482,7 +1536,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1482,7 +1530,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
  
      @Override
      protected void doRunTask(final TickTask task) {
@@ -13272,7 +13266,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
      }
  
      private Optional<ServerStatus.Favicon> loadStatusIcon() {
-@@ -1527,12 +1581,15 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1527,12 +1575,15 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          return false;
      }
  
@@ -13291,7 +13285,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
              if (this.playerList.getPlayerCount() == 0 && !this.tickRateManager.isSprinting() && this.pluginsBlockingSleep.isEmpty()) { // Paper - API to allow/disallow tick sleeping
                  this.emptyTicks++;
              } else {
-@@ -1557,41 +1614,102 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1557,41 +1608,102 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
                      level.getChunkSource().tick(() -> true, false);
                  }
                  // Paper end - avoid issues with certain tasks not processing during sleep
@@ -13406,7 +13400,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
                  }
              }
          } finally {
-@@ -1599,27 +1717,21 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1599,27 +1711,21 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          }
          // Paper end - Incremental chunk and player saving
  
@@ -13440,7 +13434,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
          // Paper start - rewrite chunk system
          final Throwable crash = this.chunkSystemCrash;
          if (crash != null) {
-@@ -1632,7 +1744,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1632,7 +1738,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
      }
  
      private void autoSave() {
@@ -13449,7 +13443,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
          LOGGER.debug("Autosave started");
          this.saveEverything(true, false, false);
          LOGGER.debug("Autosave finished");
-@@ -1644,30 +1756,22 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1644,30 +1750,22 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          }
      }
  
@@ -13488,7 +13482,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
      private ServerStatus buildServerStatus() {
          ServerStatus.Players players = this.buildPlayerStatus();
          return new ServerStatus(
-@@ -1680,7 +1784,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1680,7 +1778,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
      }
  
      private ServerStatus.Players buildPlayerStatus() {
@@ -13497,7 +13491,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
          int maxPlayers = this.getMaxPlayers();
          if (this.hidesOnlinePlayers()) {
              return new ServerStatus.Players(maxPlayers, players.size(), List.of());
-@@ -1699,13 +1803,17 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1699,13 +1797,17 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          return new ServerStatus.Players(maxPlayers, players.size(), sample);
      }
  
@@ -13520,7 +13514,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
          for (io.papermc.paper.threadedregions.EntityScheduler scheduler : this.entitySchedulerTickList.getAllSchedulers()) {
              if (scheduler.isRetired()) {
                  continue;
-@@ -1714,11 +1822,12 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1714,11 +1816,12 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              scheduler.executeTick();
          }
          // Paper end - optimise Folia entity scheduler
@@ -13537,7 +13531,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
              // Paper start - per-world time
              if (io.papermc.paper.configuration.GlobalConfiguration.get().time.affectsAllWorlds) {
                  this.clockManager.tick();
-@@ -1730,49 +1839,70 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1730,49 +1833,70 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              // Paper end - per-world time
          }
  
@@ -13626,7 +13620,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
              player.connection.chunkSender.sendNextChunks(player);
              player.connection.resumeFlushing();
          }
-@@ -1794,15 +1924,19 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1794,15 +1918,19 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
      }
  
      public void forceGameTimeSynchronization() {
@@ -13651,7 +13645,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
      }
  
      protected void setId(final String serverId) {
-@@ -2074,11 +2208,13 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2074,11 +2202,13 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
          int count = 0;
  
          for (ServerPlayer player : this.getPlayerList().getPlayers()) {
@@ -13667,7 +13661,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
              count++;
              // Paper end - Expand PlayerGameModeChangeEvent
          }
-@@ -2103,7 +2239,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2103,7 +2233,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
      }
  
      public int getTickCount() {
@@ -13676,7 +13670,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
      }
  
      public boolean isUnderSpawnProtection(final ServerLevel level, final BlockPos pos, final Player player) {
-@@ -2139,6 +2275,15 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2139,6 +2269,15 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
      }
  
      public void invalidateStatus() {
@@ -13692,7 +13686,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
          this.lastServerStatus = 0L;
      }
  
-@@ -2153,6 +2298,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2153,6 +2292,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
  
      @Override
      public void executeIfPossible(final Runnable command) {
@@ -13700,7 +13694,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
          if (this.isStopped()) {
              throw new io.papermc.paper.util.ServerStopRejectedExecutionException("Server already shutting down"); // Paper - do not prematurely disconnect players on stop
          }
-@@ -2485,6 +2631,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2485,6 +2625,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
  
      // Paper start - per-level WeatherData
      public void setWeatherParameters(final ServerLevel level, final int clearTime, final int rainTime, final boolean raining, final boolean thundering) {
@@ -13708,7 +13702,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
          WeatherData weatherData = level.getWeatherData();
          // Paper end - per-level WeatherData
          weatherData.setClearWeatherTime(clearTime);
-@@ -2524,7 +2671,12 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2524,7 +2665,12 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
      }
  
      public long getAverageTickTimeNanos() {
@@ -13722,7 +13716,7 @@ index 1683ef2c8f31767d88d557766512a5db1606a2f1..81a7cf72666abcfad828a286f16eee9e
      }
  
      public long[] getTickTimesNanos() {
-@@ -2964,24 +3116,15 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -2964,24 +3110,15 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
  
      // Paper start - API to check if the server is sleeping
      public boolean isTickPaused() {
@@ -14977,6 +14971,119 @@ index bec064ee3fa076961e8266e4c879da1c24f857a5..660f80535f52bc9c9cdfb7ab59b82db9
 +    // Canvas end - region threading
      }
  }
+diff --git a/net/minecraft/server/commands/DataPackCommand.java b/net/minecraft/server/commands/DataPackCommand.java
+index 0da1e4ada8616af825ddd4678e61246c672f9c4f..7758943c53dd5845ef7229f51ab2d050eee7be74 100644
+--- a/net/minecraft/server/commands/DataPackCommand.java
++++ b/net/minecraft/server/commands/DataPackCommand.java
+@@ -99,75 +99,26 @@ public class DataPackCommand {
+         dispatcher.register(
+             Commands.literal("datapack")
+                 .requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
+-                .then(
+-                    Commands.literal("enable")
+-                        .then(
+-                            Commands.argument("name", StringArgumentType.string())
+-                                .suggests(UNSELECTED_PACKS)
+-                                .executes(
+-                                    c -> enablePack(
+-                                        c.getSource(), getPack(c, "name", true), (l, p) -> p.getDefaultPosition().insert(l, p, Pack::selectionConfig, false)
+-                                    )
+-                                )
+-                                .then(
+-                                    Commands.literal("after")
+-                                        .then(
+-                                            Commands.argument("existing", StringArgumentType.string())
+-                                                .suggests(SELECTED_PACKS)
+-                                                .executes(
+-                                                    c -> enablePack(
+-                                                        c.getSource(),
+-                                                        getPack(c, "name", true),
+-                                                        (l, p) -> l.add(l.indexOf(getPack(c, "existing", false)) + 1, p)
+-                                                    )
+-                                                )
+-                                        )
+-                                )
+-                                .then(
+-                                    Commands.literal("before")
+-                                        .then(
+-                                            Commands.argument("existing", StringArgumentType.string())
+-                                                .suggests(SELECTED_PACKS)
+-                                                .executes(
+-                                                    c -> enablePack(
+-                                                        c.getSource(), getPack(c, "name", true), (l, p) -> l.add(l.indexOf(getPack(c, "existing", false)), p)
+-                                                    )
+-                                                )
+-                                        )
+-                                )
+-                                .then(Commands.literal("last").executes(c -> enablePack(c.getSource(), getPack(c, "name", true), List::add)))
+-                                .then(Commands.literal("first").executes(c -> enablePack(c.getSource(), getPack(c, "name", true), (l, p) -> l.add(0, p))))
+-                        )
+-                )
+-                .then(
+-                    Commands.literal("disable")
+-                        .then(
+-                            Commands.argument("name", StringArgumentType.string())
+-                                .suggests(SELECTED_PACKS)
+-                                .executes(c -> disablePack(c.getSource(), getPack(c, "name", false)))
+-                        )
+-                )
++                // Canvas start - region threading
++                //
++                // I think honestly it's a good idea if we keep this read-only of sorts, since we can't restore
++                // the whole command because reloading the server registries in region threading is like... no...
++                // SO we are going to make it so that this command can only read the selected enabled packs on
++                // the server and ONLY that.  We also are going to comment out the FULL code in the command because
++                // if there are changes made to this command it's probably best that we track those changes closely
++                //
++                // note: this doesn't need to be scheduled at all either since the selected packs is immutable
++                //
++                // Useful in issue reports and stuff to provide further information about the server
++                //
++                // Canvas end - region threading
+                 .then(
+                     Commands.literal("list")
+                         .executes(c -> listPacks(c.getSource()))
+-                        .then(Commands.literal("available").executes(c -> listAvailablePacks(c.getSource())))
++                        // Canvas - region threading - don't show available packs
+                         .then(Commands.literal("enabled").executes(c -> listEnabledPacks(c.getSource())))
+                 )
+-                .then(
+-                    Commands.literal("create")
+-                        .requires(Commands.hasPermission(Commands.LEVEL_OWNERS))
+-                        .then(
+-                            Commands.argument("id", StringArgumentType.string())
+-                                .then(
+-                                    Commands.argument("description", ComponentArgument.textComponent(context))
+-                                        .executes(
+-                                            c -> createPack(
+-                                                c.getSource(), StringArgumentType.getString(c, "id"), ComponentArgument.getResolvedComponent(c, "description")
+-                                            )
+-                                        )
+-                                )
+-                        )
+-                )
++                // Canvas - region threading - we don't want to allow "creation" of packs
+         );
+     }
+ 
+@@ -238,7 +189,7 @@ public class DataPackCommand {
+     }
+ 
+     private static int listPacks(final CommandSourceStack source) {
+-        return listEnabledPacks(source) + listAvailablePacks(source);
++        return listEnabledPacks(source); // Canvas - region threading - we shouldn't include available packs, since we can't load datapacks safely in region threading
+     }
+ 
+     private static int listAvailablePacks(final CommandSourceStack source) {
+@@ -266,7 +217,7 @@ public class DataPackCommand {
+ 
+     private static int listEnabledPacks(final CommandSourceStack source) {
+         PackRepository repository = source.getServer().getPackRepository();
+-        repository.reload();
++        // Canvas - region threading - we shouldn't reload the repository
+         Collection<? extends Pack> selectedPacks = repository.getSelectedPacks();
+         if (selectedPacks.isEmpty()) {
+             source.sendSuccess(() -> Component.translatable("commands.datapack.list.enabled.none"), false);
 diff --git a/net/minecraft/server/commands/DefaultGameModeCommands.java b/net/minecraft/server/commands/DefaultGameModeCommands.java
 index 7bdeda13c9f9fdaccf462286712713bae277e6e5..9ec2ace36c7541edee644ecfd032e090799011b5 100644
 --- a/net/minecraft/server/commands/DefaultGameModeCommands.java
@@ -19634,7 +19741,7 @@ index cc6f4e2845ef1e95c765d65f17c8aa1b06652927..7316c756f1c228eef710219a659c7968
                  foundPlayers.add(player);
              }
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index 4fa9377ebfbac280ac7f298578d906bccfcd2f7d..a79d5be0e8b88ecff91e0986f4804438c7dae6b5 100644
+index fbbe5928ff6c6cb1719eef14d4123b146c6f1781..1b3a411717df224fc48118750aabf25a6d48c6a3 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
 @@ -190,11 +190,11 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
@@ -24014,7 +24121,7 @@ index bb5f66c62c9541bb76a9faad9e9ee91c1466fc6a..66d7bb9418832638c220a08d06c01ef0
              return blockToFallLocation(blockState);
          } else {
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index 44e9fde89971453ae5c8c2e8d300426ecc02f123..21090aae43a1776705f94371dcc5c3c603849b1e 100644
+index bd935ae0cafc8fa2f53ed756a9acedab9db54b30..e87539cdd9813e68fe105d5311221227590fea87 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
 @@ -170,7 +170,7 @@ public abstract class Entity
@@ -24196,7 +24303,7 @@ index 44e9fde89971453ae5c8c2e8d300426ecc02f123..21090aae43a1776705f94371dcc5c3c6
                  iterations.set(iteration);
                  BlockState state = this.level().getBlockState(blockIntersection);
                  if (state.isAir()) {
-@@ -3303,6 +3365,7 @@ public abstract class Entity
+@@ -3299,6 +3361,7 @@ public abstract class Entity
          }
  
          if (force || this.canRide(entityToRide) && entityToRide.canAddPassenger(this)) {
@@ -24204,7 +24311,7 @@ index 44e9fde89971453ae5c8c2e8d300426ecc02f123..21090aae43a1776705f94371dcc5c3c6
              // CraftBukkit start
              if (entityToRide.getBukkitEntity() instanceof org.bukkit.entity.Vehicle && this.getBukkitEntity() instanceof org.bukkit.entity.LivingEntity) {
                  org.bukkit.event.vehicle.VehicleEnterEvent event = new org.bukkit.event.vehicle.VehicleEnterEvent((org.bukkit.entity.Vehicle) entityToRide.getBukkitEntity(), this.getBukkitEntity());
-@@ -3324,6 +3387,7 @@ public abstract class Entity
+@@ -3320,6 +3383,7 @@ public abstract class Entity
                  return false;
              }
              // CraftBukkit end
@@ -24212,7 +24319,7 @@ index 44e9fde89971453ae5c8c2e8d300426ecc02f123..21090aae43a1776705f94371dcc5c3c6
              if (this.isPassenger()) {
                  this.stopRiding();
              }
-@@ -3332,7 +3396,7 @@ public abstract class Entity
+@@ -3328,7 +3392,7 @@ public abstract class Entity
              this.vehicle = entityToRide;
              this.vehicle.addPassenger(this);
              if (sendEventAndTriggers) {
@@ -24221,7 +24328,7 @@ index 44e9fde89971453ae5c8c2e8d300426ecc02f123..21090aae43a1776705f94371dcc5c3c6
                  entityToRide.getIndirectPassengersStream()
                      .filter(e -> e instanceof ServerPlayer)
                      .forEach(player -> CriteriaTriggers.START_RIDING_TRIGGER.trigger((ServerPlayer)player));
-@@ -3367,7 +3431,7 @@ public abstract class Entity
+@@ -3363,7 +3427,7 @@ public abstract class Entity
              if (!oldVehicle.removePassenger(this, suppressCancellation)) this.vehicle = oldVehicle; // CraftBukkit // Paper - Force entity dismount during teleportation
              Entity.RemovalReason removalReason = this.getRemovalReason();
              if (removalReason == null || removalReason.shouldDestroy()) {
@@ -24230,7 +24337,7 @@ index 44e9fde89971453ae5c8c2e8d300426ecc02f123..21090aae43a1776705f94371dcc5c3c6
              }
          }
      }
-@@ -3412,6 +3476,7 @@ public abstract class Entity
+@@ -3408,6 +3472,7 @@ public abstract class Entity
              throw new IllegalStateException("Use x.stopRiding(y), not y.removePassenger(x)");
          }
          // CraftBukkit start
@@ -24238,7 +24345,7 @@ index 44e9fde89971453ae5c8c2e8d300426ecc02f123..21090aae43a1776705f94371dcc5c3c6
          org.bukkit.craftbukkit.entity.CraftEntity craft = (org.bukkit.craftbukkit.entity.CraftEntity) passenger.getBukkitEntity().getVehicle();
          Entity orig = craft == null ? null : craft.getHandle();
          if (this.getBukkitEntity() instanceof org.bukkit.entity.Vehicle && passenger.getBukkitEntity() instanceof org.bukkit.entity.LivingEntity) {
-@@ -3439,6 +3504,7 @@ public abstract class Entity
+@@ -3435,6 +3500,7 @@ public abstract class Entity
              return false;
          }
          // CraftBukkit end
@@ -24246,7 +24353,7 @@ index 44e9fde89971453ae5c8c2e8d300426ecc02f123..21090aae43a1776705f94371dcc5c3c6
          if (this.passengers.size() == 1 && this.passengers.get(0) == passenger) {
              this.passengers = ImmutableList.of();
          } else {
-@@ -3502,6 +3568,15 @@ public abstract class Entity
+@@ -3498,6 +3564,15 @@ public abstract class Entity
          return this.calculateViewVector(this.getXRot(), this.getYRot());
      }
  
@@ -24262,7 +24369,7 @@ index 44e9fde89971453ae5c8c2e8d300426ecc02f123..21090aae43a1776705f94371dcc5c3c6
      public Vec3 getHeadLookAngle() {
          return this.calculateViewVector(this.getXRot(), this.getYHeadRot());
      }
-@@ -3537,24 +3612,19 @@ public abstract class Entity
+@@ -3533,24 +3608,19 @@ public abstract class Entity
          }
      }
  
@@ -24290,7 +24397,7 @@ index 44e9fde89971453ae5c8c2e8d300426ecc02f123..21090aae43a1776705f94371dcc5c3c6
      }
  
      public int getDimensionChangingDelay() {
-@@ -4042,7 +4112,1138 @@ public abstract class Entity
+@@ -4038,7 +4108,1138 @@ public abstract class Entity
          this.portalProcess = oldEntity.portalProcess;
      }
  
@@ -25429,7 +25536,7 @@ index 44e9fde89971453ae5c8c2e8d300426ecc02f123..21090aae43a1776705f94371dcc5c3c6
          // Paper start - Fix item duplication and teleport issues
          if ((!this.isAlive() || !this.valid) && (transition.newLevel() != this.level)) {
              LOGGER.warn("Illegal Entity Teleport {} to {}:{}", this, transition.newLevel(), transition.position(), new Throwable());
-@@ -4244,6 +5445,12 @@ public abstract class Entity
+@@ -4240,6 +5441,12 @@ public abstract class Entity
          }
      }
  
@@ -25442,7 +25549,7 @@ index 44e9fde89971453ae5c8c2e8d300426ecc02f123..21090aae43a1776705f94371dcc5c3c6
      protected void removeAfterChangingDimensions() {
          this.setRemoved(Entity.RemovalReason.CHANGED_DIMENSION, null); // CraftBukkit - add Bukkit remove cause
          if (this instanceof Leashable leashable && leashable.isLeashed()) { // Paper - only call if it is leashed
-@@ -4577,6 +5784,12 @@ public abstract class Entity
+@@ -4573,6 +5780,12 @@ public abstract class Entity
      }
  
      public void startSeenByPlayer(final ServerPlayer player) {
@@ -25455,7 +25562,7 @@ index 44e9fde89971453ae5c8c2e8d300426ecc02f123..21090aae43a1776705f94371dcc5c3c6
      }
  
      public void stopSeenByPlayer(final ServerPlayer player) {
-@@ -4586,6 +5799,12 @@ public abstract class Entity
+@@ -4582,6 +5795,12 @@ public abstract class Entity
              new io.papermc.paper.event.player.PlayerUntrackEntityEvent(player.getBukkitEntity(), this.getBukkitEntity()).callEvent();
          }
          // Paper end - entity tracking events
@@ -25468,7 +25575,7 @@ index 44e9fde89971453ae5c8c2e8d300426ecc02f123..21090aae43a1776705f94371dcc5c3c6
      }
  
      public float rotate(final Rotation rotation) {
-@@ -4993,7 +6212,10 @@ public abstract class Entity
+@@ -4989,7 +6208,10 @@ public abstract class Entity
              return;
          }
          // Paper end - Block invalid positions and bounding box
@@ -25480,7 +25587,7 @@ index 44e9fde89971453ae5c8c2e8d300426ecc02f123..21090aae43a1776705f94371dcc5c3c6
              this.position = new Vec3(x, y, z);
              int fx = Mth.floor(x);
              int fy = Mth.floor(y);
-@@ -5024,7 +6246,7 @@ public abstract class Entity
+@@ -5020,7 +6242,7 @@ public abstract class Entity
          }
          // Paper start - Block invalid positions and bounding box; don't allow desync of pos and AABB
          // hanging has its own special logic
@@ -25489,7 +25596,7 @@ index 44e9fde89971453ae5c8c2e8d300426ecc02f123..21090aae43a1776705f94371dcc5c3c6
              this.setBoundingBox(this.makeBoundingBox());
          }
          // Paper end - Block invalid positions and bounding box
-@@ -5099,6 +6321,7 @@ public abstract class Entity
+@@ -5095,6 +6317,7 @@ public abstract class Entity
              Util.logAndPauseIfInIde("Invalid entity rotation: " + yRot + ", discarding.");
          } else {
              this.yRot = yRot;
@@ -25497,7 +25604,7 @@ index 44e9fde89971453ae5c8c2e8d300426ecc02f123..21090aae43a1776705f94371dcc5c3c6
          }
      }
  
-@@ -5111,6 +6334,7 @@ public abstract class Entity
+@@ -5107,6 +6330,7 @@ public abstract class Entity
              Util.logAndPauseIfInIde("Invalid entity rotation: " + xRot + ", discarding.");
          } else {
              this.xRot = Math.clamp(xRot % 360.0F, -90.0F, 90.0F);
@@ -25505,7 +25612,7 @@ index 44e9fde89971453ae5c8c2e8d300426ecc02f123..21090aae43a1776705f94371dcc5c3c6
          }
      }
  
-@@ -5130,6 +6354,12 @@ public abstract class Entity
+@@ -5126,6 +6350,12 @@ public abstract class Entity
          return this.removalReason != null;
      }
  
@@ -25518,7 +25625,7 @@ index 44e9fde89971453ae5c8c2e8d300426ecc02f123..21090aae43a1776705f94371dcc5c3c6
      public Entity.@Nullable RemovalReason getRemovalReason() {
          return this.removalReason;
      }
-@@ -5144,6 +6374,7 @@ public abstract class Entity
+@@ -5140,6 +6370,7 @@ public abstract class Entity
          // Paper end - rewrite chunk system
          org.bukkit.craftbukkit.event.CraftEventFactory.callEntityRemoveEvent(this, cause); // CraftBukkit
          final boolean alreadyRemoved = this.removalReason != null; // Paper - Folia schedulers
@@ -25526,7 +25633,7 @@ index 44e9fde89971453ae5c8c2e8d300426ecc02f123..21090aae43a1776705f94371dcc5c3c6
          if (this.removalReason == null) {
              this.removalReason = reason;
          }
-@@ -5167,6 +6398,10 @@ public abstract class Entity
+@@ -5163,6 +6394,10 @@ public abstract class Entity
          this.removalReason = null;
      }
  
@@ -25537,7 +25644,7 @@ index 44e9fde89971453ae5c8c2e8d300426ecc02f123..21090aae43a1776705f94371dcc5c3c6
      // Paper start - Folia schedulers
      /**
       * Invoked only when the entity is truly removed from the server, never to be added to any world.
-@@ -5178,7 +6413,7 @@ public abstract class Entity
+@@ -5174,7 +6409,7 @@ public abstract class Entity
      // Paper end - Folia schedulers
      // Paper start - optimise Folia entity scheduler
      public final void registerScheduler() {
@@ -31267,7 +31374,7 @@ index 2bdbb8451974f0b8d6e94d390ac735f4ccffd954..6b4f07fa571fc7105af3d351aff99e3e
  
      @Retention(RetentionPolicy.CLASS)
 diff --git a/net/minecraft/world/scores/Scoreboard.java b/net/minecraft/world/scores/Scoreboard.java
-index 4a15851bda30c918c58c96d2cb98b74f30db396c..e711f032920be9d35df14e0f71793682de37c33b 100644
+index 4a15851bda30c918c58c96d2cb98b74f30db396c..adbde0bc2de5bbeaba7d5c4b2f12c3a1d93da324 100644
 --- a/net/minecraft/world/scores/Scoreboard.java
 +++ b/net/minecraft/world/scores/Scoreboard.java
 @@ -30,17 +30,54 @@ import org.slf4j.Logger;
@@ -31377,7 +31484,8 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..e711f032920be9d35df14e0f71793682
 +            // even internally. stats incrementing is also thread-safe in Vanilla, and
 +            // this system is technically thread-safe now, so it's fine to run async
 +
-+            @Override
+             @Override
+-            public int get() {
 +            public synchronized int add(final int count) {
 +                return ScoreAccess.super.add(count);
 +            }
@@ -31388,8 +31496,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..e711f032920be9d35df14e0f71793682
 +            }
 +            // Canvas end - region threading
 +
-             @Override
--            public int get() {
++            @Override
 +            public synchronized int get() { // Canvas - region threading
                  return score.value();
              }
@@ -31440,7 +31547,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..e711f032920be9d35df14e0f71793682
                  score.setLocked(locked);
                  if (requiresSync.isTrue()) {
                      this.sendScoreToPlayers();
-@@ -158,14 +225,19 @@ public class Scoreboard {
+@@ -158,14 +225,26 @@ public class Scoreboard {
          };
      }
  
@@ -31449,10 +31556,17 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..e711f032920be9d35df14e0f71793682
 -        PlayerScores playerScore = this.playerScores.get(name.getScoreboardName());
 -        return playerScore != null ? playerScore.get(objective) : null;
 +        // Canvas start - region threading
-+        PlayerScores playerScore = this.scoresByName.get(name.getScoreboardName());
++        final PlayerScores playerScore = this.scoresByName.get(name.getScoreboardName());
++        if (playerScore == null) {
++            return null;
++        }
++
++        final Score score = playerScore.get(objective);
++
 +        // we wrap with our own implementation because technically you can cast ReadOnlyScoreInfo to Score
 +        // which then you can modify it with... no thanks!
-+        return playerScore != null ? new io.canvasmc.canvas.threadedregions.scores.ReadOnlyScore(playerScore.get(objective)) : null;
++
++        return score != null ? new io.canvasmc.canvas.threadedregions.scores.ReadOnlyScore(score) : null;
 +        // Canvas end - region threading
      }
  
@@ -31463,7 +31577,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..e711f032920be9d35df14e0f71793682
              Score score = scores.get(objective);
              if (score != null) {
                  result.add(new PlayerScoreEntry(player, score.value(), score.display(), score.numberFormat()));
-@@ -183,22 +255,28 @@ public class Scoreboard {
+@@ -183,22 +262,28 @@ public class Scoreboard {
      }
  
      public Collection<ScoreHolder> getTrackedPlayers() {
@@ -31496,7 +31610,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..e711f032920be9d35df14e0f71793682
                  if (removedPlayer != null) {
                      this.onPlayerRemoved(player);
                  }
-@@ -209,83 +287,136 @@ public class Scoreboard {
+@@ -209,83 +294,136 @@ public class Scoreboard {
      }
  
      public Object2IntMap<Objective> listPlayerScores(final ScoreHolder player) {
@@ -31628,12 +31742,12 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..e711f032920be9d35df14e0f71793682
 +
 +            newTeamsByHolder.put(player, team);
 +            added.setValue(team.getPlayers().add(player));
++
++            return new Entry(current.teamsByName, newTeamsByHolder);
++        });
  
 -        this.teamsByPlayer.put(player, team);
 -        return team.getPlayers().add(player);
-+            return new Entry(current.teamsByName, newTeamsByHolder);
-+        });
-+
 +        return added.isTrue();
 +        // Canvas end - region threading
      }
@@ -31669,7 +31783,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..e711f032920be9d35df14e0f71793682
      }
  
      public void removePlayerFromTeam(final String player, final PlayerTeam team) {
-@@ -293,20 +424,32 @@ public class Scoreboard {
+@@ -293,20 +431,32 @@ public class Scoreboard {
              throw new IllegalStateException("Player is either on another team or not on any team. Cannot remove from team '" + team.getName() + "'.");
          }
  
@@ -31707,7 +31821,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..e711f032920be9d35df14e0f71793682
      }
  
      public void onObjectiveAdded(final Objective objective) {
-@@ -339,15 +482,16 @@ public class Scoreboard {
+@@ -339,15 +489,16 @@ public class Scoreboard {
      public void onTeamRemoved(final PlayerTeam team) {
      }
  
@@ -31729,7 +31843,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..e711f032920be9d35df14e0f71793682
              .entrySet()
              .stream()
              .flatMap(
-@@ -363,7 +507,9 @@ public class Scoreboard {
+@@ -363,7 +514,9 @@ public class Scoreboard {
              .toList();
      }
  
@@ -31739,7 +31853,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..e711f032920be9d35df14e0f71793682
          Objective objective = this.getObjective(score.objective);
          if (objective == null) {
              LOGGER.error("Unknown objective {} for name {}, ignoring", score.objective, score.owner);
-@@ -373,10 +519,13 @@ public class Scoreboard {
+@@ -373,10 +526,13 @@ public class Scoreboard {
      }
  
      protected List<PlayerTeam.Packed> packPlayerTeams() {
@@ -31753,7 +31867,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..e711f032920be9d35df14e0f71793682
          PlayerTeam team = this.addPlayerTeam(packed.name());
          packed.displayName().ifPresent(team::setDisplayName);
          team.setColor(packed.color());
-@@ -394,10 +543,13 @@ public class Scoreboard {
+@@ -394,10 +550,13 @@ public class Scoreboard {
      }
  
      protected List<Objective.Packed> packObjectives() {
@@ -31767,7 +31881,7 @@ index 4a15851bda30c918c58c96d2cb98b74f30db396c..e711f032920be9d35df14e0f71793682
          this.addObjective(
              objective.name(),
              objective.criteria(),
-@@ -409,6 +561,7 @@ public class Scoreboard {
+@@ -409,6 +568,7 @@ public class Scoreboard {
      }
  
      protected Map<DisplaySlot, String> packDisplaySlots() {
