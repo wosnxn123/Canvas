@@ -272,3 +272,58 @@ Folesium: opened DIMENSION store <path>     # 维度存储已激活
 Folesium: opened PLAYERS store <path>       # 玩家存储已激活
 Folesium: no files were deleted. ...        # 转换保留提示（§5/§6）
 ```
+
+## 9. 运维经验与 FAQ（来自真实部署）
+
+以下经验来自一个 196 万区块（35.8 GiB 原始 NBT、732 条玩家记录）的生产服实测。
+
+### 修改压缩只影响新写入
+
+`compression` / `compressionLevel` 是**逐记录**生效的：已有记录保持写入时的编码。
+编辑 `folesium.properties` 会在几秒内热应用（`autoReload=true`）；只有 `enabled`
+（下次世界加载）和 `shards`（下次启动自动重分片）需要重启。要让已有存储整体
+换编码，需要重建：
+
+```bash
+# 先停服：
+java -jar <fork>-paperclip-*.jar --folesiumConvertToAnvil --nogui   # store -> .mca
+# 编辑 folesium.properties（如 compression=ZSTD、compressionLevel=9）
+java -jar <fork>-paperclip-*.jar --folesiumConvertToFolesium --nogui # .mca -> store，全量新编码
+```
+
+重建过程不删除任何文件，临时 `.mca` 会保留为备份。编码选型经验：ZSTD 9 的写入
+CPU 成本约等于原版 zlib 6，解压更快，压缩率再高 10-15%。
+
+### 转换期间的目录产物（预期现象，不是错误）
+
+* **备份目录** —— `*.folesium-backup-<uuid>` 是转换器先改名挪走的**旧版** Anvil
+  文件/目录，之后才恢复新的。改名是同卷 `rename(2)`，**不产生额外 IO**。验证恢复
+  无误后可删（`find <world> -name '*.folesium-backup-*' -exec rm -rf {} +`）。
+* **暂存目录** —— `*.folesium-staging-<uuid>` 出现在某个维度某类数据
+  （region / entities / poi）写入期间；完成后暂存目录改名为正式目录、旧的进备份。
+* **进度顺序** —— 先玩家数据，再逐个维度，每个维度按 region → entities → poi
+  依次处理；每个维度完成才打印该维度的统计行。
+* **转换输出 "0 chunks" 是正常的** —— 当 Anvil 侧为空时：以 Folesium 模式运行过
+  的世界数据在 store 里，`.mca` 文件（或目录）可能已删。转换不触碰 store 已有
+  记录（不重复导入、不删除）。
+
+### 慢存储上的 IO 预期
+
+`--folesiumConvertToFolesium` 在共享/虚拟化存储上也很快（store 顺序追加；
+196 万区块约 90 秒）。`--folesiumConvertToAnvil` 在同类存储上很慢：`.mca` 是
+512 字节扇区的随机写，会表现为数千 IOPS 加数秒延迟；196 万区块全量反向约需
+20-60 分钟，属一次性成本。Folesium 日常运行的 IO（顺序追加 + 压实）完全避开
+这种模式。
+
+### 多世界
+
+`<world>/dimensions/` 下的维度会自动发现。多世界插件创建的**兄弟目录**世界
+（如 `world_creative/` 与 `world/` 平级）不会被发现：用
+`--folesiumWorldDir <该世界路径>` 单独转换。删除某个世界后，其
+`dimensions/minecraft/<名称>/` 目录（可能含空 Folesium store）会残留——手动删除
+目录及其注册（插件配置）；空 store 不包含任何数据。
+
+### 启动显示 `Loading 0 persistent chunks`
+
+Folia/Canvas 的正常现象：区域化调度器不预加载出生区块。区块在玩家移动时按需
+从 store 读取；用游玩验证，而不是看启动行。

@@ -288,3 +288,68 @@ Folesium: opened DIMENSION store <path>     # a dimension store is active
 Folesium: opened PLAYERS store <path>       # the player store is active
 Folesium: no files were deleted. ...        # conversion retention note (§5/§6)
 ```
+
+## 9. Operations experience & FAQ (from real deployments)
+
+The notes below come from production experience on a 1.96 M-chunk world
+(35.8 GiB raw NBT, 732 player records).
+
+### Changing compression only affects new writes
+
+`compression` / `compressionLevel` are applied **per record**: existing records keep
+the codec they were written with. Editing `folesium.properties` is hot-applied within
+seconds (`autoReload=true`); only `enabled` (next world load) and `shards` (next start,
+automatic reshard) need a restart. To re-compress an existing store fully, rebuild it:
+
+```bash
+# server stopped:
+java -jar <fork>-paperclip-*.jar --folesiumConvertToAnvil --nogui   # store -> .mca
+# edit folesium.properties (e.g. compression=ZSTD, compressionLevel=9)
+java -jar <fork>-paperclip-*.jar --folesiumConvertToFolesium --nogui # .mca -> store, all new codec
+```
+
+Nothing is deleted during the rebuild; the temporary `.mca` files stay as a backup.
+Rule of thumb for codec selection: ZSTD level 9 costs about the same CPU as vanilla
+zlib level 6 on writes, decompresses faster, and compresses ~10-15 % better.
+
+### Conversion bookkeeping (expected, not errors)
+
+* **Backup directories** — `*.folesium-backup-<uuid>` are the *old* Anvil files/dirs
+  the converter renamed aside before restoring fresh ones. Renaming is a same-volume
+  `rename(2)`, so it costs no extra I/O. They are safe to delete once the restore is
+  verified (`find <world> -name '*.folesium-backup-*' -exec rm -rf {} +`).
+* **Staging directories** — `*.folesium-staging-<uuid>` appear while a data class
+  (region / entities / poi) of a dimension is being written; when it finishes, the
+  staging directory is renamed to the real name and the old one is backed up.
+* **Progress order** — player data first, then dimensions one by one, each data class
+  (region → entities → poi) in turn. A per-dimension line prints only when that
+  dimension finishes.
+* **"0 chunks" in the conversion output** is normal when the Anvil side is empty:
+  a world that ran with Folesium enabled has its data in the store, and the `.mca`
+  files (or directories) may have been removed already. The store is untouched by the
+  conversion; existing records are never re-imported or deleted.
+
+### I/O expectations on slow storage
+
+`--folesiumConvertToFolesium` is fast even on shared/virtualised storage (sequential
+append to the store; 1.96 M chunks took ~90 s). `--folesiumConvertToAnvil` is slow on
+such storage: `.mca` region files are random 512-byte-sector writes, which can show up
+as thousands of IOPS with multi-second latency. A full reverse of 1.96 M chunks took
+20-60 minutes and is a one-off cost. Folesium's normal runtime I/O (sequential
+append + compaction) avoids this pattern entirely.
+
+### Multiple worlds
+
+Dimensions under `<world>/dimensions/` are discovered automatically. Worlds created
+by multi-world plugins as *sibling* directories (e.g. `world_creative/` next to
+`world/`) are not: convert them separately with
+`--folesiumWorldDir <path-to-that-world>`. Deleting a world later leaves its
+`dimensions/minecraft/<name>/` directory (and possibly an empty Folesium store) behind
+— remove the directory and its registration (plugin config) manually; an empty store
+holds no data.
+
+### `Loading 0 persistent chunks` at startup
+
+Normal on Folia/Canvas: the regionised scheduler does not pre-load spawn chunks.
+Chunks are read from the store on demand as players move; verify by playing rather
+than by the startup line.
