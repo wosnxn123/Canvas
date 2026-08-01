@@ -47,7 +47,7 @@ subprojects {
     }
 
     repositories {
-        mavenCentral()
+        maven("https://maven.aliyun.com/repository/central") // Folesium: Maven Central blocks CNB/CN hosts (HTTP 403); Aliyun mirrors it
         maven(paperMavenPublicUrl)
         maven(canvasMavenPublicUrl)
     }
