@@ -107,7 +107,7 @@ configuration watcher is created.
 | `durability` | `BATCH` | live | `ALWAYS` = fsync every write; `BATCH` = background group commit; `EXPLICIT` = fsync only on flush/close. Switching to/from `BATCH` starts/stops the group-commit thread. |
 | `batchFlushMillis` | `500` | live | group-commit interval for `BATCH` |
 | `compression` | `ZSTD` (when zstd-jni is available) else `DEFLATE` | live | `NONE` / `DEFLATE` / `ZSTD`. Applies to new writes only; every record records its own codec, so a change needs no migration and old records stay readable. |
-| `compressionLevel` | `4` | live | Deflate 1–9, ZSTD 1–22. 4 ≈ vanilla zlib ratio at lower CPU. |
+| `compressionLevel` | auto: `9` (ZSTD) / `4` (DEFLATE) | live | Deflate 1–9, ZSTD 1–22. ZSTD 9 ≈ vanilla zlib-6 write CPU with better ratio. |
 | `compactRatio` | `0.5` | live | compact a shard when dead bytes exceed this fraction of the file |
 | `compactMinBytes` | `8388608` | live | never compact shards smaller than this (8 MiB) |
 | `verifyChecksums` | `false` | live | re-verify record CRC32C on every read (~2× read I/O; recovery scans always verify) |
@@ -161,6 +161,15 @@ no setup needed on the server. It beats Deflate on both ratio and speed. If chos
 `zstd-jni` is missing (e.g. a standalone converter run), the store open fails with a
 clear message.
 
+**Defaults are auto-tuned for the machine**: `shards` follows the CPU core count, and
+`compression` becomes `ZSTD` automatically whenever `zstd-jni` is present; the default
+`compressionLevel` is then 9 — about the same write CPU as vanilla zlib level 6, with
+better ratio — or 4 for the DEFLATE fallback.
+
+Changing `compression` / `compressionLevel` only affects **new** writes (every record
+stores its own codec, so no migration is needed). To re-codec an existing store
+entirely, rebuild it via the two-step conversion (§5).
+
 Example of a durability-first setup:
 
 ```properties
@@ -213,6 +222,27 @@ Folesium is enabled. Once you have verified the converted world, you may delete 
 yourself to reclaim disk space: `region/`, `entities/`, `poi/` in every dimension and
 `players/data|advancements|stats` (26.x) or `playerdata/ advancements/ stats/`
 (pre-26).
+
+### Conversion artifacts (expected, not errors)
+
+* **Backup dirs** — `*.folesium-backup-<uuid>` hold the *old* Anvil files/dirs the
+  converter renamed aside before restoring fresh ones (a same-volume rename, so no
+  extra I/O). Delete them once the restore is verified
+  (`find <world> -name '*.folesium-backup-*' -exec rm -rf {} +`).
+* **Staging dirs** — `*.folesium-staging-<uuid>` appear while one data class
+  (region / entities / poi) of a dimension is being written; they are renamed to the
+  real name when the class finishes.
+* **Progress order** — player data first, then dimensions one by one, each data class
+  in turn; a per-dimension line prints when that dimension finishes.
+* **"0 chunks"** in the output is normal when the Anvil side is empty (a world that
+  ran with Folesium enabled keeps its data in the store). The store is never
+  re-imported or deleted by a conversion.
+* **Sibling worlds** (e.g. `world_creative/` next to `world/`) are not discovered
+  automatically; convert them separately with `--folesiumWorldDir <path>`.
+
+A full re-codec of an existing store is the same two-step conversion:
+`--folesiumConvertToAnvil` (store → `.mca`), edit `folesium.properties`, then
+`--folesiumConvertToFolesium` (`.mca` → store in the new codec).
 
 ---
 
@@ -281,6 +311,10 @@ world/
 | store directory keeps growing | dead records are reclaimed by compaction: the engine checks every open store at most once every 5 minutes and rewrites a shard once it passes `compactRatio` × size and `compactMinBytes`; lower those two to compact sooner |
 | want to verify integrity | start with `-Dfolesium.verifyChecksums=true`, or `folesium-converter inspect <store>` |
 
+| `*.folesium-backup-*` dirs | the converter renames old files aside before restoring fresh ones; delete after verifying (§5) |
+| `*.folesium-staging-*` dirs | temporary while a data class is being written; renamed to the real name when done (§5) |
+| `Loading 0 persistent chunks` at startup | normal on Folia/Canvas — no spawn-chunk preload; chunks load on demand |
+
 Log lines to know:
 
 ```text
@@ -288,68 +322,3 @@ Folesium: opened DIMENSION store <path>     # a dimension store is active
 Folesium: opened PLAYERS store <path>       # the player store is active
 Folesium: no files were deleted. ...        # conversion retention note (§5/§6)
 ```
-
-## 9. Operations experience & FAQ (from real deployments)
-
-The notes below come from production experience on a 1.96 M-chunk world
-(35.8 GiB raw NBT, 732 player records).
-
-### Changing compression only affects new writes
-
-`compression` / `compressionLevel` are applied **per record**: existing records keep
-the codec they were written with. Editing `folesium.properties` is hot-applied within
-seconds (`autoReload=true`); only `enabled` (next world load) and `shards` (next start,
-automatic reshard) need a restart. To re-compress an existing store fully, rebuild it:
-
-```bash
-# server stopped:
-java -jar <fork>-paperclip-*.jar --folesiumConvertToAnvil --nogui   # store -> .mca
-# edit folesium.properties (e.g. compression=ZSTD, compressionLevel=9)
-java -jar <fork>-paperclip-*.jar --folesiumConvertToFolesium --nogui # .mca -> store, all new codec
-```
-
-Nothing is deleted during the rebuild; the temporary `.mca` files stay as a backup.
-Rule of thumb for codec selection: ZSTD level 9 costs about the same CPU as vanilla
-zlib level 6 on writes, decompresses faster, and compresses ~10-15 % better.
-
-### Conversion bookkeeping (expected, not errors)
-
-* **Backup directories** — `*.folesium-backup-<uuid>` are the *old* Anvil files/dirs
-  the converter renamed aside before restoring fresh ones. Renaming is a same-volume
-  `rename(2)`, so it costs no extra I/O. They are safe to delete once the restore is
-  verified (`find <world> -name '*.folesium-backup-*' -exec rm -rf {} +`).
-* **Staging directories** — `*.folesium-staging-<uuid>` appear while a data class
-  (region / entities / poi) of a dimension is being written; when it finishes, the
-  staging directory is renamed to the real name and the old one is backed up.
-* **Progress order** — player data first, then dimensions one by one, each data class
-  (region → entities → poi) in turn. A per-dimension line prints only when that
-  dimension finishes.
-* **"0 chunks" in the conversion output** is normal when the Anvil side is empty:
-  a world that ran with Folesium enabled has its data in the store, and the `.mca`
-  files (or directories) may have been removed already. The store is untouched by the
-  conversion; existing records are never re-imported or deleted.
-
-### I/O expectations on slow storage
-
-`--folesiumConvertToFolesium` is fast even on shared/virtualised storage (sequential
-append to the store; 1.96 M chunks took ~90 s). `--folesiumConvertToAnvil` is slow on
-such storage: `.mca` region files are random 512-byte-sector writes, which can show up
-as thousands of IOPS with multi-second latency. A full reverse of 1.96 M chunks took
-20-60 minutes and is a one-off cost. Folesium's normal runtime I/O (sequential
-append + compaction) avoids this pattern entirely.
-
-### Multiple worlds
-
-Dimensions under `<world>/dimensions/` are discovered automatically. Worlds created
-by multi-world plugins as *sibling* directories (e.g. `world_creative/` next to
-`world/`) are not: convert them separately with
-`--folesiumWorldDir <path-to-that-world>`. Deleting a world later leaves its
-`dimensions/minecraft/<name>/` directory (and possibly an empty Folesium store) behind
-— remove the directory and its registration (plugin config) manually; an empty store
-holds no data.
-
-### `Loading 0 persistent chunks` at startup
-
-Normal on Folia/Canvas: the regionised scheduler does not pre-load spawn chunks.
-Chunks are read from the store on demand as players move; verify by playing rather
-than by the startup line.
