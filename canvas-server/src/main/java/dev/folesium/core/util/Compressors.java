@@ -128,10 +128,24 @@ public final class Compressors {
             if (rawLen > 0 && !inf.finished()) {
                 // The stream still has input left after the declared rawLen was filled: the
                 // record is larger than its header claims. Previously this silently returned
-                // truncated data (only the CRC would catch it); fail loudly instead. A rawLen
-                // of 0 is exempt: an empty DEFLATE stream (deflate of nothing) is legal and
-                // the loop never ran, so finished() is expected to stay false.
+                // truncated data (only the CRC would catch it); fail loudly instead.
                 throw new IllegalStateException("Compressed record exceeds declared size: " + rawLen);
+            }
+            if (rawLen == 0 && !inf.finished()) {
+                // A declared size of 0 must not skip validation: an empty DEFLATE stream
+                // (deflate of nothing) is legal and the loop above never ran, but garbage
+                // input with a 0 size would otherwise pass silently. Inflate the stream once
+                // against a scratch buffer - a legal empty stream reaches the end-of-stream
+                // marker (finished) without producing output; garbage either raises
+                // DataFormatException below or never finishes (truncated / oversized).
+                byte[] scratch = new byte[1];
+                int n = inf.inflate(scratch, 0, 1);
+                if (n != 0) {
+                    throw new IllegalStateException("Compressed record exceeds declared size: " + rawLen);
+                }
+                if (!inf.finished()) {
+                    throw new IllegalStateException("Truncated compressed record");
+                }
             }
             if (off != rawLen) {
                 throw new IllegalStateException("Decompressed size mismatch: " + off + " != " + rawLen);

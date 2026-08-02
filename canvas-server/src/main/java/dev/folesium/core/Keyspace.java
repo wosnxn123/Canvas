@@ -52,7 +52,8 @@ public final class Keyspace implements AutoCloseable {
      * keyspaces eagerly open every shard of {@link FolesiumConfig#shardCount()};
      * read-only keyspaces size the array from the shard count recorded in the shard file
      * headers on disk (see {@link #readRecordedShardCount}; the names-derived fallback
-     * only fires when every discovered header is unreadable) and leave the slot of a
+     * only fires when every discovered header is unreadable or the readable ones
+     * disagree) and leave the slot of a
      * missing shard {@code null}. Fixed at construction and never mutated.
      */
     private final ShardFile[] shards;
@@ -201,28 +202,38 @@ public final class Keyspace implements AutoCloseable {
      * offset 12, u32 big-endian, matching {@code ShardFile}'s file header). Validates the
      * header magic ({@code FLSM}) and format version (1) exactly like
      * {@code StoreResharder}'s header reader, so a foreign or garbage file matching the
-     * {@code <name>-NNNN.flog} name pattern is never trusted, and validates the
-     * power-of-two invariant so the read-only routing mask is always legal.
+     * {@code <name>-NNNN.flog} name pattern is never trusted; validates the shard index
+     * against the index the file name implies (exactly like {@code ShardFile}'s
+     * {@code validateFileHeader}) and the power-of-two invariant so the read-only
+     * routing mask is always legal.
      *
      * <p>Torn-header tolerant: the count is store-wide and stamped into every shard file
      * header, so any intact shard names the layout. Every discovered file is tried in
-     * ascending order; a file whose header is unreadable, fails the magic/version check,
-     * or records an illegal count is skipped as untrusted - the lowest shard may be torn
-     * (a crash truncated it before its header was ever written) or carry a header that
-     * fails magic/version/topology validation; {@code ShardFile}'s read-only construction
-     * tolerates both and treats such a shard as empty (a read-write open would repair the
-     * torn case and reject the mismatched one loudly), so the skipped file here and the
-     * empty shard there stay consistent while the higher shards are intact.
-     * Only when <em>every</em> discovered header is unreadable does the count fall back to
-     * the layout the file names imply: shard files are named by index under the store's
-     * power-of-two shard count, so {@code highest index + 1} reproduces the original
-     * count. This fallback is a tolerance path - the keyspace then opens with an empty
-     * slot per unreadable shard instead of failing the whole keyspace - and is only used
-     * when the derived count is itself a legal power of two (otherwise the layout is
-     * genuinely unreadable and the failure is reported).
+     * ascending order; a file whose header is unreadable, fails the magic/version/index
+     * check, or records an illegal count is skipped as untrusted - the lowest shard may
+     * be torn (a crash truncated it before its header was ever written) or carry a
+     * header that fails magic/version/topology validation; {@code ShardFile}'s read-only
+     * construction tolerates both and treats such a shard as empty (a read-write open
+     * would repair the torn case and reject the mismatched one loudly), so the skipped
+     * file here and the empty shard there stay consistent while the higher shards are
+     * intact. The count is only trusted once every <em>readable</em> header records the
+     * same value: a reshard interrupted between the file swap and the metadata rewrite
+     * can leave a mixture of old- and new-layout shard files, and taking the first
+     * readable header's count would size the keyspace by chance, so disagreeing
+     * readable headers are treated exactly like unreadable ones.
+     * Only when <em>every</em> discovered header is unreadable (or the readable ones
+     * disagree) does the count fall back to the layout the file names imply: shard
+     * files are named by index under the store's power-of-two shard count, so
+     * {@code highest index + 1} reproduces the original count. This fallback is a
+     * tolerance path - the keyspace then opens with an empty slot per unreadable shard
+     * instead of failing the whole keyspace - and is only used when the derived count
+     * is itself a legal power of two (otherwise the layout is genuinely unreadable and
+     * the failure is reported).
      */
     private static int readRecordedShardCount(Path dir, String name, int[] discovered) {
         RuntimeException lastFailure = null;
+        Integer recorded = null;   // the count every readable header must agree on
+        boolean conflicting = false; // two readable headers recorded different counts
         for (int index : discovered) {
             Path shardFile = dir.resolve(String.format("%s-%04d.flog", name, index));
             try (FileChannel ch = FileChannel.open(shardFile, StandardOpenOption.READ)) {
@@ -239,28 +250,53 @@ public final class Keyspace implements AutoCloseable {
                             "Not a Folesium shard file (bad magic or unsupported version): " + shardFile);
                 }
                 header.getShort(); // reserved
-                header.getInt();   // shardIndex
+                int shardIndex = header.getInt();
                 int count = header.getInt();
+                // The header must name the shard its file name claims, exactly like
+                // ShardFile.validateFileHeader: a file whose header records a different
+                // index (e.g. a shard left over from an interrupted layout swap) is not
+                // the shard it looks like and is not trusted.
+                if (shardIndex != index) {
+                    throw new FolesiumException("Shard topology mismatch in " + shardFile
+                            + " (file: " + shardIndex + ", expected: " + index + ")");
+                }
                 if (count < 1 || count > 1024 || Integer.bitCount(count) != 1) {
                     throw new FolesiumException("Invalid shard count " + count + " in header of " + shardFile);
                 }
-                return count;
+                // The count is store-wide and stamped into every header, so every readable
+                // header must agree on it: a reshard interrupted between the file swap and
+                // the metadata rewrite can leave a mixture of old- and new-layout shard
+                // files, and trusting whichever header happens to be read first would size
+                // the keyspace by chance. Any disagreement makes the layout unreadable and
+                // the names-derived fallback below takes over.
+                if (recorded == null) {
+                    recorded = count;
+                } else if (recorded != count) {
+                    conflicting = true;
+                    lastFailure = new FolesiumException("Shard headers of keyspace '" + name + "' in " + dir
+                            + " disagree on the shard count (read " + recorded + " and " + count + ")");
+                }
             } catch (IOException e) {
                 lastFailure = new FolesiumException("Cannot read shard header " + shardFile, e);
             } catch (FolesiumException e) {
                 lastFailure = e;
             }
         }
-        // Every discovered header is unreadable (e.g. a crash truncated the whole lowest
-        // shard before any header was written). Fall back to the names-derived count; see
-        // the method javadoc for why this reproduces the original power-of-two layout.
+        if (recorded != null && !conflicting) {
+            return recorded;
+        }
+        // Every discovered header is unreadable, or the readable ones disagree (e.g. a
+        // crash truncated the whole lowest shard before any header was written, or a
+        // reshard was interrupted between the file swap and the metadata rewrite). Fall
+        // back to the names-derived count; see the method javadoc for why this
+        // reproduces the original power-of-two layout.
         int byNames = discovered[discovered.length - 1] + 1;
         if (byNames >= 1 && byNames <= 1024 && Integer.bitCount(byNames) == 1) {
             return byNames;
         }
         throw new FolesiumException("Cannot read the shard header of any of the " + discovered.length
                 + " discovered shard files of keyspace '" + name + "' in " + dir
-                + " (all torn or unreadable)", lastFailure);
+                + " (all torn, unreadable or disagreeing)", lastFailure);
     }
 
     private static boolean isDecimalIndex(String s) {

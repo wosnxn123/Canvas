@@ -67,6 +67,15 @@ public final class DictionaryStore {
      */
     private static final int MIN_DICT_BYTES = 64;
 
+    /**
+     * Upper bound for a plausible dictionary file. A trained dictionary is exactly
+     * {@link #DICT_SIZE} bytes and hand-built raw-content dictionaries are small as well;
+     * anything near 64 MiB is not a dictionary. The check runs before the read (mirroring
+     * {@code RegionPage.read}'s size pre-check) so a stray huge file is rejected instead of
+     * being read into memory whole.
+     */
+    private static final long MAX_DICT_BYTES = 64L * 1024 * 1024;
+
     /** {@code Zstd.trainFromBuffer} rejects fewer than 11 samples. */
     private static final int MIN_SAMPLES = 11;
 
@@ -86,6 +95,18 @@ public final class DictionaryStore {
     public static byte[] load(Path dictFile) throws IOException {
         if (!Files.isRegularFile(dictFile)) {
             return null;
+        }
+        // Pre-check the size before reading the bytes: a file this big is never a dictionary,
+        // and loading it whole would be an OOM for what is a corrupt/foreign file anyway
+        // (normal dictionaries are well under 1 MiB - trained ones are exactly DICT_SIZE).
+        long size = Files.size(dictFile);
+        if (size > MAX_DICT_BYTES) {
+            throw new FolesiumException(
+                    "Dictionary file " + dictFile + " is corrupt: " + size
+                            + " bytes, but a valid zstd dictionary is a small trained blob (well under 1 MiB;"
+                            + " trained ones are exactly " + DICT_SIZE + " bytes). Restore dict.bin from a"
+                            + " backup, or delete it and re-run the conversion; codec-3 records in this"
+                            + " keyspace are not decodable without the dictionary.");
         }
         byte[] bytes = Files.readAllBytes(dictFile);
         if (bytes.length < MIN_DICT_BYTES) {

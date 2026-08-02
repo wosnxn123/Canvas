@@ -234,6 +234,14 @@ public record FolesiumConfig(
      * mode: the constructor forbids codec 3 without {@code dictionaryCompression}, so
      * switching to it turns the flag on (a store whose metadata records ZSTD_DICT must
      * always be able to manage its per-keyspace dictionary).
+     *
+     * <p>Switching <em>away</em> from ZSTD_DICT leaves the flag untouched: an on flag may
+     * be the automatic side effect of the earlier switch to ZSTD_DICT rather than an
+     * explicit user choice, and the two are indistinguishable, so the caller decides
+     * (turn it off explicitly with {@link #withDictionaryCompression(boolean)}). The
+     * runtime degradation path in {@code FolesiumDatabase.applyRuntimeConfig} relies on
+     * this: after degrading a ZSTD_DICT request to ZSTD, the flag stays on so
+     * dictionary-backed keyspaces keep writing codec 3.</p>
      */
     public FolesiumConfig withCompression(Compression c) {
         return new FolesiumConfig(shardCount, durability, batchFlushMillis, c,

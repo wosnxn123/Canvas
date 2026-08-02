@@ -545,6 +545,11 @@ public final class FolesiumDatabase implements AutoCloseable {
             FolesiumConfig merged = mergeRuntimeConfig(current, requestedBaseline, next);
             boolean reshardRequired = next.shardCount() != requestedBaseline.shardCount();
             FolesiumConfig effective = merged.withShardCount(current.shardCount());
+            // Whether the requested codec was degraded to a session-only fallback. A
+            // degradation must never be persisted as the store's codec (see the persist gate
+            // below): the metadata keeps the operator's requested/current codec, so the next
+            // open re-evaluates (and the note explains what actually happened).
+            boolean degraded = false;
 
             if ((effective.compression() == FolesiumConfig.Compression.ZSTD && !ZstdNative.available())
                     || (effective.compression() == FolesiumConfig.Compression.ZSTD_DICT
@@ -554,6 +559,7 @@ public final class FolesiumDatabase implements AutoCloseable {
                                 ? "the zstd-jni dictionary API is not available"
                                 : "zstd-jni is not available")
                         + "; keeping " + current.compression());
+                degraded = true;
                 effective = effective.withCompression(current.compression())
                         .withCompressionLevel(FolesiumConfig.clampCompressionLevel(
                                 current.compression(), effective.compressionLevel()));
@@ -576,7 +582,10 @@ public final class FolesiumDatabase implements AutoCloseable {
                     }
                 }
                 if (missingDictionary) {
-                    notes.add("compression=ZSTD_DICT ignored: no per-keyspace dictionary exists; keeping ZSTD");
+                    notes.add("compression=ZSTD_DICT ignored: no per-keyspace dictionary exists; "
+                            + "using ZSTD for this session (dictionaryCompression stays enabled, so "
+                            + "keyspaces that have a dictionary keep writing codec 3)");
+                    degraded = true;
                     effective = effective.withCompression(FolesiumConfig.Compression.ZSTD)
                             .withCompressionLevel(FolesiumConfig.clampCompressionLevel(
                                     FolesiumConfig.Compression.ZSTD, effective.compressionLevel()));
@@ -611,7 +620,13 @@ public final class FolesiumDatabase implements AutoCloseable {
             if (changes.isEmpty()) {
                 return new ConfigReloadResult(current, changes, notes, reshardRequired);
             }
-            if (effective.compression() != current.compression()) {
+            // Persist only an explicit codec change that was actually applied: a degradation
+            // (ZSTD unavailable, or ZSTD_DICT without a dictionary) is a session-only
+            // accommodation and must not rewrite the metadata with the fallback codec - the
+            // store keeps its recorded codec so the next open re-evaluates, and the note
+            // already told the operator what happened. An explicit change that survived
+            // degradation is persisted exactly as applied.
+            if (!degraded && effective.compression() != current.compression()) {
                 persistCompression(effective.compression());
             }
             this.config = effective;

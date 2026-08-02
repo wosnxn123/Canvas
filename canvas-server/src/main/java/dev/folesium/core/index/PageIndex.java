@@ -52,11 +52,14 @@ import java.util.concurrent.locks.ReentrantLock;
  *
  * <p><b>Damage repair.</b> When a page file is corrupt, {@link #rebuildPageFrom} drops
  * the cached entry and deletes the file, and marks the region damaged
- * ({@link #isRegionDamaged}) until a successful {@link #updateSlot} clears the marker
- * or the next open rebuilds the pages from the log. While a region is marked, PAGE-mode
- * readers bypass its (fresh, empty) page and fall back to the HashMap, which the shard
- * write path always maintains, so the other live chunks of the region keep reading
- * correctly instead of silently missing.</p>
+ * ({@link #isRegionDamaged}). While a region is marked, PAGE-mode readers bypass its
+ * (fresh, empty) page and fall back to the HashMap, which the shard write path always
+ * maintains, so the other live chunks of the region keep reading correctly instead of
+ * silently missing. The marker survives until the open-time rebuild completes
+ * (ShardFile calls {@link #clearAllDamage()} after {@code buildPagesFromCompactionAnchor})
+ * or {@link #invalidateAll()}/{@link #close()} reset the set: a runtime single-slot
+ * write cannot prove the rest of the page complete, so {@link #updateSlot} never
+ * clears a marker.</p>
  *
  * <p><b>Cache design.</b> The cache is partitioned into {@value #SEGMENT_COUNT}
  * segments, each guarded by its own {@link ReentrantLock}, so region threads on
@@ -150,18 +153,21 @@ public final class PageIndex implements AutoCloseable {
     /** In-memory compaction-anchor (last completed compaction EOF) cache per shard. */
     private final ConcurrentHashMap<String, Long> compactionWatermarks = new ConcurrentHashMap<>();
     /**
-     * Regions whose page file {@link #rebuildPageFrom} deleted after damage and whose
-     * page has not been rebuilt since. While a region is marked, PAGE-mode readers must
-     * not trust its page - the next {@link #pageFor} would build a fresh, empty page
-     * that knows nothing about records written before this session, so every other live
-     * chunk of the region would read as absent - and fall back to the HashMap, which
-     * the shard write path always maintains (see {@link #isRegionDamaged}). A
-     * successful {@link #updateSlot} unmarks the region; {@link #invalidateAll()} and
-     * {@link #close()} clear the whole set. In-memory only: the next open rebuilds the
-     * pages from the log and starts with an empty set. A concurrent set because
-     * {@link #rebuildPageFrom} touches it outside the owning segment lock while
-     * {@link #updateSlot} touches it inside the segment lock - no lock ordering is
-     * imposed between the two, so no deadlock can arise.
+     * Regions whose page file {@link #rebuildPageFrom} deleted after damage (or whose
+     * corrupt page file stays in place, read-only mode) and whose page has not been
+     * rebuilt since. While a region is marked, PAGE-mode readers must not trust its
+     * page - the next {@link #pageFor} would build a fresh, empty page that knows
+     * nothing about records written before this session, so every other live chunk of
+     * the region would read as absent - and fall back to the HashMap, which the shard
+     * write path always maintains (see {@link #isRegionDamaged}). The markers are
+     * cleared only by {@link #clearAllDamage()} (ShardFile calls it once the open-time
+     * rebuild has replayed the whole log), {@link #invalidateAll()} and {@link #close()}:
+     * a runtime single-slot {@link #updateSlot} never clears one, because one slot
+     * write cannot prove the rest of the page complete. In-memory only: the next open
+     * rebuilds the pages from the log and starts with an empty set. A concurrent set
+     * because {@link #rebuildPageFrom} marks it outside the owning segment lock while
+     * other threads may be reading it via {@link #isRegionDamaged} - no lock ordering
+     * is imposed between the two, so no deadlock can arise.
      */
     private final Set<Long> damagedRegions = ConcurrentHashMap.newKeySet();
 
@@ -302,10 +308,14 @@ public final class PageIndex implements AutoCloseable {
     }
 
     /**
-     * Whether the region's page file was deleted by {@link #rebuildPageFrom} after
-     * damage and has not been rebuilt since (a successful {@link #updateSlot} or the
-     * next open clears the marker). While {@code true}, PAGE-mode readers must not
-     * consult the region's page - the next {@link #pageFor} builds a fresh, empty page
+     * Whether the region's page cannot be trusted: its page file was deleted by
+     * {@link #rebuildPageFrom} after damage, or stays corrupt and undeletable on disk
+     * (read-only mode), and has not been rebuilt since. The marker is cleared only by
+     * {@link #clearAllDamage()} (ShardFile calls it once the open-time rebuild
+     * completes), {@link #invalidateAll()} or {@link #close()} - a runtime
+     * single-slot {@link #updateSlot} never clears it, because one slot write cannot
+     * prove the rest of the page complete. While {@code true}, PAGE-mode readers must
+     * not consult the region's page - the next {@link #pageFor} builds a fresh, empty page
      * that knows nothing about records written before this session - and must fall back
      * to the HashMap, which the shard write path always maintains (ShardFile's
      * {@code index.put} runs unconditionally on the write path). AUTO-mode readers
@@ -313,6 +323,19 @@ public final class PageIndex implements AutoCloseable {
      */
     public boolean isRegionDamaged(int regionX, int regionZ) {
         return enabled && !invalidated && damagedRegions.contains(pack(regionX, regionZ));
+    }
+
+    /**
+     * Clears every region damage marker. Called by ShardFile once the open-time page
+     * rebuild ({@code buildPagesFromCompactionAnchor}) completes: the full log replay
+     * has made every region page complete again, so markers set during the rebuild (or
+     * left over from the previous session) are stale and PAGE-mode readers can trust
+     * the pages once more. Runtime single-slot writes never clear markers (see
+     * {@link #updateSlot}); only this method, {@link #invalidateAll()} and
+     * {@link #close()} do. Harmless when no region is marked.
+     */
+    public void clearAllDamage() {
+        damagedRegions.clear();
     }
 
     /**
@@ -375,12 +398,11 @@ public final class PageIndex implements AutoCloseable {
                     e.dirty = true;
                     dirtyCount.incrementAndGet();
                 }
-                // A successful slot write makes the page fresh and valid again: clear any
-                // damage marker for the region so PAGE-mode readers trust the page again
-                // (the marker was set by rebuildPageFrom after a corrupt backing file was
-                // deleted; the write path replays into the rebuilt page exactly like the
-                // open-time log replay does). See the damagedRegions field javadoc.
-                damagedRegions.remove(key);
+                // No damage-marker clearing here: a single slot write proves nothing
+                // about the rest of the page, so it cannot vouch for the region's
+                // completeness. Markers set by rebuildPageFrom survive until the
+                // open-time rebuild (clearAllDamage), invalidateAll or close. See the
+                // damagedRegions field javadoc.
             }
         } finally {
             seg.lock.unlock();
@@ -419,7 +441,11 @@ public final class PageIndex implements AutoCloseable {
         if (readOnly) {
             // Read-only mode never touches disk: the corrupt file stays in place, so a
             // fresh page cannot be loaded for it. Report the page as still damaged so
-            // the caller skips the region instead of failing the open.
+            // the caller skips the region instead of failing the open, and mark the
+            // region damaged: the corrupt file can never be trusted this session, so
+            // PAGE-mode readers must fall back to the HashMap exactly like the deleted
+            // case (the marker is cleared only by the next open's full rebuild).
+            damagedRegions.add(pack(regionX, regionZ));
             return !Files.exists(pagePath(regionX, regionZ));
         }
         try {
@@ -429,11 +455,13 @@ public final class PageIndex implements AutoCloseable {
             // every other live chunk of the region would then read as absent. The HashMap
             // is always maintained on the write path (ShardFile.put's index.put runs
             // unconditionally), so mark the region damaged: PAGE-mode readers fall back to
-            // the HashMap for it until a successful updateSlot unmarks it or the next open
-            // rebuilds the pages from the log. The read-only branch above returns false
-            // without adding the marker: the corrupt file stays in place there, so the
-            // page remains damaged and is retried on the next access, per the existing
-            // semantics.
+            // the HashMap for it. The marker stays until the open-time rebuild completes
+            // ({@link #clearAllDamage()} clears it), {@link #invalidateAll()} or
+            // {@link #close()} - a runtime single-slot write cannot prove the page
+            // complete, so {@link #updateSlot} never clears it. The read-only branch
+            // above marks the region too: its corrupt file stays in place, so the page
+            // stays untrusted for the whole session and PAGE-mode readers fall back to
+            // the HashMap there as well.
             damagedRegions.add(pack(regionX, regionZ));
             return true;
         } catch (IOException e) {

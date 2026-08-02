@@ -122,9 +122,25 @@ public final class PlayerDataConverter {
      * for the store itself only. The one exception is the empty-26.x-shell case
      * handled by {@link #playerRootFor}, which downgrades such a world to the
      * legacy directories it actually holds its data in.
+     *
+     * <p>When a 26.x world additionally still holds a legacy root-level tree with
+     * player files, both trees are imported -- the modern one first, so
+     * {@code putIfAbsent} lets the 26.x files win on conflicts -- and a warning is
+     * logged by {@link #anvilToFolesium}; neither tree is silently left behind.</p>
      */
     private static List<Mapping> mappingsFor(Path worldRoot, Path playerRoot) {
-        return playerRoot.equals(worldRoot) ? LEGACY_MAPPINGS : MODERN_MAPPINGS;
+        if (playerRoot.equals(worldRoot)) {
+            return LEGACY_MAPPINGS;
+        }
+        if (legacyTreeHasData(worldRoot)) {
+            // Both the 26.x players/ tree and the legacy root-level tree hold player
+            // files: scan both, modern first (putIfAbsent keeps the 26.x bytes).
+            List<Mapping> merged = new ArrayList<>(MODERN_MAPPINGS.size() + LEGACY_MAPPINGS.size());
+            merged.addAll(MODERN_MAPPINGS);
+            merged.addAll(LEGACY_MAPPINGS);
+            return merged;
+        }
+        return MODERN_MAPPINGS;
     }
 
     /** True when none of the 26.x per-player directories under {@code players/} holds a player file. */
@@ -172,11 +188,13 @@ public final class PlayerDataConverter {
     /**
      * Returns {@code true} if {@code worldRoot} has any vanilla player data to import.
      * Used to skip the player step entirely on worlds that never had a player join.
+     * A directory alone is not data: an empty {@code playerdata/} (or the 26.x
+     * equivalent) must not trigger a rebuild of an existing empty store.
      */
     public static boolean hasVanillaPlayerData(Path worldRoot) {
         Path playerRoot = playerRootFor(worldRoot);
         for (Mapping m : mappingsFor(worldRoot, playerRoot)) {
-            if (Files.isDirectory(playerRoot.resolve(m.dir()))) {
+            if (hasPlayerFiles(playerRoot.resolve(m.dir()))) {
                 return true;
             }
         }
@@ -257,10 +275,17 @@ public final class PlayerDataConverter {
             }
 
             Path playerRoot = playerRootFor(worldRoot);
+            List<Mapping> mappings = mappingsFor(worldRoot, playerRoot);
+            if (mappings.size() > MODERN_MAPPINGS.size()) {
+                // Both the 26.x players/ tree and the legacy root-level tree hold player
+                // files; import both (26.x first, so putIfAbsent keeps the 26.x bytes on
+                // conflicts) instead of silently leaving one tree behind.
+                System.err.println("Folesium: found both modern and legacy player trees; merging");
+            }
             try (FolesiumDatabase db = FolesiumDatabase.open(storeDir,
                     config.withDurability(FolesiumConfig.DurabilityMode.EXPLICIT),
                     FolesiumDatabase.StoreRole.PLAYERS)) {
-                for (Mapping m : mappingsFor(worldRoot, playerRoot)) {
+                for (Mapping m : mappings) {
                     Path src = playerRoot.resolve(m.dir());
                     if (!Files.isDirectory(src)) {
                         continue;

@@ -195,6 +195,7 @@ public final class ShardFile implements AutoCloseable {
             this.channel = FileChannel.open(path, readOnly
                     ? new StandardOpenOption[]{StandardOpenOption.READ}
                     : new StandardOpenOption[]{StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE});
+            boolean tornInReadOnly = false;
             if (fresh) {
                 if (readOnly) {
                     // Nothing may be written in read-only mode: an empty shard stays empty
@@ -205,7 +206,6 @@ public final class ShardFile implements AutoCloseable {
                     this.writePos = FILE_HEADER_LEN;
                 }
             } else {
-                boolean tornInReadOnly = false;
                 try {
                     validateFileHeader();
                 } catch (EOFException tornHeader) {
@@ -256,9 +256,21 @@ public final class ShardFile implements AutoCloseable {
             }
             // Phase 2: mirror the log into the region pages. The HashMap above (hint or
             // scan) is authoritative for AUTO mode; the incremental build below makes the
-            // pages complete for PAGE mode, where they are the only index at open.
-            if (pageIndex != null) {
+            // pages complete for PAGE mode, where they are the only index at open. A shard
+            // whose header was torn/invalid in a read-only open is treated as empty (nothing
+            // was loaded into the HashMap), so the pages must agree and stay empty too -
+            // replaying a header-less/garbage log through the compaction anchor would parse
+            // misaligned records into page slots the HashMap does not know about.
+            if (!tornInReadOnly && pageIndex != null) {
                 buildPagesFromCompactionAnchor();
+                // The open-time replay is done: every region page has been rebuilt from
+                // the log, so damage markers set during the rebuild (or left over from
+                // the previous session) are stale. Runtime single-slot writes never clear
+                // markers (they cannot prove the rest of the page complete), so this full
+                // rebuild is what restores PAGE mode for marked regions. A torn/invalid
+                // header in a read-only open skips the build above - nothing was replayed,
+                // so markers are deliberately left in place. See PageIndex.clearAllDamage.
+                pageIndex.clearAllDamage();
             }
         } catch (Throwable e) {
             closeAfterOpenFailure(e);
@@ -494,7 +506,10 @@ public final class ShardFile implements AutoCloseable {
      * at open). The built pages end up dirty and are persisted by the next checkpoint or
      * close. A damaged page file is repaired in place (the corrupt file is deleted so the
      * replay continues into a fresh page) rather than failing the open; only a page whose
-     * file cannot be removed is skipped for the rest of the replay.
+     * file cannot be removed is skipped for the rest of the replay. The caller clears
+     * every region damage marker once this rebuild completes (see
+     * {@link PageIndex#clearAllDamage()}) - the replay has made the pages complete again,
+     * and runtime single-slot writes never clear markers.
      */
     private void buildPagesFromCompactionAnchor() throws IOException {
         if (shardName == null) {
@@ -649,6 +664,7 @@ public final class ShardFile implements AutoCloseable {
     }
 
     private void writeHint() {
+        Path tmp = hintPath.resolveSibling(hintPath.getFileName() + ".tmp");
         try {
             int size = 4 + 2 + 8 + 8 + 4;
             for (Bytes k : index.keySet()) {
@@ -665,11 +681,20 @@ public final class ShardFile implements AutoCloseable {
             CRC32C crc = new CRC32C();
             crc.update(b.array(), 0, b.position());
             b.putInt((int) crc.getValue());
-            Path tmp = hintPath.resolveSibling(hintPath.getFileName() + ".tmp");
             Files.write(tmp, b.array());
             moveReplacing(tmp, hintPath);
         } catch (IOException e) {
             LOGGER.log(System.Logger.Level.WARNING, "Folesium: failed to write hint {0}: {1}", hintPath, e.toString());
+        } finally {
+            // A failed write or move must not leave a stale .tmp behind: remove it
+            // best-effort so the next hint write starts clean. (After a successful move
+            // the .tmp no longer exists and this is a no-op.) Mirrors PageIndex.writeHint.
+            try {
+                Files.deleteIfExists(tmp);
+            } catch (IOException e2) {
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Folesium: failed to delete stale hint tmp {0}: {1}", tmp, e2.toString());
+            }
         }
     }
 
@@ -1029,13 +1054,14 @@ public final class ShardFile implements AutoCloseable {
         if (!pageAuthoritative || pageIndex == null || pageIndex.isInvalidated() || key.length() != 8) {
             return false;
         }
-        // A region marked damaged has lost its backing page file: the next pageFor would
-        // build a fresh, empty page that knows nothing about records written before this
-        // session, so trusting it would read every other live chunk of the region as
-        // absent. The HashMap is always maintained on the write path (index.put runs
-        // unconditionally), so while the marker is present the region reads through the
-        // HashMap; a successful updateSlot clears the marker, and the next open rebuilds
-        // the pages from the log anyway.
+        // A region marked damaged has lost its backing page file (or, read-only, keeps
+        // a corrupt one): the next pageFor would build a fresh, empty page that knows
+        // nothing about records written before this session, so trusting it would read
+        // every other live chunk of the region as absent. The HashMap is always
+        // maintained on the write path (index.put runs unconditionally), so while the
+        // marker is present the region reads through the HashMap; the marker is cleared
+        // only once the open-time rebuild completes (clearAllDamage), never by a
+        // runtime single-slot write.
         long chunkKey = LongKeys.decode(key.array());
         return !pageIndex.isRegionDamaged(RegionPage.regionXFromChunk(chunkKey),
                 RegionPage.regionZFromChunk(chunkKey));
@@ -1069,7 +1095,8 @@ public final class ShardFile implements AutoCloseable {
             // cached entry and delete the corrupt file so the next access rebuilds a fresh
             // page (writes replay the log into it; the next open replays from the
             // compaction watermark), then report a miss. If the file cannot be removed
-            // (read-only mode, permissions), the page stays damaged and the repair is
+            // (read-only mode, permissions), the page stays damaged - and the region is
+            // marked, so PAGE-mode reads fall back to the HashMap - and the repair is
             // retried on the next access.
             boolean repaired = pageIndex.rebuildPageFrom(regionX, regionZ);
             LOGGER.log(System.Logger.Level.WARNING,

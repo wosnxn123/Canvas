@@ -246,13 +246,11 @@ public final class AnvilRegionFile implements Closeable {
             if (!java.nio.file.Files.isRegularFile(externalPath)) {
                 throw new IOException("External chunk payload is not a regular file: " + externalPath);
             }
-            // Bound the read before materializing it: the .mcc file holds the compressed
-            // payload, so a file beyond the payload cap is either corrupt or a bomb.
-            long size = java.nio.file.Files.size(externalPath);
-            if (size > MAX_CHUNK_PAYLOAD_BYTES) {
-                throw new IOException("External chunk payload of " + size + " bytes exceeds the "
-                        + MAX_CHUNK_PAYLOAD_BYTES + " byte limit");
-            }
+            // No size check on the .mcc file itself: it holds the *compressed* payload,
+            // which may legitimately grow slightly beyond MAX_CHUNK_PAYLOAD_BYTES, because
+            // deflate can inflate incompressible input by a small margin and the write side
+            // admits any uncompressed payload up to that bound. The real limit is enforced
+            // on the decompressed output below, by the bounded read.
             data = java.nio.file.Files.readAllBytes(externalPath);
         } else {
             data = new byte[length - 1];
@@ -298,8 +296,12 @@ public final class AnvilRegionFile implements Closeable {
 
     /**
      * Compresses (zlib) and writes a chunk payload, allocating sectors first-fit. Rejects
-     * payloads larger than {@link #MAX_CHUNK_PAYLOAD_BYTES} up front, mirroring the same
-     * bound enforced when decompressing in {@link #readChunk}.
+     * uncompressed payloads larger than {@link #MAX_CHUNK_PAYLOAD_BYTES} up front, mirroring
+     * the same bound enforced when decompressing in {@link #readChunk}. The external
+     * {@code .mcc} file of an oversized chunk holds the deflate output, which can be slightly
+     * larger than 32 MiB for a payload at the bound (deflate inflates incompressible data by
+     * a small margin); the read side therefore bounds by the <em>decompressed</em> output,
+     * not by the compressed file size.
      *
      * @throws IllegalArgumentException if {@code uncompressed.length > MAX_CHUNK_PAYLOAD_BYTES}
      */

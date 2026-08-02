@@ -32,8 +32,10 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Properties;
+import java.util.Set;
 import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -573,10 +575,17 @@ final class StoreResharder {
 
     /**
      * Restores the complete pre-reshard layout of {@code dir} from the backup tree after
-     * an aborted swap: the partial new files are removed, every old shard file is moved
-     * back, and both the staging and backup trees are dropped. Only called on the MOVED
+     * an aborted swap: every old shard file is moved back, the partial new files are
+     * removed, and both the staging and backup trees are dropped. Only called on the MOVED
      * path, where the backup is the sole surviving copy of the records the swap never
      * reached - deleting the staging tree without restoring it would silently lose data.
+     *
+     * <p>The old files are moved back first ({@code REPLACE_EXISTING}, so an old file
+     * always wins over a same-named partial new file); only then are the new-layout
+     * leftovers removed - the shard files in {@code dir} whose names are not in the
+     * backup set captured before the moves, i.e. the shards the old layout does not
+     * have. Deleting {@code dir} wholesale (the old behaviour) would destroy already-
+     * restored old files on a re-entry.</p>
      *
      * <p>Idempotent across crashes: a previous invocation may already have moved every
      * old shard back into {@code dir} and then crashed before the cleanup. The backup
@@ -584,14 +593,20 @@ final class StoreResharder {
      * are the complete old set - the only surviving copy of the records. Deleting them
      * would destroy the data, so that state is detected up front and the directory is
      * left intact: only the staging and backup trees are dropped (the MOVED marker goes
-     * with the backup).</p>
+     * with the backup). A crash in the middle of the restore itself is also safe to
+     * re-enter: the files already moved back stay in {@code dir} (their names are in
+     * the captured backup set), and the remaining backup files are moved back on the
+     * retry, overwriting any same-named leftovers.</p>
      */
     private static void restoreOldLayout(Path dir, Path backup, Path staging) throws IOException {
-        // Collect the backup's shard files BEFORE touching dir: if a previous restore
-        // already moved them all back (and crashed before the cleanup), the backup holds
-        // nothing but the MOVED marker and dir's shard files are the complete old set -
-        // the only surviving copy of the records. Deleting dir in that state (step 1
-        // below) would silently lose every record; keeping it intact is the whole point.
+        // Capture the backup's shard files BEFORE touching dir. The move-back below
+        // empties the backup, so this captured set of old-layout names is what the
+        // cleanup uses to tell the restored old files apart from the new-layout
+        // leftovers: only files whose names are NOT in it are removed. If a previous
+        // restore already moved every old shard back (and crashed before the cleanup),
+        // the backup holds nothing but the MOVED marker and dir's shard files are the
+        // complete old set - the only surviving copy of the records - so the empty
+        // branch below keeps dir intact and only drops the scratch trees.
         List<Path> backupShards = Files.isDirectory(backup) ? listShardFiles(backup) : List.of();
         if (backupShards.isEmpty()) {
             // The old layout is already fully restored in dir: leave it untouched and
@@ -607,16 +622,29 @@ final class StoreResharder {
             fsyncDirectory(dir);
             return;
         }
-        // 1. Remove the partial new files from dir (they belong to the aborted new layout).
-        for (Path p : listShardFiles(dir)) {
-            Files.deleteIfExists(p);
+        Set<String> oldNames = new HashSet<>();
+        for (Path p : backupShards) {
+            oldNames.add(p.getFileName().toString());
         }
-        // 2. Move every old shard file back from the backup. The MOVED marker stays
-        //    behind - it is not a shard file and must not be moved into the store root;
-        //    the whole backup tree is dropped below, taking the marker with it.
+        // 1. Move every old shard file back from the backup FIRST, with REPLACE_EXISTING:
+        //    an old file always wins over a same-named partial new file. The MOVED marker
+        //    stays behind - it is not a shard file and must not be moved into the store
+        //    root; the whole backup tree is dropped below, taking the marker with it.
         for (Path p : backupShards) {
             Files.move(p, dir.resolve(p.getFileName().toString()),
                     StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        }
+        // 2. Remove the new-layout leftovers from dir: every shard file whose name is
+        //    NOT in the backup set captured above belongs to the aborted new layout - the
+        //    old layout has no shard with that name. Files already restored (by this or a
+        //    previous invocation) share names with the backup set and are kept, so a
+        //    mid-restore crash followed by a retry never loses the records already moved
+        //    back; the backup was moved empty by step 1, which is why the set had to be
+        //    captured up front.
+        for (Path p : listShardFiles(dir)) {
+            if (!oldNames.contains(p.getFileName().toString())) {
+                Files.deleteIfExists(p);
+            }
         }
         // 3. Drop the staging and backup trees.
         deleteRecursively(staging);

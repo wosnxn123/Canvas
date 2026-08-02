@@ -199,6 +199,7 @@ public final class RegionPage {
             Files.createDirectories(parent);
         }
         Path tmp = file.resolveSibling(file.getFileName() + ".tmp-" + UUID.randomUUID());
+        Throwable primary = null;
         try {
             b.flip();
             try (FileChannel channel = FileChannel.open(tmp, StandardOpenOption.CREATE,
@@ -209,8 +210,25 @@ public final class RegionPage {
                 channel.force(true);
             }
             moveReplacing(tmp, file);
+        } catch (IOException | RuntimeException | Error e) {
+            // Any other failure propagating out of the write is remembered so the cleanup
+            // below attaches to it instead of masking it.
+            primary = e;
+            throw e;
         } finally {
-            Files.deleteIfExists(tmp);
+            try {
+                Files.deleteIfExists(tmp);
+            } catch (IOException e2) {
+                // A failed cleanup must not mask the exception the try block is already
+                // propagating: attach the delete failure to it as suppressed. When the try
+                // block itself succeeded (the file was moved away), the delete failure is
+                // the only error to report.
+                if (primary != null) {
+                    primary.addSuppressed(e2);
+                } else {
+                    throw e2;
+                }
+            }
         }
     }
 
@@ -307,7 +325,8 @@ public final class RegionPage {
      * (reported as {@link AtomicMoveNotSupportedException}, or as a generic filesystem
      * error while the target already exists). Any other filesystem error is rethrown
      * unchanged - it is not about atomic-replace support and must not be masked by a
-     * second move attempt.
+     * second move attempt; a fallback that itself fails keeps the original error
+     * attached as suppressed so its diagnostics survive.
      */
     private static void moveReplacing(Path source, Path target) throws IOException {
         try {
@@ -317,9 +336,16 @@ public final class RegionPage {
         } catch (FileSystemException e) {
             // Some platforms report missing atomic-replace support as a generic filesystem error
             // only when the target already exists; keep that fallback, but rethrow anything else
-            // (permission denied, vanished source, ...) as the original exception.
+            // (permission denied, vanished source, ...) as the original exception. If the fallback
+            // itself fails, attach the original error as suppressed so its diagnostics are kept
+            // (mirrors DictionaryStore.moveIntoPlace).
             if (Files.exists(target)) {
-                Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
+                try {
+                    Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
+                } catch (IOException e2) {
+                    e2.addSuppressed(e);
+                    throw e2;
+                }
             } else {
                 throw e;
             }
