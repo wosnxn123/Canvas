@@ -165,10 +165,12 @@ public final class FolesiumRegistry {
         sb.append("# Folesium is OPT-IN: 'enabled' is intentionally false, so the server behaves like stock\n");
         sb.append("# Folia/Canvas (writes .mca) until you set enabled=true. Edit values freely; this file is\n");
         sb.append("# written only once. System properties -Dfolesium.<key>=<value> override anything here.\n");
-        sb.append("# Every value below can be changed while the server runs: Folesium notices that this file was\n");
+        sb.append("# Most values below can be changed while the server runs: Folesium notices that this file was\n");
         sb.append("# edited and applies it within a few seconds. Exceptions: 'enabled' applies when a world is next\n");
         sb.append("# loaded, 'shards' by an automatic reshard of the store on the next start, and indexCacheBytes /\n");
         sb.append("# indexMode / dictionaryCompression / backupOnConvert on the next store open or conversion.\n");
+        sb.append("# 'autoReload' itself is read when the server starts: it decides whether this file is watched at\n");
+        sb.append("# all, so changing it takes effect only on the next start (restart after flipping it).\n");
         sb.append("# Auto-tuned for this machine: ").append(describeMachine()).append('\n');
         sb.append('\n');
         sb.append("# Master switch. false = vanilla Anvil behaviour; true = use Folesium storage.\n");
@@ -339,7 +341,16 @@ public final class FolesiumRegistry {
     }
 
     private static boolean boolProperty(String key, boolean def) {
-        return Boolean.parseBoolean(property(key, Boolean.toString(def)));
+        // Boolean.parseBoolean silently maps every unrecognised value to false; a typo
+        // like folesium.enabled=treu would quietly flip the engine off. Warn instead,
+        // mirroring intProperty()/doubleProperty(), so 'folesium.<key>=<bad>' is
+        // diagnosable.
+        String value = property(key, Boolean.toString(def));
+        if (!"true".equalsIgnoreCase(value) && !"false".equalsIgnoreCase(value)) {
+            LOGGER.log(System.Logger.Level.WARNING, "Folesium: bad boolean for folesium.{0}, using {1}", key, def);
+            return def;
+        }
+        return Boolean.parseBoolean(value);
     }
 
     private static double doubleProperty(String key, double def) {
@@ -692,11 +703,6 @@ public final class FolesiumRegistry {
                     // parsesAsProperties() logged the clear error; keep the previous configuration.
                     continue;
                 }
-                // Commit the stamp only after the change has been verified stable, so a change
-                // that was still settling is retried on the next poll instead of being skipped.
-                synchronized (FolesiumRegistry.class) {
-                    configFileStamp = stamp;
-                }
                 LOGGER.log(System.Logger.Level.INFO,
                         "Folesium: {0} changed on disk, applying it to the running server", configFilePath());
                 try {
@@ -715,8 +721,27 @@ public final class FolesiumRegistry {
                             LOGGER.log(System.Logger.Level.WARNING, "Folesium: {0}: {1}", r.directory(), note);
                         }
                     }
+                } catch (UncheckedIOException e) {
+                    // reload() re-reads the file to apply the change (fileProperties() throws
+                    // UncheckedIOException on a read failure); a transient failure - e.g. the
+                    // editor is still writing - must not kill the watcher. Log a warning and
+                    // keep the stamp stale so the change is retried on the next poll instead
+                    // of being silently skipped forever.
+                    LOGGER.log(System.Logger.Level.WARNING,
+                            "Folesium: cannot re-read {0} while applying it, will retry on the next poll: {1}",
+                            configFilePath().toAbsolutePath(), e.toString());
+                    continue;
                 } catch (RuntimeException ex) {
                     LOGGER.log(System.Logger.Level.ERROR, "Folesium: automatic reload failed", ex);
+                    // The stamp stays stale, so the change is retried on the next poll.
+                    continue;
+                }
+                // The reload ran to completion without an exception, so the new configuration
+                // is in effect: only now is the stamp committed. A change whose reload failed
+                // (above) leaves the stamp stale and is retried on the next poll instead of
+                // being skipped forever.
+                synchronized (FolesiumRegistry.class) {
+                    configFileStamp = stamp;
                 }
             }
         } finally {

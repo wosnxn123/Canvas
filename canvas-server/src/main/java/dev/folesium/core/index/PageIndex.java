@@ -56,8 +56,10 @@ import java.util.concurrent.locks.ReentrantLock;
  * (fresh, empty) page and fall back to the HashMap, which the shard write path always
  * maintains, so the other live chunks of the region keep reading correctly instead of
  * silently missing. The marker survives until the open-time rebuild completes
- * (ShardFile calls {@link #clearAllDamage()} after {@code buildPagesFromCompactionAnchor})
- * or {@link #invalidateAll()}/{@link #close()} reset the set: a runtime single-slot
+ * (ShardFile calls {@link #clearAllDamage()} after {@code buildPagesFromCompactionAnchor}
+ * when the rebuild repaired every region; a region whose corrupt page file could not
+ * be removed keeps its marker and the next open retries) or
+ * {@link #invalidateAll()}/{@link #close()} reset the set: a runtime single-slot
  * write cannot prove the rest of the page complete, so {@link #updateSlot} never
  * clears a marker.</p>
  *
@@ -161,10 +163,12 @@ public final class PageIndex implements AutoCloseable {
      * the region would read as absent - and fall back to the HashMap, which the shard
      * write path always maintains (see {@link #isRegionDamaged}). The markers are
      * cleared only by {@link #clearAllDamage()} (ShardFile calls it once the open-time
-     * rebuild has replayed the whole log), {@link #invalidateAll()} and {@link #close()}:
-     * a runtime single-slot {@link #updateSlot} never clears one, because one slot
-     * write cannot prove the rest of the page complete. In-memory only: the next open
-     * rebuilds the pages from the log and starts with an empty set. A concurrent set
+     * rebuild has replayed the whole log, and only when that rebuild left no region
+     * whose corrupt page file could not be removed), {@link #invalidateAll()} and
+     * {@link #close()}: a runtime single-slot {@link #updateSlot} never clears one,
+     * because one slot write cannot prove the rest of the page complete. In-memory
+     * only: the next open rebuilds the pages from the log and starts with an empty
+     * set. A concurrent set
      * because {@link #rebuildPageFrom} marks it outside the owning segment lock while
      * other threads may be reading it via {@link #isRegionDamaged} - no lock ordering
      * is imposed between the two, so no deadlock can arise.
@@ -312,7 +316,8 @@ public final class PageIndex implements AutoCloseable {
      * {@link #rebuildPageFrom} after damage, or stays corrupt and undeletable on disk
      * (read-only mode), and has not been rebuilt since. The marker is cleared only by
      * {@link #clearAllDamage()} (ShardFile calls it once the open-time rebuild
-     * completes), {@link #invalidateAll()} or {@link #close()} - a runtime
+     * completes, and only when that rebuild repaired every region), {@link #invalidateAll()}
+     * or {@link #close()} - a runtime
      * single-slot {@link #updateSlot} never clears it, because one slot write cannot
      * prove the rest of the page complete. While {@code true}, PAGE-mode readers must
      * not consult the region's page - the next {@link #pageFor} builds a fresh, empty page
@@ -327,12 +332,15 @@ public final class PageIndex implements AutoCloseable {
 
     /**
      * Clears every region damage marker. Called by ShardFile once the open-time page
-     * rebuild ({@code buildPagesFromCompactionAnchor}) completes: the full log replay
-     * has made every region page complete again, so markers set during the rebuild (or
-     * left over from the previous session) are stale and PAGE-mode readers can trust
-     * the pages once more. Runtime single-slot writes never clear markers (see
-     * {@link #updateSlot}); only this method, {@link #invalidateAll()} and
-     * {@link #close()} do. Harmless when no region is marked.
+     * rebuild ({@code buildPagesFromCompactionAnchor}) completes, provided that rebuild
+     * repaired every region (a region whose corrupt page file could not be removed
+     * keeps its marker so PAGE-mode readers keep falling back to the HashMap and the
+     * next open retries the repair): the full log replay has made every region page
+     * complete again, so markers set during the rebuild (or left over from the previous
+     * session) are stale and PAGE-mode readers can trust the pages once more. Runtime
+     * single-slot writes never clear markers (see {@link #updateSlot}); only this
+     * method, {@link #invalidateAll()} and {@link #close()} do. Harmless when no
+     * region is marked.
      */
     public void clearAllDamage() {
         damagedRegions.clear();
@@ -401,8 +409,9 @@ public final class PageIndex implements AutoCloseable {
                 // No damage-marker clearing here: a single slot write proves nothing
                 // about the rest of the page, so it cannot vouch for the region's
                 // completeness. Markers set by rebuildPageFrom survive until the
-                // open-time rebuild (clearAllDamage), invalidateAll or close. See the
-                // damagedRegions field javadoc.
+                // open-time rebuild clears them (clearAllDamage, only when every region
+                // was repaired), invalidateAll or close. See the damagedRegions field
+                // javadoc.
             }
         } finally {
             seg.lock.unlock();
@@ -465,6 +474,12 @@ public final class PageIndex implements AutoCloseable {
             damagedRegions.add(pack(regionX, regionZ));
             return true;
         } catch (IOException e) {
+            // The corrupt file could not be removed, so it stays in place and a fresh
+            // page cannot be loaded for it this session - mark the region damaged
+            // exactly like the read-only branch above: PAGE-mode readers must fall
+            // back to the HashMap (always maintained on the write path) instead of
+            // trusting a fresh, empty page, and the next open retries the repair.
+            damagedRegions.add(pack(regionX, regionZ));
             LOGGER.log(System.Logger.Level.WARNING,
                     "Folesium: failed to delete damaged region page {0}: {1}",
                     pagePath(regionX, regionZ), e.toString());

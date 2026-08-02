@@ -317,9 +317,9 @@ public final class WorldConversionService {
      * ({@code dimensions/<ns>/<path>/<path>/...}) are discovered correctly. A world
      * root that is itself a dimension is still walked: only its well-known data
      * directories ({@code region/}, {@code entities/}, {@code poi/},
-     * {@code folesium/}) are pruned by name, so pre-1.21 sibling dimensions
-     * ({@code DIM1/}, {@code DIM-1/}) and a {@code dimensions/} sub-tree are
-     * discovered too. Basenames are otherwise not classified: names such as
+     * {@code folesium/}, {@code players/}) are pruned by name, so pre-1.21 sibling
+     * dimensions ({@code DIM1/}, {@code DIM-1/}) and a {@code dimensions/} sub-tree
+     * are discovered too. Basenames are otherwise not classified: names such as
      * {@code data} are legal dimension components.</p>
      */
     static List<Path> discoverDimensions(Path worldRoot) throws IOException {
@@ -368,17 +368,20 @@ public final class WorldConversionService {
 
     /**
      * The well-known data directories of a dimension ({@code region/},
-     * {@code entities/}, {@code poi/}) and the Folesium store directories
-     * ({@code folesium/}) are never candidate dimensions. They are pruned by name
-     * only when they are direct children of the world root (a root dimension's own
-     * data, or a legacy root player store); a directory that <em>is</em> a
-     * dimension is matched by {@link #isDimensionDirectory} before this check, so
-     * a dimension legitimately named {@code region} or similar is never hidden by
-     * it.
+     * {@code entities/}, {@code poi/}), the Folesium store directories
+     * ({@code folesium/}) and the 26.x per-player container ({@code players/}) are
+     * never candidate dimensions. They are pruned by name only when they are direct
+     * children of the world root (a root dimension's own data, the legacy root player
+     * store, or the 26.x player tree -- whose {@code players/folesium} store is inside
+     * the container, so pruning {@code players/} keeps the walk out of it too); a
+     * directory that <em>is</em> a dimension is matched by
+     * {@link #isDimensionDirectory} before this check, so a dimension legitimately
+     * named {@code region} or similar is never hidden by it.
      */
     private static boolean isWellKnownDataDir(Path dir) {
         String name = dir.getFileName().toString();
         return name.equals("region") || name.equals("entities") || name.equals("poi")
+                || name.equals(PlayerDataConverter.DIR_PLAYERS_26)
                 || name.equals(FolesiumDatabase.STORE_DIR_NAME);
     }
 

@@ -43,6 +43,8 @@ public final class PlayerPathRecognizer {
     public static final String DIR_ADVANCEMENTS = "advancements";
     /** Vanilla directory for {@code <uuid>.json} statistics. */
     public static final String DIR_STATS = "stats";
+    /** Vanilla 26.x container grouping the per-player directories under the world root. */
+    public static final String DIR_PLAYERS = "players";
 
     private final Path worldRoot;
     private final String advancementsDir;
@@ -84,11 +86,33 @@ public final class PlayerPathRecognizer {
         if (kind.player == null) {
             return null;
         }
-        Path parent = dir.getParent();
-        if (parent == null || !worldRoot.equals(parent.toAbsolutePath().normalize())) {
+        if (!isPerPlayerDir(dir)) {
             return null;
         }
         return kind;
+    }
+
+    /**
+     * True when {@code dir} -- the {@code advancements}/ {@code stats} directory
+     * holding the file -- is a vanilla per-player directory of this world. Two
+     * layouts match: directly under the world root (pre-26.x:
+     * {@code <world>/advancements}), and under the 26.x {@code <world>/players}
+     * container ({@code <world>/players/advancements}).
+     */
+    private boolean isPerPlayerDir(Path dir) {
+        Path parent = dir.getParent();
+        if (parent == null) {
+            return false;
+        }
+        Path parentNormalized = parent.toAbsolutePath().normalize();
+        if (worldRoot.equals(parentNormalized)) {
+            return true;
+        }
+        // 26.x layout: the per-player directories are grouped under <world>/players.
+        Path playersParent = parent.getParent();
+        return playersParent != null
+                && DIR_PLAYERS.equals(parent.getFileName().toString())
+                && worldRoot.equals(playersParent.toAbsolutePath().normalize());
     }
 
     /** Outcome of {@link #classify(Path)} when the path IS a player data file. */

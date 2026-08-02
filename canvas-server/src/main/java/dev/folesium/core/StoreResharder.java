@@ -32,10 +32,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Properties;
-import java.util.Set;
 import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -582,74 +580,118 @@ final class StoreResharder {
      *
      * <p>The old files are moved back first ({@code REPLACE_EXISTING}, so an old file
      * always wins over a same-named partial new file); only then are the new-layout
-     * leftovers removed - the shard files in {@code dir} whose names are not in the
-     * backup set captured before the moves, i.e. the shards the old layout does not
-     * have. Deleting {@code dir} wholesale (the old behaviour) would destroy already-
-     * restored old files on a re-entry.</p>
+     * leftovers removed. Leftovers are identified in the <em>old layout's namespace</em>
+     * rather than by a captured name set: the old layout's shard count is derived from
+     * the file headers (any backup shard file - the backup only ever holds old-layout
+     * files - else, once the backup is empty, the surviving shard files in {@code dir},
+     * which are restored old files sharing the same count), and every shard file in
+     * {@code dir} whose index is beyond that count (>= oldCount) cannot belong to the
+     * old layout, so it is an aborted new-layout leftover and is removed together with
+     * its index hint. The name set this replaces shrank across re-entries - a previous
+     * invocation had moved some old files back, so their names were no longer in the
+     * backup to be captured - which made a re-entry misidentify already-restored old
+     * files as leftovers and delete the only surviving copies of their records. The
+     * header-derived count is stable across re-entries.</p>
      *
      * <p>Idempotent across crashes: a previous invocation may already have moved every
      * old shard back into {@code dir} and then crashed before the cleanup. The backup
      * then holds no shard file (only the MOVED marker) while {@code dir}'s shard files
-     * are the complete old set - the only surviving copy of the records. Deleting them
-     * would destroy the data, so that state is detected up front and the directory is
-     * left intact: only the staging and backup trees are dropped (the MOVED marker goes
-     * with the backup). A crash in the middle of the restore itself is also safe to
-     * re-enter: the files already moved back stay in {@code dir} (their names are in
-     * the captured backup set), and the remaining backup files are moved back on the
-     * retry, overwriting any same-named leftovers.</p>
+     * are the complete old set - the only surviving copy of the records - plus any
+     * new-layout leftovers the crashed cleanup never removed; those are still removed
+     * here (their index is beyond the count the surviving old files' headers record).
+     * When no readable header survives anywhere the old count cannot be established and
+     * the leftover cleanup is skipped (conservative: never delete a file that might be
+     * the only surviving copy of a record); the backup files are still moved back, since
+     * an old file always wins over a same-named partial new file. A crash in the middle
+     * of the restore itself is also safe to re-enter: the files already moved back stay
+     * in {@code dir} (their indices are below the old count), and the remaining backup
+     * files are moved back on the retry, overwriting any same-named leftovers.</p>
      */
     private static void restoreOldLayout(Path dir, Path backup, Path staging) throws IOException {
-        // Capture the backup's shard files BEFORE touching dir. The move-back below
-        // empties the backup, so this captured set of old-layout names is what the
-        // cleanup uses to tell the restored old files apart from the new-layout
-        // leftovers: only files whose names are NOT in it are removed. If a previous
-        // restore already moved every old shard back (and crashed before the cleanup),
-        // the backup holds nothing but the MOVED marker and dir's shard files are the
-        // complete old set - the only surviving copy of the records - so the empty
-        // branch below keeps dir intact and only drops the scratch trees.
         List<Path> backupShards = Files.isDirectory(backup) ? listShardFiles(backup) : List.of();
-        if (backupShards.isEmpty()) {
-            // The old layout is already fully restored in dir: leave it untouched and
-            // just drop the scratch trees. The caller reconciles the shard-count
-            // metadata against the restored files (restoredLayoutShardCount) as usual.
-            LOGGER.log(System.Logger.Level.WARNING,
-                    "Folesium: backup {0} of {1} holds no shard files; the old layout is "
-                            + "already restored - keeping the store directory intact and "
-                            + "dropping the scratch trees",
-                    backup, dir);
-            deleteRecursively(staging);
-            deleteRecursively(backup);
-            fsyncDirectory(dir);
-            return;
-        }
-        Set<String> oldNames = new HashSet<>();
-        for (Path p : backupShards) {
-            oldNames.add(p.getFileName().toString());
-        }
+        // The old layout's shard count, derived from file headers BEFORE the move-back
+        // invalidates the backup paths. -1 when no readable header exists anywhere.
+        int oldCount = oldLayoutShardCount(dir, backupShards);
         // 1. Move every old shard file back from the backup FIRST, with REPLACE_EXISTING:
-        //    an old file always wins over a same-named partial new file. The MOVED marker
+        //    an old file always wins over a same-named partial new file. On a re-entry
+        //    (a previous invocation crashed mid-restore) this moves back whatever is
+        //    still left there; the files already restored stay in place. The MOVED marker
         //    stays behind - it is not a shard file and must not be moved into the store
         //    root; the whole backup tree is dropped below, taking the marker with it.
         for (Path p : backupShards) {
             Files.move(p, dir.resolve(p.getFileName().toString()),
                     StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         }
-        // 2. Remove the new-layout leftovers from dir: every shard file whose name is
-        //    NOT in the backup set captured above belongs to the aborted new layout - the
-        //    old layout has no shard with that name. Files already restored (by this or a
-        //    previous invocation) share names with the backup set and are kept, so a
-        //    mid-restore crash followed by a retry never loses the records already moved
-        //    back; the backup was moved empty by step 1, which is why the set had to be
-        //    captured up front.
-        for (Path p : listShardFiles(dir)) {
-            if (!oldNames.contains(p.getFileName().toString())) {
-                Files.deleteIfExists(p);
+        // 2. Remove the new-layout leftovers from dir: every shard file whose index is
+        //    beyond the old layout's count. The old layout has no shard with such an
+        //    index, so any such file belongs to the aborted new layout; files already
+        //    restored (by this or a previous invocation) all sit below the count and are
+        //    kept, so a mid-restore crash followed by a retry never loses the records
+        //    already moved back. When the old count cannot be established (no readable
+        //    header anywhere), be conservative and delete nothing.
+        if (oldCount > 0) {
+            for (Path p : listShardFiles(dir)) {
+                String name = p.getFileName().toString();
+                Matcher m = SHARD_FILE.matcher(name);
+                if (m.matches() && Integer.parseInt(m.group(2)) >= oldCount) {
+                    Files.deleteIfExists(p);
+                    // Drop the rebuildable index hint of a removed shard with it.
+                    Files.deleteIfExists(dir.resolve(name + ".fidx"));
+                }
             }
+        } else {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: cannot determine the pre-reshard shard count of {0} from the "
+                            + "surviving file headers; keeping every shard file in the store "
+                            + "directory (conservative)",
+                    dir);
         }
         // 3. Drop the staging and backup trees.
         deleteRecursively(staging);
         deleteRecursively(backup);
         fsyncDirectory(dir);
+    }
+
+    /**
+     * The pre-reshard shard count of an interrupted reshard, derived from shard file
+     * headers: the header count of any backup shard file (the backup only ever holds
+     * old-layout files, so the first readable header is the old layout's count), falling
+     * back - when the backup holds no shard file at all (a previous invocation already
+     * moved the complete old set back) - to the first readable header of the surviving
+     * shard files in {@code dir}, which are restored old files sharing the layout's
+     * count. -1 when the old count cannot be established: the backup holds shard files
+     * but none has a readable header, or the dir holds no readable shard header.
+     */
+    private static int oldLayoutShardCount(Path dir, List<Path> backupShards) {
+        for (Path p : backupShards) {
+            int count = recordedShardCount(p);
+            if (count > 0) {
+                return count;
+            }
+        }
+        if (!backupShards.isEmpty()) {
+            // A non-empty backup with no readable header: the old count is genuinely
+            // unknown, and the dir may still hold partial new files whose headers name
+            // the new layout - reading those would corrupt the leftover boundary. Be
+            // conservative instead of guessing.
+            return -1;
+        }
+        // The backup is empty: every old shard was already moved back, so dir holds the
+        // complete old set (its shard files all share the old layout's count) possibly
+        // alongside new-layout leftovers at higher indices.
+        try (Stream<Path> files = Files.list(dir)) {
+            for (Path p : files.sorted().toList()) {
+                if (SHARD_FILE.matcher(p.getFileName().toString()).matches()) {
+                    int count = recordedShardCount(p);
+                    if (count > 0) {
+                        return count;
+                    }
+                }
+            }
+        } catch (IOException e) {
+            // Fall through to -1: listing failure must not cause deletions either.
+        }
+        return -1;
     }
 
     /**

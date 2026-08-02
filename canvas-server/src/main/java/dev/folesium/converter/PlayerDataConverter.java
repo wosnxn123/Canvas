@@ -73,20 +73,35 @@ public final class PlayerDataConverter {
     /** 26.x replacement for {@link #DIR_PLAYERDATA}, nested under {@code players/}. */
     public static final String DIR_DATA_26 = "data";
 
-    /** Vanilla dir -> (Folesium keyspace, file extension). */
-    private record Mapping(String dir, String keyspace, String extension) {
+    /**
+     * Vanilla dir -> (Folesium keyspace, file extension, location). {@code base}
+     * decides which root the directory resolves against: a LEGACY mapping's files sit
+     * directly under the world root, a MODERN (26.x) mapping's under {@code players/}.
+     * Resolving both against the same root silently skips an entire tree -- on a 26.x
+     * world {@code <world>/players/playerdata} never exists while the legacy files are
+     * at {@code <world>/playerdata}.
+     */
+    private record Mapping(String dir, String keyspace, String extension, Base base) {
+
+        /** The vanilla directory holding these files, given the world's roots. */
+        Path resolve(Path worldRoot, Path playerRoot) {
+            return (base == Base.LEGACY ? worldRoot : playerRoot).resolve(dir);
+        }
     }
 
+    /** Where a mapping's vanilla files live: world-root level (pre-26.x) or under {@code players/} (26.x). */
+    private enum Base { MODERN, LEGACY }
+
     private static final List<Mapping> LEGACY_MAPPINGS = List.of(
-            new Mapping(DIR_PLAYERDATA, FolesiumDatabase.KS_PLAYERDATA, ".dat"),
-            new Mapping(DIR_ADVANCEMENTS, FolesiumDatabase.KS_ADVANCEMENTS, ".json"),
-            new Mapping(DIR_STATS, FolesiumDatabase.KS_STATS, ".json")
+            new Mapping(DIR_PLAYERDATA, FolesiumDatabase.KS_PLAYERDATA, ".dat", Base.LEGACY),
+            new Mapping(DIR_ADVANCEMENTS, FolesiumDatabase.KS_ADVANCEMENTS, ".json", Base.LEGACY),
+            new Mapping(DIR_STATS, FolesiumDatabase.KS_STATS, ".json", Base.LEGACY)
     );
 
     private static final List<Mapping> MODERN_MAPPINGS = List.of(
-            new Mapping(DIR_DATA_26, FolesiumDatabase.KS_PLAYERDATA, ".dat"),
-            new Mapping(DIR_ADVANCEMENTS, FolesiumDatabase.KS_ADVANCEMENTS, ".json"),
-            new Mapping(DIR_STATS, FolesiumDatabase.KS_STATS, ".json")
+            new Mapping(DIR_DATA_26, FolesiumDatabase.KS_PLAYERDATA, ".dat", Base.MODERN),
+            new Mapping(DIR_ADVANCEMENTS, FolesiumDatabase.KS_ADVANCEMENTS, ".json", Base.MODERN),
+            new Mapping(DIR_STATS, FolesiumDatabase.KS_STATS, ".json", Base.MODERN)
     );
 
     /**
@@ -194,7 +209,7 @@ public final class PlayerDataConverter {
     public static boolean hasVanillaPlayerData(Path worldRoot) {
         Path playerRoot = playerRootFor(worldRoot);
         for (Mapping m : mappingsFor(worldRoot, playerRoot)) {
-            if (hasPlayerFiles(playerRoot.resolve(m.dir()))) {
+            if (hasPlayerFiles(m.resolve(worldRoot, playerRoot))) {
                 return true;
             }
         }
@@ -286,7 +301,10 @@ public final class PlayerDataConverter {
                     config.withDurability(FolesiumConfig.DurabilityMode.EXPLICIT),
                     FolesiumDatabase.StoreRole.PLAYERS)) {
                 for (Mapping m : mappings) {
-                    Path src = playerRoot.resolve(m.dir());
+                    // Legacy mappings resolve against the world root, not playerRoot:
+                    // on a 26.x world the legacy tree is <world>/playerdata etc., never
+                    // <world>/players/playerdata.
+                    Path src = m.resolve(worldRoot, playerRoot);
                     if (!Files.isDirectory(src)) {
                         continue;
                     }
@@ -331,13 +349,13 @@ public final class PlayerDataConverter {
      * {@code .folesium-backup-*} sibling, so stale UUID files and empty-keyspace
      * remnants cannot survive the rollback.</p>
      *
-     * <p>The export always targets the 26.x layout
-     * ({@code players/data}, {@code players/advancements}, {@code players/stats}):
-     * a 26.x server reads <em>only</em> that tree, so writing the root-level legacy
-     * directories on a downgraded world (see {@link #playerRootFor}) would make the
-     * rolled-back players silently disappear. The downgrade detection applies to the
-     * import source layout ({@link #anvilToFolesium}) only; an export never follows
-     * it.</p>
+     * <p>The export follows the world's current layout, mirroring the import side: a
+     * world with a {@code players/} directory gets the 26.x tree
+     * ({@code players/data}, {@code players/advancements}, {@code players/stats}); a
+     * world without one gets the root-level legacy directories ({@code playerdata/},
+     * {@code advancements/}, {@code stats/}), which pre-26 servers read. The
+     * {@code players/} container is never fabricated: creating it on a legacy world
+     * would hide the rolled-back players from a pre-26 server.</p>
      */
     public static Stats folesiumToAnvil(Path storeDir, Path worldRoot, FolesiumConfig config) throws IOException {
         long start = System.nanoTime();
@@ -347,16 +365,20 @@ public final class PlayerDataConverter {
             return new Stats(0, 0, (System.nanoTime() - start) / 1_000_000);
         }
 
-        // Export only: read the existing layout without rewriting it first. The
-        // players/ container is created up front so the 26.x tree exists even when
-        // the world root never had one (a legacy or downgraded world being rolled
-        // back onto a 26.x server).
-        Path exportRoot = worldRoot.resolve(DIR_PLAYERS_26);
-        Files.createDirectories(exportRoot);
+        // Export only: read the existing layout without rewriting it first. The target
+        // follows the world's layout: a world with a players/ directory gets the 26.x
+        // tree (players/data, players/advancements, players/stats); a world without one
+        // gets the root-level legacy directories (playerdata/, advancements/, stats/)
+        // that pre-26 servers read. The players/ container is deliberately NOT created
+        // here -- fabricating it on a legacy world would hide the rolled-back players
+        // from a pre-26 server.
+        boolean modern = Files.isDirectory(worldRoot.resolve(DIR_PLAYERS_26));
+        Path exportRoot = modern ? worldRoot.resolve(DIR_PLAYERS_26) : worldRoot;
+        List<Mapping> mappings = modern ? MODERN_MAPPINGS : LEGACY_MAPPINGS;
         try (FolesiumDatabase db = FolesiumDatabase.open(storeDir,
                 FolesiumConfig.defaults().withDurability(FolesiumConfig.DurabilityMode.EXPLICIT),
                 FolesiumDatabase.StoreRole.PLAYERS, false)) {
-            for (Mapping m : MODERN_MAPPINGS) {
+            for (Mapping m : mappings) {
                 Keyspace ks = db.keyspace(m.keyspace());
                 Path out = exportRoot.resolve(m.dir());
                 if (ks.count() == 0 && !Files.exists(out)) {

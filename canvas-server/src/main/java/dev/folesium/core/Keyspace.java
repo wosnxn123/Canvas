@@ -51,9 +51,10 @@ public final class Keyspace implements AutoCloseable {
      * One slot per shard index of the on-disk layout, in routing order. Read-write
      * keyspaces eagerly open every shard of {@link FolesiumConfig#shardCount()};
      * read-only keyspaces size the array from the shard count recorded in the shard file
-     * headers on disk (see {@link #readRecordedShardCount}; the names-derived fallback
-     * only fires when every discovered header is unreadable or the readable ones
-     * disagree) and leave the slot of a
+     * headers on disk (see {@link #readRecordedShardCount}: disagreeing readable headers
+     * resolve to the lowest-index readable one - the new layout's count - and the
+     * names-derived fallback fires only when every discovered header is unreadable) and
+     * leave the slot of a
      * missing shard {@code null}. Fixed at construction and never mutated.
      */
     private final ShardFile[] shards;
@@ -219,28 +220,38 @@ public final class Keyspace implements AutoCloseable {
      * intact. The count is only trusted once every <em>readable</em> header records the
      * same value: a reshard interrupted between the file swap and the metadata rewrite
      * can leave a mixture of old- and new-layout shard files, and taking the first
-     * readable header's count would size the keyspace by chance, so disagreeing
-     * readable headers are treated exactly like unreadable ones.
-     * Only when <em>every</em> discovered header is unreadable (or the readable ones
-     * disagree) does the count fall back to the layout the file names imply: shard
-     * files are named by index under the store's power-of-two shard count, so
-     * {@code highest index + 1} reproduces the original count. This fallback is a
-     * tolerance path - the keyspace then opens with an empty slot per unreadable shard
-     * instead of failing the whole keyspace - and is only used when the derived count
-     * is itself a legal power of two (otherwise the layout is genuinely unreadable and
-     * the failure is reported).
+     * readable header's count would size the keyspace by chance. When the readable
+     * headers disagree, the count of the <em>lowest-index</em> readable header wins:
+     * the swap replaces low-index files first, so the lowest-index readable file belongs
+     * to the new layout and names the count the reshard is committing to, whereas the
+     * names-derived count (below) would reproduce the old layout's count in exactly that
+     * mixed state.
+     * Only when <em>every</em> discovered header is unreadable does the count fall back
+     * to the layout the file names imply: shard files are named by index under the
+     * store's power-of-two shard count, so {@code highest index + 1} reproduces the
+     * original count. This fallback is a tolerance path - the keyspace then opens with
+     * an empty slot per unreadable shard instead of failing the whole keyspace - and is
+     * only used when the derived count is itself a legal power of two (otherwise the
+     * layout is genuinely unreadable and the failure is reported).
      */
     private static int readRecordedShardCount(Path dir, String name, int[] discovered) {
         RuntimeException lastFailure = null;
         Integer recorded = null;   // the count every readable header must agree on
         boolean conflicting = false; // two readable headers recorded different counts
+        Integer lowestReadableCount = null; // count of the lowest-index readable header
         for (int index : discovered) {
             Path shardFile = dir.resolve(String.format("%s-%04d.flog", name, index));
             try (FileChannel ch = FileChannel.open(shardFile, StandardOpenOption.READ)) {
+                // Loop until the whole 16-byte header is read: a single read may legally
+                // return fewer bytes than requested, so a one-shot read would misreport a
+                // short (but complete-on-retry) read as a torn header. Only EOF before the
+                // header is complete is the torn case - mirroring
+                // StoreResharder.recordedShardCount.
                 ByteBuffer header = ByteBuffer.allocate(16);
-                int n = ch.read(header, 0);
-                if (n < 16) {
-                    throw new FolesiumException("Shard file too short to read its header: " + shardFile);
+                while (header.hasRemaining()) {
+                    if (ch.read(header) < 0) {
+                        throw new FolesiumException("Shard file too short to read its header: " + shardFile);
+                    }
                 }
                 header.flip();
                 byte[] magic = new byte[4];
@@ -263,12 +274,19 @@ public final class Keyspace implements AutoCloseable {
                 if (count < 1 || count > 1024 || Integer.bitCount(count) != 1) {
                     throw new FolesiumException("Invalid shard count " + count + " in header of " + shardFile);
                 }
+                if (lowestReadableCount == null) {
+                    // discovered is ascending, so the first readable header is the
+                    // lowest-index one. In a mixed old/new-layout state this is the new
+                    // layout's count (the swap replaces low-index files first); see the
+                    // conflicting branch below.
+                    lowestReadableCount = count;
+                }
                 // The count is store-wide and stamped into every header, so every readable
                 // header must agree on it: a reshard interrupted between the file swap and
                 // the metadata rewrite can leave a mixture of old- and new-layout shard
                 // files, and trusting whichever header happens to be read first would size
-                // the keyspace by chance. Any disagreement makes the layout unreadable and
-                // the names-derived fallback below takes over.
+                // the keyspace by chance. Any disagreement is resolved below via the
+                // lowest-index readable header (the new layout's count), not by chance.
                 if (recorded == null) {
                     recorded = count;
                 } else if (recorded != count) {
@@ -285,11 +303,21 @@ public final class Keyspace implements AutoCloseable {
         if (recorded != null && !conflicting) {
             return recorded;
         }
-        // Every discovered header is unreadable, or the readable ones disagree (e.g. a
-        // crash truncated the whole lowest shard before any header was written, or a
-        // reshard was interrupted between the file swap and the metadata rewrite). Fall
-        // back to the names-derived count; see the method javadoc for why this
-        // reproduces the original power-of-two layout.
+        if (conflicting) {
+            // The readable headers disagree: a reshard interrupted between the file swap
+            // and the metadata rewrite left old- and new-layout shard files mixed. The
+            // swap replaces low-index files first, so the lowest-index readable header
+            // belongs to the new layout and names the count the reshard is committing to;
+            // the names-derived fallback would reproduce the old layout's count in
+            // exactly this state (the highest present file is still an old-layout one),
+            // so it must not win here. Trust the new layout - it is what the swap is
+            // converging to - and size the keyspace from its count.
+            return lowestReadableCount;
+        }
+        // Every discovered header is unreadable (e.g. a crash truncated the whole lowest
+        // shard before any header was written, or every header failed the
+        // magic/version/index validation). Fall back to the names-derived count; see the
+        // method javadoc for why this reproduces the original power-of-two layout.
         int byNames = discovered[discovered.length - 1] + 1;
         if (byNames >= 1 && byNames <= 1024 && Integer.bitCount(byNames) == 1) {
             return byNames;

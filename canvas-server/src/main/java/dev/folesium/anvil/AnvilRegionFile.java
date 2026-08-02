@@ -246,11 +246,23 @@ public final class AnvilRegionFile implements Closeable {
             if (!java.nio.file.Files.isRegularFile(externalPath)) {
                 throw new IOException("External chunk payload is not a regular file: " + externalPath);
             }
-            // No size check on the .mcc file itself: it holds the *compressed* payload,
-            // which may legitimately grow slightly beyond MAX_CHUNK_PAYLOAD_BYTES, because
-            // deflate can inflate incompressible input by a small margin and the write side
-            // admits any uncompressed payload up to that bound. The real limit is enforced
-            // on the decompressed output below, by the bounded read.
+            // Bound the .mcc file before materializing it: it holds the *compressed*
+            // payload, which may legitimately grow slightly beyond MAX_CHUNK_PAYLOAD_BYTES
+            // (deflate inflates incompressible input by a small margin and the write side
+            // admits any uncompressed payload up to that bound), so the payload bound plus a
+            // 1 MiB safety margin is far above any legal compressed size - anything larger
+            // is a corrupt or foreign file that must not be read into memory wholesale. The
+            // check sits before the readAllBytes and the compression-type branch, so it
+            // bounds every payload type, COMPRESSION_NONE included (whose raw payload is
+            // then additionally held to the exact bound by the length check below); the
+            // exact per-payload limit for the compressed types is still enforced by the
+            // bounded decompression below.
+            long externalSize = java.nio.file.Files.size(externalPath);
+            long externalLimit = MAX_CHUNK_PAYLOAD_BYTES + 1024L * 1024L;
+            if (externalSize > externalLimit) {
+                throw new IOException("External chunk payload file of " + externalSize
+                        + " bytes exceeds the " + externalLimit + " byte limit: " + externalPath);
+            }
             data = java.nio.file.Files.readAllBytes(externalPath);
         } else {
             data = new byte[length - 1];

@@ -262,7 +262,7 @@ public final class ShardFile implements AutoCloseable {
             // replaying a header-less/garbage log through the compaction anchor would parse
             // misaligned records into page slots the HashMap does not know about.
             if (!tornInReadOnly && pageIndex != null) {
-                buildPagesFromCompactionAnchor();
+                Set<Long> unresolvedRegions = buildPagesFromCompactionAnchor();
                 // The open-time replay is done: every region page has been rebuilt from
                 // the log, so damage markers set during the rebuild (or left over from
                 // the previous session) are stale. Runtime single-slot writes never clear
@@ -270,7 +270,12 @@ public final class ShardFile implements AutoCloseable {
                 // rebuild is what restores PAGE mode for marked regions. A torn/invalid
                 // header in a read-only open skips the build above - nothing was replayed,
                 // so markers are deliberately left in place. See PageIndex.clearAllDamage.
-                pageIndex.clearAllDamage();
+                // A region whose page file could not be removed during the build keeps
+                // its marker: the page stayed corrupt, so PAGE-mode reads must keep
+                // falling back to the HashMap and the next open retries the repair.
+                if (unresolvedRegions.isEmpty()) {
+                    pageIndex.clearAllDamage();
+                }
             }
         } catch (Throwable e) {
             closeAfterOpenFailure(e);
@@ -506,14 +511,19 @@ public final class ShardFile implements AutoCloseable {
      * at open). The built pages end up dirty and are persisted by the next checkpoint or
      * close. A damaged page file is repaired in place (the corrupt file is deleted so the
      * replay continues into a fresh page) rather than failing the open; only a page whose
-     * file cannot be removed is skipped for the rest of the replay. The caller clears
-     * every region damage marker once this rebuild completes (see
-     * {@link PageIndex#clearAllDamage()}) - the replay has made the pages complete again,
-     * and runtime single-slot writes never clear markers.
+     * file cannot be removed is skipped for the rest of the replay.
+     *
+     * @return the regions whose corrupt page file could not be removed this open
+     *         (read-only mode or an I/O failure) and were skipped for the rest of the
+     *         replay. The caller must keep their damage markers in place so PAGE-mode
+     *         reads fall back to the HashMap and the next open retries the repair; every
+     *         other marker is stale once the replay has made the pages complete again and
+     *         may be cleared (see {@link PageIndex#clearAllDamage()}). Runtime single-slot
+     *         writes never clear markers.
      */
-    private void buildPagesFromCompactionAnchor() throws IOException {
+    private Set<Long> buildPagesFromCompactionAnchor() throws IOException {
         if (shardName == null) {
-            return; // defensive: without a shard name there is no watermark file to anchor on
+            return Set.of(); // defensive: without a shard name there is no watermark file to anchor on
         }
         // A completed compaction (a .cwmk file exists) means page files may hold
         // pre-compaction log offsets - the deletion after the swap is a separate step,
@@ -575,6 +585,7 @@ public final class ShardFile implements AutoCloseable {
                 truncateAt(outcome.firstInvalidOffset, outcome.reason);
             }
         }
+        return corruptRegions;
     }
 
     private void truncateAt(long pos, String reason) throws IOException {
@@ -1060,8 +1071,8 @@ public final class ShardFile implements AutoCloseable {
         // every other live chunk of the region as absent. The HashMap is always
         // maintained on the write path (index.put runs unconditionally), so while the
         // marker is present the region reads through the HashMap; the marker is cleared
-        // only once the open-time rebuild completes (clearAllDamage), never by a
-        // runtime single-slot write.
+        // only once the open-time rebuild completes without unresolved regions
+        // (clearAllDamage), never by a runtime single-slot write.
         long chunkKey = LongKeys.decode(key.array());
         return !pageIndex.isRegionDamaged(RegionPage.regionXFromChunk(chunkKey),
                 RegionPage.regionZFromChunk(chunkKey));

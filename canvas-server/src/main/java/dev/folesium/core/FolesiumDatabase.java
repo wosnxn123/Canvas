@@ -636,18 +636,37 @@ public final class FolesiumDatabase implements AutoCloseable {
             result = new ConfigReloadResult(effective, changes, notes, reshardRequired);
         }
 
-        if (result.applied().durability() == FolesiumConfig.DurabilityMode.BATCH) {
-            startFlusherIfNeeded();
-            synchronized (flusherLock) {
+        // Post-lock reconciliation of the group-commit thread against the FINAL config.
+        // A concurrent reload may have flipped durability (BATCH <-> EXPLICIT) after this
+        // reload computed `result`, and reconciling from our own result could retire the
+        // thread while the final config is still BATCH - fsync would then silently stop
+        // until the next reload, risking data loss on a crash. The decision and the field
+        // mutation are one atomic step under flusherLock; joining a retired thread happens
+        // outside the lock so the woken thread can reacquire the monitor and exit. A failed
+        // flush is not swallowed: the reload aborts loudly (the caller records the
+        // RuntimeException) instead of silently degrading durability.
+        FolesiumConfig.DurabilityMode finalDurability;
+        Thread retired;
+        synchronized (flusherLock) {
+            finalDurability = config.durability();
+            if (finalDurability == FolesiumConfig.DurabilityMode.BATCH) {
+                startFlusherIfNeeded();
+                flusherLock.notifyAll();
+                retired = null;
+            } else {
+                retired = flusher;
+                flusher = null;
                 flusherLock.notifyAll();
             }
-        } else {
-            stopFlusher();
+        }
+        if (retired != null && retired != Thread.currentThread()) {
+            awaitFlusherExit(retired);
+        }
+        if (finalDurability != FolesiumConfig.DurabilityMode.BATCH) {
             try {
                 flush();
             } catch (RuntimeException e) {
-                LOGGER.log(System.Logger.Level.ERROR,
-                        "Folesium: flush during durability change failed for " + dir, e);
+                throw new FolesiumException("Cannot flush " + dir + " during durability change", e);
             }
         }
         LOGGER.log(System.Logger.Level.INFO, "Folesium: {0} reconfigured - {1}",
@@ -848,9 +867,19 @@ public final class FolesiumDatabase implements AutoCloseable {
             flusher = null;
             flusherLock.notifyAll();
         }
-        if (t == null || t == Thread.currentThread()) {
-            return;
+        if (t != null && t != Thread.currentThread()) {
+            awaitFlusherExit(t);
         }
+    }
+
+    /**
+     * Waits for a retired group-commit thread to finish its current cycle.
+     *
+     * <p>It is woken through the monitor rather than interrupted, because an interrupt during
+     * {@code FileChannel.force} closes the channel ({@link java.nio.channels.ClosedByInterruptException}).
+     * Interruption is kept only as a last resort if the thread does not come back in time.</p>
+     */
+    private void awaitFlusherExit(Thread t) {
         try {
             t.join(5000);
             if (t.isAlive()) {
@@ -870,8 +899,17 @@ public final class FolesiumDatabase implements AutoCloseable {
                 FolesiumConfig snapshot = config;
                 synchronized (flusherLock) {
                     // Either the store is closing or this thread has been superseded/retired.
-                    if (closed.get() || flusher != Thread.currentThread()
-                            || snapshot.durability() != FolesiumConfig.DurabilityMode.BATCH) {
+                    if (closed.get() || flusher != Thread.currentThread()) {
+                        return;
+                    }
+                    if (config.durability() != FolesiumConfig.DurabilityMode.BATCH) {
+                        // Switched away from BATCH while we slept; the reload's stop path
+                        // takes care of the final flush. Retire ourselves atomically with
+                        // the decision, so a concurrent reload that flips the config back
+                        // to BATCH sees flusher == null and starts a fresh thread instead
+                        // of no-op'ing on this exiting one.
+                        flusher = null;
+                        flusherLock.notifyAll();
                         return;
                     }
                     try {
@@ -883,11 +921,6 @@ public final class FolesiumDatabase implements AutoCloseable {
                     if (closed.get() || flusher != Thread.currentThread()) {
                         return;
                     }
-                }
-                if (config.durability() != FolesiumConfig.DurabilityMode.BATCH) {
-                    // Switched away from BATCH while we slept; stopFlusher()/applyRuntimeConfig
-                    // takes care of the final flush.
-                    return;
                 }
                 try {
                     flush();

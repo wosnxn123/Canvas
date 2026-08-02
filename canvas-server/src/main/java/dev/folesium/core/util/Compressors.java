@@ -125,27 +125,18 @@ public final class Compressors {
                 }
                 off += n;
             }
-            if (rawLen > 0 && !inf.finished()) {
-                // The stream still has input left after the declared rawLen was filled: the
-                // record is larger than its header claims. Previously this silently returned
-                // truncated data (only the CRC would catch it); fail loudly instead.
-                throw new IllegalStateException("Compressed record exceeds declared size: " + rawLen);
-            }
-            if (rawLen == 0 && !inf.finished()) {
-                // A declared size of 0 must not skip validation: an empty DEFLATE stream
-                // (deflate of nothing) is legal and the loop above never ran, but garbage
-                // input with a 0 size would otherwise pass silently. Inflate the stream once
-                // against a scratch buffer - a legal empty stream reaches the end-of-stream
-                // marker (finished) without producing output; garbage either raises
-                // DataFormatException below or never finishes (truncated / oversized).
-                byte[] scratch = new byte[1];
-                int n = inf.inflate(scratch, 0, 1);
-                if (n != 0) {
-                    throw new IllegalStateException("Compressed record exceeds declared size: " + rawLen);
-                }
-                if (!inf.finished()) {
-                    throw new IllegalStateException("Truncated compressed record");
-                }
+            if (!inf.finished()) {
+                // The declared rawLen is filled (or is 0, so the loop above never ran) but
+                // the stream has not yet reached its end-of-stream marker. Drain it: a
+                // legal multi-block DEFLATE stream can end with empty blocks that produce
+                // no output, and finished() only turns true once the final block is
+                // consumed - a single inflate() against a scratch buffer would misreport
+                // such a stream as truncated/oversized. The drain producing further output
+                // means the record is genuinely larger than its header claims (previously
+                // this silently returned truncated data, only the CRC would catch it); a
+                // stream that runs out of input before its end-of-stream marker is
+                // truncated.
+                drainToEnd(inf, rawLen);
             }
             if (off != rawLen) {
                 throw new IllegalStateException("Decompressed size mismatch: " + off + " != " + rawLen);
@@ -155,6 +146,31 @@ public final class Compressors {
             throw new IllegalStateException("Corrupt compressed record", e);
         } finally {
             inf.end();
+        }
+    }
+
+    /**
+     * Consumes the remainder of an inflater stream whose declared {@code rawLen} output
+     * bytes were already produced (or skipped, for {@code rawLen == 0}). A legal
+     * multi-block DEFLATE stream may end with empty blocks that produce no output, and
+     * {@link Inflater#finished()} only turns true once the final block is consumed, so
+     * the stream is drained block by block against a scratch buffer. Throws when the
+     * stream produces any further output (the record is larger than its header claims)
+     * or runs out of input before its end-of-stream marker (truncated).
+     */
+    private static void drainToEnd(Inflater inf, int rawLen) throws DataFormatException {
+        byte[] scratch = new byte[1];
+        while (!inf.finished() && !inf.needsInput()) {
+            int n = inf.inflate(scratch, 0, 1);
+            if (n != 0) {
+                throw new IllegalStateException("Compressed record exceeds declared size: " + rawLen);
+            }
+            if (inf.needsDictionary()) {
+                throw new IllegalStateException("Compressed record requires a preset dictionary");
+            }
+        }
+        if (!inf.finished()) {
+            throw new IllegalStateException("Truncated compressed record");
         }
     }
 
