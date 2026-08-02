@@ -25,10 +25,13 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.FileSystemException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
@@ -50,6 +53,15 @@ import java.util.UUID;
  * <p>On-disk format: exactly what {@code Zstd.trainFromBuffer} produced (a zstd dictionary,
  * identified by its magic header). Written atomically with a unique {@code .tmp-<uuid>} sibling
  * and {@link FileChannel#force(boolean)}, mirroring {@link WatermarkFile}.</p>
+ *
+ * <p>Training is serialized across processes with an advisory lock on the sibling
+ * {@code dict.bin.lock} file (see {@link #acquireTrainLock}): the whole
+ * check-train-move sequence runs under the lock, so two processes converting the same
+ * keyspace can never both train and silently overwrite each other's dictionary. The
+ * lock is what enforces no-replace - {@link Files#move} with {@code ATOMIC_MOVE}
+ * replaces an existing target silently on POSIX and Windows, so the move itself cannot
+ * be relied on to refuse - and a {@code dict.bin} a peer just finished training is
+ * visible to the next acquirer as an already-existing file.</p>
  */
 public final class DictionaryStore {
     /**
@@ -81,6 +93,14 @@ public final class DictionaryStore {
 
     /** {@code Zstd.trainFromBuffer} rejects fewer than 11 samples. */
     private static final int MIN_SAMPLES = 11;
+
+    /**
+     * Bound on how often {@link #acquireTrainLock} retries when the lock file keeps being
+     * deleted and recreated underneath it. The retry only triggers on the delete race (the
+     * previous holder deleting the lock file mid-acquisition), which resolves within
+     * microseconds; a bounded loop keeps a pathological race from spinning forever.
+     */
+    private static final int LOCK_ACQUIRE_ATTEMPTS = 3;
 
     private DictionaryStore() {
     }
@@ -170,12 +190,95 @@ public final class DictionaryStore {
      * dictionary would make existing codec-3 records undecodable, so retraining requires
      * deleting {@code dictFile} first.
      *
-     * @throws FolesiumException if {@code dictFile} already exists (or appears
-     *                           concurrently while training), or if fewer than
+     * <p>Runs entirely under the cross-process training lock (see {@link #acquireTrainLock}), so
+     * the check-train-move sequence is serialized with any other process training the same
+     * keyspace: a peer that started first either produced the dictionary (which this call then
+     * sees as an existing file and refuses to overwrite) or still holds the lock, in which case
+     * this call fails loudly instead of racing it.</p>
+     *
+     * @throws FolesiumException if {@code dictFile} already exists, if another process is
+     *                           currently training it, or if fewer than
      *                           {@link #MIN_SAMPLES} samples are provided
-     * @throws IOException       if the file cannot be written
+     * @throws IOException       if the file cannot be written or the training lock cannot be
+     *                           acquired
      */
     public static byte[] train(Path dictFile, List<byte[]> samples) throws IOException {
+        FileChannel lockChannel = acquireTrainLock(dictFile);
+        if (lockChannel == null) {
+            throw new FolesiumException("Another process is currently training the dictionary for "
+                    + dictFile + "; refusing to race it (two concurrently trained dictionaries would "
+                    + "leave one set of codec-3 records undecodable). Retry once the other training "
+                    + "finishes.");
+        }
+        try {
+            return trainHoldingLock(dictFile, samples);
+        } finally {
+            releaseTrainLock(lockChannel, dictFile);
+        }
+    }
+
+    /**
+     * Trains and persists a dictionary only when none exists yet - the conversion pipeline's
+     * post-conversion bootstrap path ({@code WorldConverter}). Unlike {@link #train}, an
+     * existing dictionary is not an error: it is left untouched, because a different
+     * dictionary would make existing codec-3 records undecodable (the immutable-once-minted
+     * contract).
+     *
+     * <p>Like {@link #train}, the check-train-move sequence runs under the cross-process
+     * training lock, but contention is not an error here: a peer training the same keyspace
+     * produces the same outcome as an already-present dictionary, so a failed lock
+     * acquisition is reported as {@code null}.</p>
+     *
+     * @return the trained bytes when a new dictionary was written, or {@code null} when
+     *         {@code dictFile} already exists or another process is currently training it
+     * @throws FolesiumException if fewer than {@link #MIN_SAMPLES} samples are provided
+     * @throws IOException       if the file cannot be written or the training lock cannot be
+     *                           acquired
+     */
+    public static byte[] trainIfMissing(Path dictFile, List<byte[]> samples) throws IOException {
+        if (Files.exists(dictFile)) {
+            return null;
+        }
+        FileChannel lockChannel = acquireTrainLock(dictFile);
+        if (lockChannel == null) {
+            // Another process is (or just was) training this dictionary: under the
+            // no-overwrite contract the result is the same as finding dict.bin already
+            // present - the dictionary exists or will exist once that trainer finishes - so
+            // report the 'not an error' case instead of racing it.
+            return null;
+        }
+        try {
+            if (Files.exists(dictFile)) {
+                // The exists() check above ran before the lock; a completed concurrent train
+                // (or an external actor) created the file in the meantime. Under the lock this
+                // is the definitive answer - no trainer can be mid-flight - so report the same
+                // 'already exists' outcome as a pre-existing file.
+                return null;
+            }
+            try {
+                return trainHoldingLock(dictFile, samples);
+            } catch (FolesiumException e) {
+                // Only an external (non-lock-taking) actor can still race the move now; a
+                // dict.bin it created mid-train is the documented 'existing dictionary is not
+                // an error' case, so report it as such instead of surfacing a spurious refusal.
+                if (Files.exists(dictFile)) {
+                    return null;
+                }
+                throw e;
+            }
+        } finally {
+            releaseTrainLock(lockChannel, dictFile);
+        }
+    }
+
+    /**
+     * The check-train-move body shared by {@link #train} and {@link #trainIfMissing}. The
+     * caller must already hold the cross-process training lock (see {@link #acquireTrainLock}):
+     * the {@link Files#exists} check at the top is only authoritative under it, because the
+     * move at the bottom (see {@link #moveIntoPlace}) cannot itself refuse to replace a
+     * concurrent {@code dict.bin} - {@code ATOMIC_MOVE} replaces silently on POSIX/Windows.
+     */
+    private static byte[] trainHoldingLock(Path dictFile, List<byte[]> samples) throws IOException {
         if (Files.exists(dictFile)) {
             throw new FolesiumException("Dictionary file " + dictFile + " already exists; refusing to "
                     + "overwrite it (existing codec-3 records may depend on the trained dictionary). "
@@ -245,32 +348,120 @@ public final class DictionaryStore {
     }
 
     /**
-     * Trains and persists a dictionary only when none exists yet - the conversion pipeline's
-     * post-conversion bootstrap path ({@code WorldConverter}). Unlike {@link #train}, an
-     * existing dictionary is not an error: it is left untouched, because a different
-     * dictionary would make existing codec-3 records undecodable (the immutable-once-minted
-     * contract).
+     * Acquires the per-keyspace cross-process training lock: an exclusive {@link FileLock} over
+     * the {@code <dict>.lock} sibling file, so two processes training the same dictionary
+     * serialize their whole check-train-move sequence instead of racing it.
      *
-     * @return the trained bytes when a new dictionary was written, or {@code null} when
-     *         {@code dictFile} already exists
-     * @throws FolesiumException if fewer than {@link #MIN_SAMPLES} samples are provided
-     * @throws IOException       if the file cannot be written
+     * <p>Cross-process semantics: the lock is a plain OS advisory lock on the lock file, so it
+     * coordinates separate JVMs on any shared filesystem (local or network). It is what enforces
+     * no-replace - {@code Files.move} with {@code ATOMIC_MOVE} silently replaces an existing
+     * target on POSIX and Windows, so the move itself cannot refuse - and a peer's finished
+     * {@code dict.bin} is visible to the next acquirer as an already-existing file. Acquisition
+     * is non-blocking ({@link FileChannel#tryLock}): a process that finds the lock held gets
+     * {@code null} immediately and the caller decides between 'already handled'
+     * ({@link #trainIfMissing} returns {@code null}) and 'refuse loudly' ({@link #train} throws).
+     * A crash releases the OS lock automatically, leaving at most a stale zero-byte lock file
+     * behind; that is harmless - only the OS lock matters, never the file's contents, and the
+     * next trainer simply locks it again.</p>
+     *
+     * <p>Because the lock file is deleted on release (see {@link #releaseTrainLock}), an acquirer
+     * can end up locking an inode the path no longer names. The probe below makes that harmless:
+     * after {@code tryLock} succeeds the path is re-opened and locked again; a second successful
+     * lock proves our first lock is on an orphaned inode (the path now names a different,
+     * unlocked file), a {@code null} proves another process holds the current file (contention),
+     * and {@link OverlappingFileLockException} proves path and lock agree (the common case).
+     * Orphaned acquisitions are released and retried, bounded by {@link #LOCK_ACQUIRE_ATTEMPTS}.</p>
+     *
+     * @return the channel holding the lock, or {@code null} when another process (or this JVM)
+     *         already holds it
+     * @throws IOException if the lock file cannot be opened or locked
      */
-    public static byte[] trainIfMissing(Path dictFile, List<byte[]> samples) throws IOException {
-        if (Files.exists(dictFile)) {
-            return null;
+    private static FileChannel acquireTrainLock(Path dictFile) throws IOException {
+        Path parent = dictFile.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+        Path lockFile = lockFileOf(dictFile);
+        IOException lastFailure = null;
+        for (int attempt = 0; attempt < LOCK_ACQUIRE_ATTEMPTS; attempt++) {
+            FileChannel channel = FileChannel.open(lockFile,
+                    StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+            try {
+                if (channel.tryLock() == null) {
+                    // Held by another process: contention. (Same-JVM contention throws
+                    // OverlappingFileLockException instead and is handled below.)
+                    channel.close();
+                    return null;
+                }
+                try (FileChannel probe = FileChannel.open(lockFile, StandardOpenOption.WRITE)) {
+                    FileLock probeLock = probe.tryLock();
+                    if (probeLock == null) {
+                        // The path names a file another process holds: our first lock is the
+                        // orphaned inode, so this is contention after all.
+                        channel.close();
+                        return null;
+                    }
+                    probeLock.release();
+                    // The path names a different, currently unlocked file (the previous holder
+                    // deleted it and something recreated it): our first lock is the orphaned
+                    // inode - release it and retry against the current file.
+                    channel.close();
+                } catch (NoSuchFileException e) {
+                    // The path was deleted between our open and our probe: orphaned inode,
+                    // retry against a freshly created lock file.
+                    channel.close();
+                } catch (OverlappingFileLockException e) {
+                    // The probe resolved to the same inode we already locked: consistent.
+                    return channel;
+                }
+            } catch (OverlappingFileLockException e) {
+                // This JVM already holds the lock on this keyspace: contention.
+                channel.close();
+                return null;
+            } catch (IOException e) {
+                channel.close();
+                lastFailure = e;
+            }
+        }
+        if (lastFailure != null) {
+            throw lastFailure;
+        }
+        // Retries exhausted on transient delete races: report contention; the caller's next
+        // attempt starts a fresh acquisition.
+        return null;
+    }
+
+    /**
+     * Releases the lock acquired by {@link #acquireTrainLock} and removes the lock file. The
+     * file is deleted <em>before</em> the lock is released so that a fresh acquirer can never
+     * open the path mid-protected-section: once the path is gone, a new {@code open(CREATE)}
+     * locks a brand-new file that a still-running peer cannot be holding, and a peer that
+     * opened the old file just before the delete either finds the lock still held (contention)
+     * or is caught by {@code acquireTrainLock}'s probe. Deleting before closing is also what
+     * bounds the orphan-inode window to acquirers already holding a descriptor.
+     *
+     * <p>Both failures are swallowed: a leftover lock file is harmless (only the OS lock
+     * matters; the next trainer opens and locks it again), and a close failure must not mask
+     * the outcome of the protected operation.
+     */
+    private static void releaseTrainLock(FileChannel lockChannel, Path dictFile) {
+        try {
+            Files.deleteIfExists(lockFileOf(dictFile));
+        } catch (IOException e) {
+            // A leftover lock file is harmless - see the javadoc.
         }
         try {
-            return train(dictFile, samples);
-        } catch (FolesiumException e) {
-            // A dictionary appeared in the window between the exists() check above and the
-            // train() move: that is the documented 'existing dictionary is not an error'
-            // case, so report it as such instead of surfacing a spurious refusal.
-            if (Files.exists(dictFile)) {
-                return null;
-            }
-            throw e;
+            lockChannel.close();
+        } catch (IOException e) {
+            // A close failure means the OS lock may outlive this call until GC reaps the
+            // channel; the next acquirer then reports contention, which degrades to 'no
+            // dictionary' rather than data loss - see the javadoc.
         }
+    }
+
+    /** The sibling lock file coordinating training of {@code dictFile}: {@code <name>.lock}. */
+    private static Path lockFileOf(Path dictFile) {
+        return dictFile.resolveSibling(dictFile.getFileName() + ".lock");
     }
 
     /**
@@ -308,16 +499,21 @@ public final class DictionaryStore {
     }
 
     /**
-     * Moves {@code source} to {@code target} <em>without</em> replacing an existing file,
-     * preferring an atomic move but falling back to a plain move on filesystems that
-     * report missing atomic-move support as {@link AtomicMoveNotSupportedException}. The
-     * fallback re-checks {@link Files#exists} first to narrow the check-then-act window; a
-     * target that appears anyway surfaces as {@link FileAlreadyExistsException} from the
-     * move itself. Any other {@link FileSystemException} is rethrown unchanged instead of
-     * being masked by a doomed retry - except that a target which genuinely exists is
-     * treated as the concurrent-appearance race and converted to
-     * {@link FileAlreadyExistsException} with the original error attached as suppressed
-     * to keep its diagnostics.
+     * Moves {@code source} to {@code target}, preferring an atomic move but falling back to a
+     * plain move on filesystems that report missing atomic-move support as
+     * {@link AtomicMoveNotSupportedException}.
+     *
+     * <p>This does <em>not</em> by itself prevent replacing an existing {@code target}:
+     * {@link Files#move} with {@code ATOMIC_MOVE} silently replaces an existing file on POSIX
+     * and Windows (whether an existing target is replaced or the move fails is
+     * implementation-defined, and both platforms replace), so {@link FileAlreadyExistsException}
+     * cannot be relied on to surface the no-replace race. The no-replace guarantee comes from
+     * the caller holding the cross-process training lock (see {@link #acquireTrainLock}) across
+     * the whole check-train-move sequence. The {@code exists} re-checks below are best-effort
+     * defenses against external (non-lock-taking) actors racing the move: a target that
+     * demonstrably exists is surfaced as {@link FileAlreadyExistsException} instead of being
+     * silently replaced, and any other {@link FileSystemException} is rethrown unchanged rather
+     * than masked by a doomed retry.</p>
      */
     private static void moveIntoPlace(Path source, Path target) throws IOException {
         try {

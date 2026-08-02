@@ -145,7 +145,7 @@ final class StoreResharder {
             // is only finished once every new shard is present in dir.
             boolean swappable = newCount != null && (moved
                     ? completeNewLayout(dir, staging, newCount)
-                    : validStagedLayout(staging, newCount));
+                    : validStagedLayout(dir, staging, newCount));
             if (swappable) {
                 LOGGER.log(System.Logger.Level.WARNING,
                         "Folesium: resuming an interrupted reshard of {0}", dir);
@@ -265,6 +265,11 @@ final class StoreResharder {
         invalidatePageIndex(dir);
         deleteRecursively(staging);
         deleteRecursively(backup);
+        // Persist the scratch-tree deletions like the MOVED-alone branch above: the unlink
+        // of the staging/backup directories lives in the store directory's entry, and
+        // without an fsync a power cut could resurrect the discard evidence recovery
+        // would then mistake for a layout in flight.
+        fsyncDirectory(dir);
         // The COMMIT evidence is gone, but the shard-count metadata may still have been
         // updated before the crash (or the restored files may disagree with it). Realign the
         // metadata with the files before any keyspace opens, so a valid shard is never
@@ -322,6 +327,10 @@ final class StoreResharder {
         invalidatePageIndex(dir);
         deleteRecursively(staging);
         deleteRecursively(backup);
+        // Persist the scratch-tree deletions before staging begins: without an fsync a
+        // power cut could resurrect a stale COMMIT/MOVED marker that recovery would
+        // mistake for a reshard in flight. Same reasoning as the MOVED-alone branch.
+        fsyncDirectory(dir);
 
         long records = 0;
         try {
@@ -481,8 +490,15 @@ final class StoreResharder {
         }
     }
 
-    /** Ensures the staged files represent exactly the count named by COMMIT. */
-    private static boolean validStagedLayout(Path staging, int count) {
+    /**
+     * Ensures the staged files represent exactly the count named by COMMIT, for every keyspace
+     * the store has. Consulted on the pre-MOVED recovery path, where staging is the only copy
+     * of the new layout and {@code dir} still holds the old set: a staged set judged complete
+     * here leads to {@link #finishSwap} moving the old files aside and deleting them, so a
+     * staged set that silently dropped a whole keyspace must be judged invalid - otherwise
+     * that keyspace's records would have no surviving copy.
+     */
+    private static boolean validStagedLayout(Path dir, Path staging, int count) {
         try {
             // An empty staging directory is never a valid staged layout: the checks below
             // all pass vacuously when it holds no shard files, and recover() would then
@@ -494,7 +510,18 @@ final class StoreResharder {
                     return false;
                 }
             }
-            for (String name : discoverKeyspaces(staging)) {
+            // The staged set must cover every keyspace the store has - the coverage check
+            // mirroring completeNewLayout's union of discoverKeyspaces(dir) and
+            // discoverKeyspaces(staging). The per-keyspace completeness checks below only
+            // look at keyspaces that ARE staged, so they cannot catch one that is missing
+            // entirely: a staged set that dropped a whole keyspace must be judged invalid
+            // so recover() rolls the swap back / discards it instead of finishSwap deleting
+            // the only surviving copy of that keyspace's records.
+            TreeSet<String> stagedNames = new TreeSet<>(discoverKeyspaces(staging));
+            if (!stagedNames.containsAll(discoverKeyspaces(dir))) {
+                return false;
+            }
+            for (String name : stagedNames) {
                 for (int i = 0; i < count; i++) {
                     if (!Files.isRegularFile(staging.resolve(String.format("%s-%04d.flog", name, i)))) {
                         return false;

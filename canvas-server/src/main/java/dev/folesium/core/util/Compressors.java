@@ -155,8 +155,9 @@ public final class Compressors {
      * multi-block DEFLATE stream may end with empty blocks that produce no output, and
      * {@link Inflater#finished()} only turns true once the final block is consumed, so
      * the stream is drained block by block against a scratch buffer. Throws when the
-     * stream produces any further output (the record is larger than its header claims)
-     * or runs out of input before its end-of-stream marker (truncated).
+     * stream produces any further output (the record is larger than its header claims),
+     * runs out of input before its end-of-stream marker (truncated), or makes no
+     * progress at all (a corrupt record that would otherwise spin this loop forever).
      */
     private static void drainToEnd(Inflater inf, int rawLen) throws DataFormatException {
         byte[] scratch = new byte[1];
@@ -168,6 +169,10 @@ public final class Compressors {
             if (inf.needsDictionary()) {
                 throw new IllegalStateException("Compressed record requires a preset dictionary");
             }
+            // inflate() returned 0 yet the stream is neither finished nor waiting for input
+            // or a dictionary: a corrupt record that would otherwise spin this loop forever.
+            // Same no-progress guard as the main loop in inflate().
+            throw new IllegalStateException("Compressed record made no progress");
         }
         if (!inf.finished()) {
             throw new IllegalStateException("Truncated compressed record");

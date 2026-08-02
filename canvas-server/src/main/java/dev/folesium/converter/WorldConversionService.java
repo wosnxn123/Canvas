@@ -253,7 +253,8 @@ public final class WorldConversionService {
             System.out.println("Folesium: always BEFORE converting back to Folesium if you played on Anvil meanwhile.");
         } else {
             System.out.println("Folesium: targets were overwritten in place (backupOnConvert=false), so no .folesium-backup-*");
-            System.out.println("Folesium: trees exist; the stores above are the only redundant data left on disk.");
+            System.out.println("Folesium: trees were created by this run (older ones from earlier backup-mode runs, if any, stay");
+            System.out.println("Folesium: untouched); the stores above are the only redundant data left on disk.");
         }
     }
 

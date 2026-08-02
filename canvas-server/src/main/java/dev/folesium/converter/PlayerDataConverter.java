@@ -479,6 +479,12 @@ public final class PlayerDataConverter {
     /** Backup-mode path: clean staging tree + atomic swap, previous dir kept as backup. */
     private static long[] convertMappingViaStaging(Path out, Keyspace ks, Mapping m, Consumer<Path> backupSink)
             throws IOException {
+        // This path only runs under backupOnConvert, so crash leftovers of an earlier
+        // backup-mode run (a crash between staging and swap) must be collected before a
+        // new staging tree is created - otherwise they accumulate next to the restored
+        // trees instead of being swept by a later in-place run. Mirrors
+        // WorldConverter#convertKeyspaceViaStaging.
+        cleanStagingSiblings(out);
         Path staging = siblingPath(out, ".folesium-staging-");
         Files.createDirectories(staging);
         try {

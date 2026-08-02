@@ -687,8 +687,39 @@ public final class PageIndex implements AutoCloseable {
         }
     }
 
+    /**
+     * Best-effort sweep of stale {@code <page>.tmp-<uuid>} staging files left by a crash
+     * between RegionPage.write's staging write and its atomic rename. They are inert (never
+     * read by any load path) but accumulate across crashes. Runs on every hint write - the
+     * {@link #close()} path - so keyspaces that never compact, which never reach the sweep
+     * in {@link #deleteAllPageFiles()}, still get cleaned up. Failures are logged, never
+     * thrown.
+     */
+    private void sweepStaleTmpFiles() {
+        if (!Files.isDirectory(idxDir)) {
+            return;
+        }
+        try (var stream = Files.list(idxDir)) {
+            stream.filter(p -> p.getFileName().toString().contains(".tmp-")).forEach(p -> {
+                try {
+                    Files.deleteIfExists(p);
+                } catch (IOException e) {
+                    LOGGER.log(System.Logger.Level.WARNING,
+                            "Folesium: failed to delete stale page staging file {0}: {1}", p, e.toString());
+                }
+            });
+        } catch (IOException e) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: failed to list page files for cleanup in {0}: {1}", idxDir, e.toString());
+        }
+    }
+
     /** Best-effort hint write; failures are logged, never thrown (hint is regenerable). */
     private void writeHint() {
+        // Collect stale '<page>.tmp-<uuid>' staging files first: close() is the last
+        // chance for a keyspace that never compacted, whose deleteAllPageFiles() sweep
+        // never ran.
+        sweepStaleTmpFiles();
         List<int[]> pages = new ArrayList<>();
         if (Files.isDirectory(idxDir)) {
             try (var stream = Files.list(idxDir)) {

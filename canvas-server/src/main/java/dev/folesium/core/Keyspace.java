@@ -51,6 +51,14 @@ import java.util.stream.Stream;
  */
 public final class Keyspace implements AutoCloseable {
     private final String name;
+    /** Whether this keyspace was opened read-only: nothing may be written or compacted. */
+    private final boolean readOnly;
+    /**
+     * Set by {@link #close()} before any shard is torn down; the maintenance passes
+     * guard on it so they never touch shards close() is closing (same contract as
+     * {@link FolesiumDatabase#compactIfNeeded()}).
+     */
+    private volatile boolean closed;
     /**
      * One slot per shard index of the on-disk layout, in routing order. Read-write
      * keyspaces eagerly open every shard of {@link FolesiumConfig#shardCount()};
@@ -98,6 +106,7 @@ public final class Keyspace implements AutoCloseable {
 
     Keyspace(Path dir, String name, FolesiumConfig config, boolean readOnly) {
         this.name = name;
+        this.readOnly = readOnly;
         int[] discovered = readOnly ? discoveredShardIndices(dir, name) : null;
         int shardCount;
         if (readOnly) {
@@ -517,16 +526,19 @@ public final class Keyspace implements AutoCloseable {
     // ------------------------------------------------------------- byte[] API
 
     public byte[] get(byte[] key) {
+        Objects.requireNonNull(key, "key");
         ShardFile shard = shardFor(key);
         return shard == null ? null : shard.get(new Bytes(key));
     }
 
     public boolean contains(byte[] key) {
+        Objects.requireNonNull(key, "key");
         ShardFile shard = shardFor(key);
         return shard != null && shard.contains(new Bytes(key));
     }
 
     public void put(byte[] key, byte[] value) {
+        Objects.requireNonNull(key, "key");
         if (value == null) {
             throw new IllegalArgumentException("null value; use delete()");
         }
@@ -535,6 +547,7 @@ public final class Keyspace implements AutoCloseable {
 
     /** Stores the value only if the key is absent; returns {@code true} if written. */
     public boolean putIfAbsent(byte[] key, byte[] value) {
+        Objects.requireNonNull(key, "key");
         if (value == null) {
             throw new IllegalArgumentException("null value; use delete()");
         }
@@ -542,6 +555,7 @@ public final class Keyspace implements AutoCloseable {
     }
 
     public void delete(byte[] key) {
+        Objects.requireNonNull(key, "key");
         requireShardForWrite(key).delete(new Bytes(key));
     }
 
@@ -644,14 +658,24 @@ public final class Keyspace implements AutoCloseable {
         for (ShardFile s : liveShards) {
             s.flushIfDirty();
         }
-        // Log-first: dirty pages must never be persisted ahead of the log data they
-        // reference. The shard forces above ran first, so flushing here is safe.
+        // Log-first, best-effort: dirty pages must not be persisted ahead of the log data
+        // they reference, so the shard forces run first. This is an ordering preference,
+        // not the correctness mechanism - a concurrent writer can dirty a shard after its
+        // flushIfDirty() above (the two phases take different locks), and flushIfDirty()
+        // early-returns with dirty still set when the shard channel is closed, so the page
+        // flush can still outrun the log force. Correctness is enforced by the read-path
+        // slot trimming instead: a page persisted ahead of its log data holds slots at or
+        // past the log EOF, which pageIndexLoc rejects as misses (and the record key must
+        // match the slot's key), so such a page reads as absent until the log catches up.
         if (pageIndex != null) {
             pageIndex.flush();
         }
     }
 
     public void compactIfNeeded() {
+        if (closed || readOnly) {
+            return; // do not touch shards close() is tearing down, or a read-only store
+        }
         for (ShardFile s : liveShards) {
             if (s.needsCompaction()) {
                 s.compact();
@@ -660,6 +684,9 @@ public final class Keyspace implements AutoCloseable {
     }
 
     public void compactAll() {
+        if (closed || readOnly) {
+            return; // do not touch shards close() is tearing down, or a read-only store
+        }
         for (ShardFile s : liveShards) {
             s.compact();
         }
@@ -725,6 +752,7 @@ public final class Keyspace implements AutoCloseable {
 
     @Override
     public void close() {
+        closed = true;
         FolesiumException first = null;
         for (ShardFile s : liveShards) {
             try {

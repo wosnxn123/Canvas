@@ -128,7 +128,13 @@ public final class FolesiumDatabase implements AutoCloseable {
 
     /** Guards {@link #flusher} and doubles as the group-commit thread's wait monitor. */
     private final Object flusherLock = new Object();
-    private Thread flusher;
+    /**
+     * The group-commit thread, or {@code null} when group commit is not running.
+     * Volatile because the compaction pass reads it without {@link #flusherLock} (the
+     * pass-start snapshot and each post-sleep checkpoint below); every write happens
+     * under the lock, so a volatile read always sees the latest retirement decision.
+     */
+    private volatile Thread flusher;
 
     /**
      * Outcome of a runtime configuration change.
@@ -879,13 +885,15 @@ public final class FolesiumDatabase implements AutoCloseable {
         }
         long ioLimit = config.compactIoLimit();
         long bytesSinceSleep = 0;
-        // Whether THIS caller is the group-commit thread. The retirement check after a
-        // rate-limit sleep below only applies to the flusher: a retired/superseded flusher
-        // must stop compacting, but a non-flusher caller (the server save thread via
+        // Whether THIS caller started the pass as the group-commit thread. The snapshot
+        // only classifies the caller - a flusher-class caller is one whose retirement
+        // must stop the pass - while each post-sleep checkpoint below re-reads the
+        // volatile flusher field, so the "still the flusher" decision is always made
+        // against the latest state. A non-flusher caller (the server save thread via
         // {@link FolesiumRegistry#flushAll()}, which also drives
         // {@link #compactIfNeededThrottled()}) legitimately runs this pass on its own
-        // thread, where comparing against the flusher field would abort the pass after
-        // every rate-limit sleep.
+        // thread and is never the flusher, so the identity comparison stays false for it
+        // and never aborts the pass after a rate-limit sleep.
         boolean callerIsFlusher = Thread.currentThread() == flusher;
         for (ShardFile s : candidates) {
             s.compact();
@@ -905,9 +913,12 @@ public final class FolesiumDatabase implements AutoCloseable {
                     // owns the loop now) must stop too - but only when the caller IS the
                     // flusher: `flusher != Thread.currentThread()` is always true for a
                     // non-flusher caller, so the identity comparison is skipped for them.
-                    // Abort the pass - do not clear the interrupt again (sleepQuietly
-                    // already did) and do not continue with the next shard, whose
-                    // compact() may hit channels close() is closing.
+                    // The flusher field is volatile (all writes are under flusherLock), so
+                    // this re-read at every checkpoint - not the pass-start snapshot alone
+                    // - always sees the latest retirement decision. Abort the pass - do
+                    // not clear the interrupt again (sleepQuietly already did) and do not
+                    // continue with the next shard, whose compact() may hit channels
+                    // close() is closing.
                     if (closed.get() || (callerIsFlusher && flusher != Thread.currentThread())) {
                         break;
                     }

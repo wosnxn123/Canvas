@@ -360,6 +360,11 @@ public final class WorldConverter {
     /** Backup-mode path: write a clean staging tree, swap it in, keep the old tree as backup. */
     private void convertKeyspaceViaStaging(Path out, Keyspace ks, AtomicLong chunkCount, AtomicLong byteCount)
             throws IOException {
+        // This path only runs under backupOnConvert, so crash leftovers of an earlier
+        // backup-mode run (a crash between staging and swap) must be collected before a
+        // new staging tree is created - otherwise they accumulate next to the restored
+        // trees instead of being swept by a later in-place run.
+        cleanStagingSiblings(out);
         Path staging = siblingPath(out, ".folesium-staging-");
         Files.createDirectories(staging);
         try {
@@ -460,7 +465,13 @@ public final class WorldConverter {
                 }
                 rf.sync();
             } catch (IOException ex) {
-                throw new UncheckedIOException("Failed pruning deleted chunks in " + mca, ex);
+                // A single corrupt or foreign region file (unreadable header, truncated
+                // payload, ...) must not abort the whole export: skip it and warn. The
+                // region is deliberately left untouched - a file that cannot be read
+                // reliably is not swept, because a partial sweep could corrupt what is
+                // still decodable there.
+                System.err.println("Folesium: skipping region " + mca.getFileName()
+                        + ": cannot read it, leaving its chunks untouched (" + ex.getMessage() + ")");
             }
         });
     }
@@ -547,7 +558,8 @@ public final class WorldConverter {
      * Restores the previous store after a failed backup-mode conversion, mirroring the
      * rollback of {@link #replaceDirectory}: the half-written new store at the canonical
      * path is removed and the backup is moved back into place. The original failure is
-     * rethrown by the caller; a restore failure is attached to it as suppressed. When the
+     * rethrown by the caller; a restore failure is attached to it as suppressed, with the
+     * backup path in the message so the operator can find the retained data. When the
      * initial backup move itself failed, the backup does not exist and the canonical path
      * still holds the intact original, so nothing is deleted or moved.
      */
@@ -561,7 +573,10 @@ public final class WorldConverter {
             try {
                 movePath(backup, destination, false);
             } catch (IOException restoreFailure) {
-                failure.addSuppressed(restoreFailure);
+                failure.addSuppressed(new IOException(
+                        "Failed restoring the previous store from " + backup
+                                + " after a failed conversion; the backup is still there",
+                        restoreFailure));
             }
         }
     }
