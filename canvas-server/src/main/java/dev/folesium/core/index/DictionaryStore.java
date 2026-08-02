@@ -140,6 +140,7 @@ public final class DictionaryStore {
             Files.createDirectories(parent);
         }
         Path tmp = dictFile.resolveSibling(dictFile.getFileName() + ".tmp-" + UUID.randomUUID());
+        Throwable primary = null;
         try {
             ByteBuffer buf = ByteBuffer.wrap(trained);
             try (FileChannel channel = FileChannel.open(tmp, StandardOpenOption.CREATE,
@@ -150,15 +151,38 @@ public final class DictionaryStore {
                 channel.force(true);
             }
             moveIntoPlace(tmp, dictFile);
+            // The rename is the commit: fsync the parent directory so the new dict.bin name
+            // survives a crash (mirrors FolesiumDatabase.writeAtomically / the directory-fsync
+            // pattern of the other stores).
+            fsyncDirectory(parent);
         } catch (FileAlreadyExistsException e) {
             // The exists() check above ran before training; a dictionary created in the
             // meantime must not be silently overwritten (the immutable-once-minted
             // contract), so surface the race as the same refusal as a pre-existing file.
-            throw new FolesiumException("Dictionary file " + dictFile + " appeared concurrently; refusing to "
+            FolesiumException failure = new FolesiumException("Dictionary file " + dictFile + " appeared concurrently; refusing to "
                     + "overwrite it (existing codec-3 records may depend on the trained dictionary). "
                     + "Delete dict.bin first to retrain.", e);
+            primary = failure;
+            throw failure;
+        } catch (IOException | RuntimeException | Error e) {
+            // Any other failure propagating out of the write is remembered so the cleanup
+            // below attaches to it instead of masking it.
+            primary = e;
+            throw e;
         } finally {
-            Files.deleteIfExists(tmp);
+            try {
+                Files.deleteIfExists(tmp);
+            } catch (IOException e2) {
+                // A failed cleanup must not mask the exception the try block is already
+                // propagating: attach the delete failure to it as suppressed. When the try
+                // block itself succeeded (the file was moved away), the delete failure is
+                // the only error to report.
+                if (primary != null) {
+                    primary.addSuppressed(e2);
+                } else {
+                    throw e2;
+                }
+            }
         }
         return trained;
     }
@@ -196,6 +220,24 @@ public final class DictionaryStore {
     private static boolean hasDictionaryMagic(byte[] dict) {
         return dict.length >= 4
                 && ByteBuffer.wrap(dict, 0, 4).order(ByteOrder.LITTLE_ENDIAN).getInt() == ZSTD_DICT_MAGIC;
+    }
+
+    /**
+     * Best-effort directory fsync so a completed rename survives a crash. Mirrors the
+     * directory-fsync pattern of {@code FolesiumDatabase.writeAtomically} (opening the
+     * directory with {@code READ} and forcing flushes the rename on filesystems that
+     * support directory fsync); filesystems that reject it (some Windows filesystems)
+     * are skipped silently.
+     */
+    private static void fsyncDirectory(Path dir) {
+        if (dir == null) {
+            return;
+        }
+        try (FileChannel channel = FileChannel.open(dir, StandardOpenOption.READ)) {
+            channel.force(true);
+        } catch (IOException | UnsupportedOperationException ignored) {
+            // Directory fsync is unavailable on some Windows filesystems.
+        }
     }
 
     /**

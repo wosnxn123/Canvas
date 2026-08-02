@@ -264,6 +264,18 @@ public final class WorldConversionService {
                 if (!PlayerDataConverter.hasVanillaPlayerData(worldRoot)) {
                     return 0;
                 }
+                // An existing store at the player-store location must be the player
+                // store. A DIMENSION store there (misplaced, or a layout change) must
+                // not be moved aside and rebuilt as a PLAYERS store -- backupOnConvert
+                // would silently hide the dimension's data behind a backup name. Refuse
+                // loudly and leave the vanilla files unconverted.
+                if (FolesiumDatabase.readRole(store) == FolesiumDatabase.StoreRole.DIMENSION) {
+                    System.out.println("Folesium: skipped player data conversion of " + worldRoot + ": " + store
+                            + " already holds a DIMENSION store, not the player store.");
+                    System.out.println("Folesium: move or convert that store first, then re-run; the vanilla player");
+                    System.out.println("Folesium: files (playerdata/advancements/stats) are left unconverted.");
+                    return 0;
+                }
                 stats = PlayerDataConverter.anvilToFolesium(worldRoot, store, config, movedStores::add);
             }
             case TO_ANVIL -> {

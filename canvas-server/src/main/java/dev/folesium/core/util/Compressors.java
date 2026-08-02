@@ -125,10 +125,12 @@ public final class Compressors {
                 }
                 off += n;
             }
-            if (!inf.finished()) {
+            if (rawLen > 0 && !inf.finished()) {
                 // The stream still has input left after the declared rawLen was filled: the
                 // record is larger than its header claims. Previously this silently returned
-                // truncated data (only the CRC would catch it); fail loudly instead.
+                // truncated data (only the CRC would catch it); fail loudly instead. A rawLen
+                // of 0 is exempt: an empty DEFLATE stream (deflate of nothing) is legal and
+                // the loop never ran, so finished() is expected to stay false.
                 throw new IllegalStateException("Compressed record exceeds declared size: " + rawLen);
             }
             if (off != rawLen) {

@@ -305,6 +305,14 @@ public final class PlayerDataConverter {
      * swapped in, and the previous directory is moved to a unique
      * {@code .folesium-backup-*} sibling, so stale UUID files and empty-keyspace
      * remnants cannot survive the rollback.</p>
+     *
+     * <p>The export always targets the 26.x layout
+     * ({@code players/data}, {@code players/advancements}, {@code players/stats}):
+     * a 26.x server reads <em>only</em> that tree, so writing the root-level legacy
+     * directories on a downgraded world (see {@link #playerRootFor}) would make the
+     * rolled-back players silently disappear. The downgrade detection applies to the
+     * import source layout ({@link #anvilToFolesium}) only; an export never follows
+     * it.</p>
      */
     public static Stats folesiumToAnvil(Path storeDir, Path worldRoot, FolesiumConfig config) throws IOException {
         long start = System.nanoTime();
@@ -314,14 +322,18 @@ public final class PlayerDataConverter {
             return new Stats(0, 0, (System.nanoTime() - start) / 1_000_000);
         }
 
-        Path playerRoot = playerRootFor(worldRoot);
-        // Export only: read the existing layout without rewriting it first.
+        // Export only: read the existing layout without rewriting it first. The
+        // players/ container is created up front so the 26.x tree exists even when
+        // the world root never had one (a legacy or downgraded world being rolled
+        // back onto a 26.x server).
+        Path exportRoot = worldRoot.resolve(DIR_PLAYERS_26);
+        Files.createDirectories(exportRoot);
         try (FolesiumDatabase db = FolesiumDatabase.open(storeDir,
                 FolesiumConfig.defaults().withDurability(FolesiumConfig.DurabilityMode.EXPLICIT),
                 FolesiumDatabase.StoreRole.PLAYERS, false)) {
-            for (Mapping m : mappingsFor(worldRoot, playerRoot)) {
+            for (Mapping m : MODERN_MAPPINGS) {
                 Keyspace ks = db.keyspace(m.keyspace());
-                Path out = playerRoot.resolve(m.dir());
+                Path out = exportRoot.resolve(m.dir());
                 if (ks.count() == 0 && !Files.exists(out)) {
                     // Do not create empty vanilla roots on a brand-new world.
                     continue;

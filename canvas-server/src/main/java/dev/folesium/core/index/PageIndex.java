@@ -32,6 +32,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -48,6 +49,14 @@ import java.util.concurrent.locks.ReentrantLock;
  * bypath cache in Phase 1: nothing populates them from the HashMap at open, so the only
  * trustworthy pages are those read from an existing page file (see
  * {@link #isPagePersisted(int, int)}).</p>
+ *
+ * <p><b>Damage repair.</b> When a page file is corrupt, {@link #rebuildPageFrom} drops
+ * the cached entry and deletes the file, and marks the region damaged
+ * ({@link #isRegionDamaged}) until a successful {@link #updateSlot} clears the marker
+ * or the next open rebuilds the pages from the log. While a region is marked, PAGE-mode
+ * readers bypass its (fresh, empty) page and fall back to the HashMap, which the shard
+ * write path always maintains, so the other live chunks of the region keep reading
+ * correctly instead of silently missing.</p>
  *
  * <p><b>Cache design.</b> The cache is partitioned into {@value #SEGMENT_COUNT}
  * segments, each guarded by its own {@link ReentrantLock}, so region threads on
@@ -140,6 +149,21 @@ public final class PageIndex implements AutoCloseable {
     private final ConcurrentHashMap<String, Long> pendingWatermarks = new ConcurrentHashMap<>();
     /** In-memory compaction-anchor (last completed compaction EOF) cache per shard. */
     private final ConcurrentHashMap<String, Long> compactionWatermarks = new ConcurrentHashMap<>();
+    /**
+     * Regions whose page file {@link #rebuildPageFrom} deleted after damage and whose
+     * page has not been rebuilt since. While a region is marked, PAGE-mode readers must
+     * not trust its page - the next {@link #pageFor} would build a fresh, empty page
+     * that knows nothing about records written before this session, so every other live
+     * chunk of the region would read as absent - and fall back to the HashMap, which
+     * the shard write path always maintains (see {@link #isRegionDamaged}). A
+     * successful {@link #updateSlot} unmarks the region; {@link #invalidateAll()} and
+     * {@link #close()} clear the whole set. In-memory only: the next open rebuilds the
+     * pages from the log and starts with an empty set. A concurrent set because
+     * {@link #rebuildPageFrom} touches it outside the owning segment lock while
+     * {@link #updateSlot} touches it inside the segment lock - no lock ordering is
+     * imposed between the two, so no deadlock can arise.
+     */
+    private final Set<Long> damagedRegions = ConcurrentHashMap.newKeySet();
 
     private volatile boolean invalidated;
     private volatile boolean closed;
@@ -278,6 +302,20 @@ public final class PageIndex implements AutoCloseable {
     }
 
     /**
+     * Whether the region's page file was deleted by {@link #rebuildPageFrom} after
+     * damage and has not been rebuilt since (a successful {@link #updateSlot} or the
+     * next open clears the marker). While {@code true}, PAGE-mode readers must not
+     * consult the region's page - the next {@link #pageFor} builds a fresh, empty page
+     * that knows nothing about records written before this session - and must fall back
+     * to the HashMap, which the shard write path always maintains (ShardFile's
+     * {@code index.put} runs unconditionally on the write path). AUTO-mode readers
+     * already fall back to the HashMap on a page miss and are unaffected.
+     */
+    public boolean isRegionDamaged(int regionX, int regionZ) {
+        return enabled && !invalidated && damagedRegions.contains(pack(regionX, regionZ));
+    }
+
+    /**
      * Write-path hook: loads (or creates) the region page, sets the slot to the record's
      * absolute log offset ({@code 0} = absent / tombstoned) and marks the page dirty.
      *
@@ -306,15 +344,18 @@ public final class PageIndex implements AutoCloseable {
                 Path file = pagePath(regionX, regionZ);
                 boolean exists = Files.exists(file);
                 // Loading an on-disk page here may load a *stale* page: when a .cwmk exists the
-                // page file can be a pre-compaction artifact (compaction deletes page files only
-                // after the swap, and a read-only open deliberately never deletes them, so a
-                // crash or a read-only session can leave pre-compaction pages on disk). The
-                // replay/merge into such a page is still done here (read-only mode must not
-                // delete or rebuild page files), and a stale slot whose offset now falls on a
-                // legal record of another key is guarded by the caller's key validation:
-                // ShardFile.pageIndexLoc verifies the record at the slot offset belongs to the
-                // queried key and treats a mismatch as a miss (HashMap fallback / absent),
-                // never serving another key's value.
+                // page file can be a pre-compaction artifact. That load happens on the read-only
+                // open's replay path - a read-only open never deletes page files (their
+                // compaction-era deletion runs only on a read-write open), so
+                // buildPagesFromCompactionAnchor replays the post-compaction log into
+                // pre-compaction pages; a crash between the compaction swap and the page-file
+                // deletion leaves the same files for a read-write open. The replay/merge into
+                // such a page is still done here (read-only mode must not delete or rebuild
+                // page files), and a stale slot whose offset now falls on a legal record of
+                // another key is guarded by the caller's key validation: ShardFile.pageIndexLoc
+                // verifies the record at the slot offset belongs to the queried key and treats
+                // a mismatch as a miss (HashMap fallback / absent), never serving another key's
+                // value.
                 RegionPage page = exists ? readPage(file, regionX, regionZ) : RegionPage.create(regionX, regionZ);
                 e = new Entry(page);
                 e.persisted = exists;
@@ -334,6 +375,12 @@ public final class PageIndex implements AutoCloseable {
                     e.dirty = true;
                     dirtyCount.incrementAndGet();
                 }
+                // A successful slot write makes the page fresh and valid again: clear any
+                // damage marker for the region so PAGE-mode readers trust the page again
+                // (the marker was set by rebuildPageFrom after a corrupt backing file was
+                // deleted; the write path replays into the rebuilt page exactly like the
+                // open-time log replay does). See the damagedRegions field javadoc.
+                damagedRegions.remove(key);
             }
         } finally {
             seg.lock.unlock();
@@ -377,6 +424,17 @@ public final class PageIndex implements AutoCloseable {
         }
         try {
             Files.deleteIfExists(pagePath(regionX, regionZ));
+            // The backing file is gone, so the next pageFor builds a fresh, empty page that
+            // knows nothing about the records written before this session - in PAGE mode
+            // every other live chunk of the region would then read as absent. The HashMap
+            // is always maintained on the write path (ShardFile.put's index.put runs
+            // unconditionally), so mark the region damaged: PAGE-mode readers fall back to
+            // the HashMap for it until a successful updateSlot unmarks it or the next open
+            // rebuilds the pages from the log. The read-only branch above returns false
+            // without adding the marker: the corrupt file stays in place there, so the
+            // page remains damaged and is retried on the next access, per the existing
+            // semantics.
+            damagedRegions.add(pack(regionX, regionZ));
             return true;
         } catch (IOException e) {
             LOGGER.log(System.Logger.Level.WARNING,
@@ -410,6 +468,9 @@ public final class PageIndex implements AutoCloseable {
             }
         }
         dirtyCount.set(0);
+        // Pages are rebuilt on the next open after compaction/reshard; no region stays
+        // damaged (and the HashMap serves all reads while the index is invalidated).
+        damagedRegions.clear();
     }
 
     // ------------------------------------------------------------- persistence
@@ -514,6 +575,7 @@ public final class PageIndex implements AutoCloseable {
             return;
         }
         closed = true;
+        damagedRegions.clear();
         if (enabled && !readOnly) {
             // flush() guards on closed, so call the work directly here.
             flushPages();
@@ -584,6 +646,16 @@ public final class PageIndex implements AutoCloseable {
         } catch (IOException e) {
             LOGGER.log(System.Logger.Level.WARNING,
                     "Folesium: failed to write hint {0}: {1}", hint, e.toString());
+        } finally {
+            // A failed writeString or move must not leave a stale .tmp behind: remove it
+            // best-effort so the next hint write starts clean. (After a successful move
+            // the .tmp no longer exists and this is a no-op.)
+            try {
+                Files.deleteIfExists(tmp);
+            } catch (IOException e2) {
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Folesium: failed to delete stale hint tmp {0}: {1}", tmp, e2.toString());
+            }
         }
     }
 

@@ -301,9 +301,15 @@ public final class FolesiumPlayerStorage implements AutoCloseable {
                 // already ran or is about to, and flushQuietly() is a no-op once closed.
             }
         }
-        flush();
-        // Pass the instance we actually hold: if the registry has since reopened the store
-        // (e.g. after closeAll()), this release must not decrement the new one.
-        FolesiumRegistry.release(storeDir, database);
+        try {
+            flush();
+        } finally {
+            // release() must always run: if flush() throws and the registry reference were
+            // skipped, the store, its shards and the group-commit thread would leak until
+            // shutdown. The flush failure still propagates to the caller.
+            // Pass the instance we actually hold: if the registry has since reopened the store
+            // (e.g. after closeAll()), this release must not decrement the new one.
+            FolesiumRegistry.release(storeDir, database);
+        }
     }
 }

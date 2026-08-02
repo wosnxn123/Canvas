@@ -63,7 +63,6 @@ public final class FolesiumRegistry {
 
     private static final Map<Path, Entry> OPEN = new HashMap<>();
 
-    private static final boolean ZSTD_AVAILABLE = ZstdNative.available();
     private static final AtomicBoolean SHUTDOWN_HOOK_INSTALLED = new AtomicBoolean();
     private static final AtomicBoolean UTF8_LOGGING_INSTALLED = new AtomicBoolean();
     private static final AtomicBoolean ASCII_LOGGING_INSTALLED = new AtomicBoolean();
@@ -216,7 +215,8 @@ public final class FolesiumRegistry {
         sb.append("indexMode=").append(defaults.indexMode().name()).append('\n');
         sb.append('\n');
         sb.append("# Compress new region records with a per-keyspace zstd dictionary (codec 3). Requires zstd-jni;\n");
-        sb.append("# the dictionary is trained once on first store open. Off by default.\n");
+        sb.append("# the dictionary is trained by the conversion pipeline at the end of a conversion\n");
+        sb.append("# (new writes fall back to plain ZSTD while it is missing). Off by default.\n");
         sb.append("dictionaryCompression=").append(defaults.dictionaryCompression()).append('\n');
         sb.append('\n');
         sb.append("# Prioritise compacting the shards with the most write churn instead of a pure dead-ratio order.\n");
@@ -268,7 +268,11 @@ public final class FolesiumRegistry {
 
     private static FolesiumConfig autoTunedConfig() {
         int cores = Runtime.getRuntime().availableProcessors();
-        boolean zstd = ZSTD_AVAILABLE;
+        // available() caches its probe after the first call (see ZstdNative); the
+        // folesium.zstd.forceUnavailable test switch applies by refreshing that cache via
+        // ZstdNative.setForcedUnavailable (the switch-gated tests do this before rebuilding
+        // the registry config).
+        boolean zstd = ZstdNative.available();
 
         int shards = autoTunedShards(cores);
 
@@ -310,7 +314,7 @@ public final class FolesiumRegistry {
     private static String describeMachine() {
         int cores = Runtime.getRuntime().availableProcessors();
         long maxMemMb = Runtime.getRuntime().maxMemory() / (1024L * 1024);
-        boolean zstd = ZSTD_AVAILABLE;
+        boolean zstd = ZstdNative.available();
         return String.format("%d cores, %d MB max heap, zstd-jni %s",
                 cores, maxMemMb, zstd ? "available" : "unavailable");
     }
@@ -395,9 +399,9 @@ public final class FolesiumRegistry {
             compression = d.compression();
         }
         // ZSTD_DICT needs the zstd-jni dictionary API on top of plain ZSTD, so each codec is
-        // probed with its own gate: ZSTD against ZSTD_AVAILABLE, ZSTD_DICT against
+        // probed with its own gate: ZSTD against ZstdNative.available(), ZSTD_DICT against
         // dictAvailable() (which also covers the library being entirely absent).
-        if ((compression == FolesiumConfig.Compression.ZSTD && !ZSTD_AVAILABLE)
+        if ((compression == FolesiumConfig.Compression.ZSTD && !ZstdNative.available())
                 || (compression == FolesiumConfig.Compression.ZSTD_DICT && !ZstdNative.dictAvailable())) {
             LOGGER.log(System.Logger.Level.WARNING,
                     "Folesium: compression={0} requested but {1}, using {2}",

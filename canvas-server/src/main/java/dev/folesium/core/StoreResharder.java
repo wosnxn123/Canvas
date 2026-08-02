@@ -577,8 +577,36 @@ final class StoreResharder {
      * back, and both the staging and backup trees are dropped. Only called on the MOVED
      * path, where the backup is the sole surviving copy of the records the swap never
      * reached - deleting the staging tree without restoring it would silently lose data.
+     *
+     * <p>Idempotent across crashes: a previous invocation may already have moved every
+     * old shard back into {@code dir} and then crashed before the cleanup. The backup
+     * then holds no shard file (only the MOVED marker) while {@code dir}'s shard files
+     * are the complete old set - the only surviving copy of the records. Deleting them
+     * would destroy the data, so that state is detected up front and the directory is
+     * left intact: only the staging and backup trees are dropped (the MOVED marker goes
+     * with the backup).</p>
      */
     private static void restoreOldLayout(Path dir, Path backup, Path staging) throws IOException {
+        // Collect the backup's shard files BEFORE touching dir: if a previous restore
+        // already moved them all back (and crashed before the cleanup), the backup holds
+        // nothing but the MOVED marker and dir's shard files are the complete old set -
+        // the only surviving copy of the records. Deleting dir in that state (step 1
+        // below) would silently lose every record; keeping it intact is the whole point.
+        List<Path> backupShards = Files.isDirectory(backup) ? listShardFiles(backup) : List.of();
+        if (backupShards.isEmpty()) {
+            // The old layout is already fully restored in dir: leave it untouched and
+            // just drop the scratch trees. The caller reconciles the shard-count
+            // metadata against the restored files (restoredLayoutShardCount) as usual.
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: backup {0} of {1} holds no shard files; the old layout is "
+                            + "already restored - keeping the store directory intact and "
+                            + "dropping the scratch trees",
+                    backup, dir);
+            deleteRecursively(staging);
+            deleteRecursively(backup);
+            fsyncDirectory(dir);
+            return;
+        }
         // 1. Remove the partial new files from dir (they belong to the aborted new layout).
         for (Path p : listShardFiles(dir)) {
             Files.deleteIfExists(p);
@@ -586,16 +614,9 @@ final class StoreResharder {
         // 2. Move every old shard file back from the backup. The MOVED marker stays
         //    behind - it is not a shard file and must not be moved into the store root;
         //    the whole backup tree is dropped below, taking the marker with it.
-        if (Files.isDirectory(backup)) {
-            try (Stream<Path> files = Files.list(backup)) {
-                List<Path> olds = files.filter(Files::isRegularFile)
-                        .filter(p -> !MOVED_MARKER.equals(p.getFileName().toString()))
-                        .toList();
-                for (Path p : olds) {
-                    Files.move(p, dir.resolve(p.getFileName().toString()),
-                            StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-                }
-            }
+        for (Path p : backupShards) {
+            Files.move(p, dir.resolve(p.getFileName().toString()),
+                    StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         }
         // 3. Drop the staging and backup trees.
         deleteRecursively(staging);

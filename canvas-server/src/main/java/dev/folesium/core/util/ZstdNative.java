@@ -119,17 +119,44 @@ public final class ZstdNative {
 
     /**
      * Test-visible override: setting {@code -Dfolesium.zstd.forceUnavailable=true} (or
-     * {@code System.setProperty} before the check) makes {@link #available()} and
+     * {@code System.setProperty} before the first probe) makes {@link #available()} and
      * {@link #dictAvailable()} report {@code false} even when zstd-jni is loadable,
      * deterministically exercising the "library absent / dictionary API missing" negative
      * paths regardless of the test classpath. Unset in production, so the default
-     * behaviour is unchanged. Checked per call - never on a hot path - so the flag also
-     * works when the class was already loaded by an earlier test.
+     * behaviour is unchanged.
+     *
+     * <p>The switch is read from the system property <em>once</em>, on first use, and
+     * cached in a {@code volatile Boolean}: {@link #available()}/{@link #dictAvailable()}
+     * sit on the per-record write path (every dictionary-compressed put probes the codec),
+     * so a {@code System.getProperty} lookup per call would be avoidable overhead. Tests
+     * that flip the switch after the class was already probed refresh the cached value
+     * with {@link #setForcedUnavailable(boolean)} instead of relying on the property.</p>
      */
     private static final String FORCE_UNAVAILABLE_PROPERTY = "folesium.zstd.forceUnavailable";
 
+    /** Lazily probed from {@link #FORCE_UNAVAILABLE_PROPERTY}; {@code null} until first use. */
+    private static volatile Boolean forcedUnavailable;
+
+    /**
+     * Test-only override: directly sets the cached switch value, overriding the
+     * {@link #FORCE_UNAVAILABLE_PROPERTY} value read at the first probe. Tests that toggle
+     * the switch after the class was already probed (e.g. between JUnit test methods) call
+     * this to refresh the cache; {@code false} restores the default behaviour. Public (not
+     * package-private) because the existing switch-gated tests live in
+     * {@code dev.folesium.core}, outside this class's package - a package-private hook
+     * would be unreachable from them and a stale cache would silently break the tests.
+     */
+    public static void setForcedUnavailable(boolean forced) {
+        forcedUnavailable = forced;
+    }
+
     private static boolean forcedUnavailable() {
-        return Boolean.parseBoolean(System.getProperty(FORCE_UNAVAILABLE_PROPERTY));
+        Boolean cached = forcedUnavailable;
+        if (cached == null) {
+            cached = Boolean.parseBoolean(System.getProperty(FORCE_UNAVAILABLE_PROPERTY));
+            forcedUnavailable = cached;
+        }
+        return cached;
     }
 
     /** Whether {@code zstd-jni} is loadable on the current classpath. */

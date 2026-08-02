@@ -558,6 +558,30 @@ public final class FolesiumDatabase implements AutoCloseable {
                         .withCompressionLevel(FolesiumConfig.clampCompressionLevel(
                                 current.compression(), effective.compressionLevel()));
             }
+            // ZSTD_DICT additionally needs a trained per-keyspace dictionary. Dictionaries are
+            // minted by the conversion pipeline at the end of a conversion - never on store open -
+            // so a live store can be asked for ZSTD_DICT while one or more open keyspaces have no
+            // dict.bin (e.g. the players keyspace, which is not region-keyed, or a store that never
+            // ran a conversion). New writes to such a keyspace would otherwise fail record by record
+            // in ShardFile, so degrade the config-level codec to ZSTD. withCompression(ZSTD) keeps
+            // dictionaryCompression unchanged (it only forces the flag on for ZSTD_DICT), which is
+            // intentional: keyspaces that do have a dictionary keep writing codec 3 via ShardFile's
+            // dictionary gate, and the dict-less ones fall back to plain ZSTD there.
+            if (effective.compression() == FolesiumConfig.Compression.ZSTD_DICT) {
+                boolean missingDictionary = false;
+                for (Keyspace ks : keyspaces.values()) {
+                    if (ks.keyspaceDict() == null) {
+                        missingDictionary = true;
+                        break;
+                    }
+                }
+                if (missingDictionary) {
+                    notes.add("compression=ZSTD_DICT ignored: no per-keyspace dictionary exists; keeping ZSTD");
+                    effective = effective.withCompression(FolesiumConfig.Compression.ZSTD)
+                            .withCompressionLevel(FolesiumConfig.clampCompressionLevel(
+                                    FolesiumConfig.Compression.ZSTD, effective.compressionLevel()));
+                }
+            }
             if (reshardRequired) {
                 notes.add("shards=" + next.shardCount() + " will be applied by an automatic reshard on the next"
                         + " server start (currently " + current.shardCount() + ")");
@@ -631,7 +655,12 @@ public final class FolesiumDatabase implements AutoCloseable {
             merged = merged.withCompression(next.compression());
         }
         if (next.compressionLevel() != baseline.compressionLevel()) {
-            merged = merged.withCompressionLevel(next.compressionLevel());
+            // Clamp against the codec that actually won the merge: under concurrent reloads the
+            // raw next level may be out of range for the current codec, and withCompressionLevel
+            // would throw IllegalArgumentException for it. mergeRuntimeConfig is called under the
+            // lock, but the codec itself may still have been changed by another reload in between.
+            merged = merged.withCompressionLevel(
+                    FolesiumConfig.clampCompressionLevel(merged.compression(), next.compressionLevel()));
         }
         if (Double.compare(next.compactRatio(), baseline.compactRatio()) != 0) {
             merged = merged.withCompactRatio(next.compactRatio());

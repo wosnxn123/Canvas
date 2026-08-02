@@ -114,6 +114,14 @@ public final class RegionPage {
             throw new FolesiumException("Bad region page size for " + file + ": " + size
                     + " bytes, expected " + PAGE_SIZE + " (region " + regionFromBytes(readPageHeader(file, size)) + ")");
         }
+        // Second size check immediately before the read: narrows the TOCTOU window in which a
+        // concurrently growing file could slip past the pre-check and be read (and allocated)
+        // whole. The post-read length check below still guards the remaining gap.
+        long size2 = Files.size(file);
+        if (size2 != PAGE_SIZE) {
+            throw new FolesiumException("Bad region page size for " + file + ": " + size2
+                    + " bytes, expected " + PAGE_SIZE + " (region " + regionFromBytes(readPageHeader(file, size2)) + ")");
+        }
         byte[] bytes = Files.readAllBytes(file);
         if (bytes.length != PAGE_SIZE) {
             // TOCTOU: the file changed between the size pre-check and the read - treat it
@@ -296,8 +304,10 @@ public final class RegionPage {
     /**
      * Moves {@code source} over {@code target}, preferring an atomic replace but falling
      * back to a plain replace move on filesystems that do not support atomic moves
-     * (reported either as {@link AtomicMoveNotSupportedException} or as a generic
-     * filesystem error).
+     * (reported as {@link AtomicMoveNotSupportedException}, or as a generic filesystem
+     * error while the target already exists). Any other filesystem error is rethrown
+     * unchanged - it is not about atomic-replace support and must not be masked by a
+     * second move attempt.
      */
     private static void moveReplacing(Path source, Path target) throws IOException {
         try {
@@ -305,8 +315,14 @@ public final class RegionPage {
         } catch (AtomicMoveNotSupportedException e) {
             Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
         } catch (FileSystemException e) {
-            // Some platforms report missing atomic-replace support as a generic filesystem error.
-            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
+            // Some platforms report missing atomic-replace support as a generic filesystem error
+            // only when the target already exists; keep that fallback, but rethrow anything else
+            // (permission denied, vanished source, ...) as the original exception.
+            if (Files.exists(target)) {
+                Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
+            } else {
+                throw e;
+            }
         }
     }
 }

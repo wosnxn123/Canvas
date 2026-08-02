@@ -87,11 +87,14 @@ public final class FolesiumCli {
 
         // The operator's own configuration, not the library defaults: a store created here
         // with defaults() would be stamped with a shard count / codec the running server
-        // never asked for, forcing a full reshard on the first real start.
-        FolesiumConfig config = FolesiumRegistry.configFromProperties();
-        LOGGER.info(() -> "Folesium: starting " + dir + " for " + worldDir
-                + " (shards=" + config.shardCount() + ", compression=" + config.compression() + ")");
+        // never asked for, forcing a full reshard on the first real start. Both the config
+        // probe and the start log run inside the try so a failure (e.g. an unreadable
+        // folesium.properties) surfaces through the same clean conversion-error path as
+        // the conversion itself instead of escaping handle().
         try {
+            FolesiumConfig config = FolesiumRegistry.configFromProperties();
+            LOGGER.info(() -> "Folesium: starting " + dir + " for " + worldDir
+                    + " (shards=" + config.shardCount() + ", compression=" + config.compression() + ")");
             WorldConversionService.Report rep = new WorldConversionService()
                     .convertWorld(worldDir, dir, config);
             LOGGER.info(() -> "Folesium: " + rep);
@@ -141,7 +144,7 @@ public final class FolesiumCli {
             container = new File(".");
         }
         Object worldValue = options.has("world") ? options.valueOf("world") : null;
-        String levelName = worldValue == null ? readLevelName()
+        String levelName = worldValue == null ? readLevelName(options)
                 : worldValue instanceof File f ? f.getName() : String.valueOf(worldValue);
         return new File(container, levelName).toPath();
     }
@@ -151,13 +154,21 @@ public final class FolesiumCli {
     }
 
     /**
-     * Reads {@code level-name} from the server working directory's
-     * {@code server.properties}, defaulting to {@code world}. The conversion runs
-     * before Bootstrap, so the level name is not yet available on any parsed options
-     * object when {@code -w/--level-name} was not passed explicitly.
+     * Reads {@code level-name} from the server's {@code server.properties}, defaulting
+     * to {@code world}. With {@code -c/--config} the properties file given there is
+     * used instead of the working-directory default, so the conversion resolves the
+     * same level name the server itself would. The conversion runs before Bootstrap,
+     * so the level name is not yet available on any parsed options object when
+     * {@code -w/--level-name} was not passed explicitly.
      */
-    private static String readLevelName() {
+    private static String readLevelName(OptionSet options) {
         Path props = Path.of("server.properties");
+        if (options.has("config")) {
+            Object value = options.valueOf("config");
+            if (value instanceof File f) {
+                props = f.toPath();
+            }
+        }
         if (Files.isRegularFile(props)) {
             try (var in = Files.newInputStream(props)) {
                 Properties p = new Properties();

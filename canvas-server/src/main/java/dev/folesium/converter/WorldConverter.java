@@ -413,6 +413,17 @@ public final class WorldConverter {
                 }
                 rx = Integer.parseInt(m.group(1));
                 rz = Integer.parseInt(m.group(2));
+                // Reject coordinates whose region -> chunk shift would overflow int
+                // (|region| >= 2^26); such names are corrupt or foreign files. Compare in
+                // long so that region == Integer.MIN_VALUE cannot slip past Math.abs
+                // (whose overflow keeps the value negative). Mirrors the guard in
+                // anvilToFolesium so both directions treat the same files identically.
+                long rxL = rx;
+                long rzL = rz;
+                if (rxL >= (1L << 26) || rxL <= -(1L << 26)
+                        || rzL >= (1L << 26) || rzL <= -(1L << 26)) {
+                    throw new NumberFormatException("region coordinate out of range");
+                }
             } catch (NumberFormatException ex) {
                 // Foreign/corrupt name (out-of-range region coordinate); leave it alone.
                 return;

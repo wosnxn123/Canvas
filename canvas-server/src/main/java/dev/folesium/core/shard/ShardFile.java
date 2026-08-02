@@ -212,11 +212,8 @@ public final class ShardFile implements AutoCloseable {
                     // The file is non-empty but too short to hold a header - a crash tore the
                     // shard before a valid header was ever written. There is no valid header to
                     // anchor the record-level scan below, so treat the whole shard as torn:
-                    // discard it and start fresh. Any FolesiumException from validateFileHeader()
-                    // (bad magic, unsupported version, or a topology mismatch against the count
-                    // the store opens with) propagates and fails the open with the file's data
-                    // intact - a mismatched shard is valid data, not torn debris. Shards with a
-                    // valid header are unaffected - scanAndRecover() keeps handling torn tails.
+                    // discard it and start fresh. Shards with a valid header are unaffected -
+                    // scanAndRecover() keeps handling torn tails.
                     if (readOnly) {
                         // Read-only mode must not truncate or rewrite the file: treat the torn
                         // header as an empty shard and warn instead. The next read-write open
@@ -229,6 +226,28 @@ public final class ShardFile implements AutoCloseable {
                         tornInReadOnly = true;
                     } else {
                         discardTornShard(tornHeader.toString());
+                    }
+                } catch (FolesiumException invalidHeader) {
+                    // A header failing magic/version/topology validation is *valid data* in a
+                    // read-write open (a mismatched shard must fail loudly, not be discarded),
+                    // so it propagates there unchanged. A read-only open, however, must still
+                    // bring up the rest of the store: treat the shard as empty exactly like the
+                    // torn-header case, mirroring the discovery layer
+                    // (Keyspace.readRecordedShardCount), which skips unreadable headers and
+                    // falls back to the names-derived shard count instead of failing the whole
+                    // keyspace - e.g. a reshard interrupted between the file swap and the
+                    // metadata rewrite can leave shard files that disagree with the recorded
+                    // topology, and the read-only open must not refuse the whole store for one
+                    // such shard. The next read-write open re-validates and repairs it.
+                    if (readOnly) {
+                        LOGGER.log(System.Logger.Level.WARNING,
+                                "Folesium recovery: shard {0} has an invalid header ({1}); "
+                                        + "read-only open treats it as empty",
+                                path, invalidHeader.toString());
+                        this.writePos = FILE_HEADER_LEN;
+                        tornInReadOnly = true;
+                    } else {
+                        throw invalidHeader;
                     }
                 }
                 if (!tornInReadOnly && !tryLoadHint()) {
@@ -784,6 +803,14 @@ public final class ShardFile implements AutoCloseable {
             c = Compression.ZSTD_DICT;
             stored = Compressors.compressWithDict(rawValue, keyspaceDict, config.compressionLevel());
         } else {
+            // ZSTD_DICT config with the dictionary gate above closed: the per-keyspace
+            // dictionary is missing (keyspaceDict == null - the keyspace is not region-keyed,
+            // or no conversion ever ran) or the zstd-jni dictionary API is unavailable. The
+            // FolesiumConfig invariant guarantees the flag is on whenever the codec is
+            // ZSTD_DICT, so this branch means dictionary writes are impossible for this record;
+            // degrade to plain ZSTD instead of failing record by record. Existing codec-3
+            // records keep decoding against their own dictionary (codec comes from record flags).
+            c = c == Compression.ZSTD_DICT ? Compression.ZSTD : c;
             stored = Compressors.compress(c, config.compressionLevel(), rawValue);
         }
         if (stored.length >= rawValue.length && c != Compression.NONE) {
@@ -837,6 +864,14 @@ public final class ShardFile implements AutoCloseable {
             c = Compression.ZSTD_DICT;
             stored = Compressors.compressWithDict(rawValue, keyspaceDict, config.compressionLevel());
         } else {
+            // ZSTD_DICT config with the dictionary gate above closed: the per-keyspace
+            // dictionary is missing (keyspaceDict == null - the keyspace is not region-keyed,
+            // or no conversion ever ran) or the zstd-jni dictionary API is unavailable. The
+            // FolesiumConfig invariant guarantees the flag is on whenever the codec is
+            // ZSTD_DICT, so this branch means dictionary writes are impossible for this record;
+            // degrade to plain ZSTD instead of failing record by record. Existing codec-3
+            // records keep decoding against their own dictionary (codec comes from record flags).
+            c = c == Compression.ZSTD_DICT ? Compression.ZSTD : c;
             stored = Compressors.compress(c, config.compressionLevel(), rawValue);
         }
         if (stored.length >= rawValue.length && c != Compression.NONE) {
@@ -985,10 +1020,25 @@ public final class ShardFile implements AutoCloseable {
      * mode for 8-byte chunk keys while the page index exists and is not invalidated
      * (after compaction the pages are dormant, so the HashMap serves reads until the
      * pages are rebuilt on the next open). Non-chunk keys have no page representation
-     * and always use the HashMap.
+     * and always use the HashMap. A region whose page file was deleted after damage
+     * ({@link PageIndex#isRegionDamaged}) also falls back to the HashMap while it is
+     * marked: its fresh, empty page would otherwise read every live chunk of the
+     * region as absent.
      */
     private boolean pageOnly(Bytes key) {
-        return pageAuthoritative && pageIndex != null && !pageIndex.isInvalidated() && key.length() == 8;
+        if (!pageAuthoritative || pageIndex == null || pageIndex.isInvalidated() || key.length() != 8) {
+            return false;
+        }
+        // A region marked damaged has lost its backing page file: the next pageFor would
+        // build a fresh, empty page that knows nothing about records written before this
+        // session, so trusting it would read every other live chunk of the region as
+        // absent. The HashMap is always maintained on the write path (index.put runs
+        // unconditionally), so while the marker is present the region reads through the
+        // HashMap; a successful updateSlot clears the marker, and the next open rebuilds
+        // the pages from the log anyway.
+        long chunkKey = LongKeys.decode(key.array());
+        return !pageIndex.isRegionDamaged(RegionPage.regionXFromChunk(chunkKey),
+                RegionPage.regionZFromChunk(chunkKey));
     }
 
     /**
@@ -1249,8 +1299,10 @@ public final class ShardFile implements AutoCloseable {
             if (pageIndex != null) {
                 // The compacted log assigns new offsets to every live record, so every page
                 // entry is stale; reads fall back to the HashMap (AUTO) or treat the key as
-                // absent (PAGE, while the index is invalidated) until the pages are rebuilt
-                // on the next open, and the write path keeps refreshing slots as it goes.
+                // absent (PAGE) while the index is invalidated. The write path leaves the
+                // pages alone during the invalidation (updateSlot is a no-op on an
+                // invalidated index), so the pages stay empty until the next open rebuilds
+                // them from the compaction-anchored log replay (buildPagesFromCompactionAnchor).
                 pageIndex.invalidateAll();
                 // Delete the stale page files immediately instead of waiting for close():
                 // a crash between the swap above and close() used to leave page files

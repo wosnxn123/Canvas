@@ -208,8 +208,11 @@ public final class Keyspace implements AutoCloseable {
      * header, so any intact shard names the layout. Every discovered file is tried in
      * ascending order; a file whose header is unreadable, fails the magic/version check,
      * or records an illegal count is skipped as untrusted - the lowest shard may be torn
-     * (a crash truncated it before its header was ever written; {@code ShardFile} itself
-     * tolerates this and treats such a shard as empty) while the higher shards are intact.
+     * (a crash truncated it before its header was ever written) or carry a header that
+     * fails magic/version/topology validation; {@code ShardFile}'s read-only construction
+     * tolerates both and treats such a shard as empty (a read-write open would repair the
+     * torn case and reject the mismatched one loudly), so the skipped file here and the
+     * empty shard there stay consistent while the higher shards are intact.
      * Only when <em>every</em> discovered header is unreadable does the count fall back to
      * the layout the file names imply: shard files are named by index under the store's
      * power-of-two shard count, so {@code highest index + 1} reproduces the original
