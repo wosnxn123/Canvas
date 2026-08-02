@@ -167,8 +167,9 @@ public final class FolesiumRegistry {
         sb.append("# Folia/Canvas (writes .mca) until you set enabled=true. Edit values freely; this file is\n");
         sb.append("# written only once. System properties -Dfolesium.<key>=<value> override anything here.\n");
         sb.append("# Every value below can be changed while the server runs: Folesium notices that this file was\n");
-        sb.append("# edited and applies it within a few seconds. Two exceptions: 'enabled' applies when a world is\n");
-        sb.append("# next loaded, and 'shards' by an automatic reshard of the store on the next start.\n");
+        sb.append("# edited and applies it within a few seconds. Exceptions: 'enabled' applies when a world is next\n");
+        sb.append("# loaded, 'shards' by an automatic reshard of the store on the next start, and indexCacheBytes /\n");
+        sb.append("# indexMode / dictionaryCompression / backupOnConvert on the next store open or conversion.\n");
         sb.append("# Auto-tuned for this machine: ").append(describeMachine()).append('\n');
         sb.append('\n');
         sb.append("# Master switch. false = vanilla Anvil behaviour; true = use Folesium storage.\n");
@@ -481,7 +482,10 @@ public final class FolesiumRegistry {
      * <p>{@code enabled} and {@code shards} are the two settings a reload cannot fully apply:
      * worlds bind their storage backend when they load, and the shard count is physical. Both
      * are reported back in the result instead of being silently dropped - {@code shards} is
-     * then applied automatically by a reshard on the next start.</p>
+     * then applied automatically by a reshard on the next start. The open-only tunables
+     * ({@code indexCacheBytes}, {@code indexMode}, {@code dictionaryCompression},
+     * {@code backupOnConvert}) are likewise not applied to the running store and are
+     * reported in the result's {@code notes}, taking effect on the next store open / conversion.</p>
      *
      * @return one entry per open store, in directory order
      */

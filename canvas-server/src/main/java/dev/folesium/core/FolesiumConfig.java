@@ -33,12 +33,16 @@ import java.util.Objects;
  * so the vendored sources stay dependency-free at compile time.</p>
  *
  * <h2>Runtime mutability</h2>
- * <p>Every field except {@link #shardCount()} can be changed on a live store: the
- * engine re-reads the configuration on every operation, so replacing the config
- * object takes effect immediately (see {@code FolesiumDatabase#applyRuntimeConfig}).
- * {@code shardCount} participates in key routing and is stamped into every shard
- * file header, so changing it requires rewriting the store - Folesium does that
- * automatically when the store is opened (see {@code StoreResharder}).</p>
+ * <p>Most fields can be changed on a live store: the engine re-reads the configuration
+ * on every operation, so replacing the config object takes effect immediately (see
+ * {@code FolesiumDatabase#applyRuntimeConfig}). {@code shardCount} participates in key
+ * routing and is stamped into every shard file header, so changing it requires rewriting
+ * the store - Folesium does that automatically when the store is opened (see
+ * {@code StoreResharder}). {@code indexCacheBytes}, {@code indexMode} and
+ * {@code dictionaryCompression} are read only when a keyspace is opened, and
+ * {@code backupOnConvert} only by the converters, so changes to them cannot be applied
+ * to a running store; a reload reports them in {@code ConfigReloadResult.notes} and they
+ * take effect on the next store open / conversion.</p>
  *
  * @param shardCount        number of independent log shards per keyspace. Must be a power of two.
  *                          Concurrency scales with shards; the server integration auto-tunes this

@@ -88,6 +88,14 @@ final class StoreResharder {
     /** {@code <keyspace>-<NNNN>.flog}, matching {@link Keyspace}'s naming. */
     private static final Pattern SHARD_FILE = Pattern.compile("^(.+)-(\\d{4})\\.flog$");
 
+    /**
+     * Trained dictionary file inside each keyspace's {@code idx/<name>/} directory. Unlike
+     * the page-index products around it (page files, hint, watermarks), it is not rebuildable:
+     * codec-3 (ZSTD_DICT) records decode against it, so {@link #invalidatePageIndex} must
+     * preserve it.
+     */
+    private static final String DICT_FILE = "dict.bin";
+
     private StoreResharder() {
     }
 
@@ -287,16 +295,22 @@ final class StoreResharder {
         long[] copied = {0};
         int mask = newShardCount - 1;
         ShardFile[] out = new ShardFile[newShardCount];
-        try {
+        try (Keyspace source = new Keyspace(dir, name, oldConfig, true)) {
+            // The staged shards carry the source keyspace's dictionary so codec-3 (ZSTD_DICT)
+            // records stay decodable after the swap: every copied value is re-encoded under the
+            // same dictionary the source used, instead of silently degrading to plain
+            // compression. Passing it is safe even when dictionary compression is disabled -
+            // ShardFile only uses the dictionary for new writes when the config flag is on, and
+            // the dictionary is always needed to decode existing codec-3 records.
+            byte[] dict = source.keyspaceDict();
             for (int i = 0; i < newShardCount; i++) {
-                out[i] = new ShardFile(staging.resolve(String.format("%s-%04d.flog", name, i)), i, writeConfig, null, null, false, null);
+                out[i] = new ShardFile(staging.resolve(String.format("%s-%04d.flog", name, i)), i,
+                        writeConfig, null, null, false, dict, false);
             }
-            try (Keyspace source = new Keyspace(dir, name, oldConfig, true)) {
-                source.forEach((key, value) -> {
-                    out[(int) (Bytes.mix64(key) & mask)].put(new Bytes(key), value);
-                    copied[0]++;
-                });
-            }
+            source.forEach((key, value) -> {
+                out[(int) (Bytes.mix64(key) & mask)].put(new Bytes(key), value);
+                copied[0]++;
+            });
             for (ShardFile s : out) {
                 s.flushIfDirty();
             }
@@ -652,13 +666,40 @@ final class StoreResharder {
     }
 
     /**
-     * Drops the whole store's region-page index. Called whenever a reshard completes or is
-     * resumed: the rewritten shards assign new offsets to every record, so pages from the
-     * old layout would point at the wrong records. Page files are a disposable cache
-     * (rebuildable from the logs), so removing them is always safe.
+     * Drops every rebuildable region-page artifact under {@code idx/}, preserving the
+     * non-rebuildable per-keyspace trained dictionaries ({@code dict.bin}) that codec-3
+     * (ZSTD_DICT) records decode against. Called whenever a reshard completes or is resumed:
+     * the rewritten shards assign new offsets to every record, so pages from the old layout
+     * would point at the wrong records. Page files ({@code *.idx}), the hint manifest,
+     * watermarks ({@code *.wmk}/{@code *.cwmk}) and any other file are a disposable cache
+     * (rebuildable from the logs), so removing them is always safe - the dictionary is not.
+     * Keyspace subdirectories are pruned only when they end up empty (i.e. held no
+     * {@code dict.bin}).
      */
     private static void invalidatePageIndex(Path dir) {
-        deleteRecursively(dir.resolve("idx"));
+        Path idx = dir.resolve("idx");
+        if (!Files.isDirectory(idx)) {
+            return;
+        }
+        try (Stream<Path> walk = Files.walk(idx)) {
+            // Children sort after their parent, so the reversed walk reaches each directory
+            // only after all of its entries were handled: files not named dict.bin are
+            // deleted, and a directory is pruned iff it no longer contains anything (i.e.
+            // it held no dict.bin). Directories still holding their dict.bin survive intact.
+            for (Path p : walk.sorted(Comparator.reverseOrder()).toList()) {
+                if (Files.isDirectory(p)) {
+                    try (Stream<Path> children = Files.list(p)) {
+                        if (children.findAny().isEmpty()) {
+                            Files.deleteIfExists(p);
+                        }
+                    }
+                } else if (!DICT_FILE.equals(p.getFileName().toString())) {
+                    Files.deleteIfExists(p);
+                }
+            }
+        } catch (IOException e) {
+            throw new FolesiumException("Cannot remove the page index of " + dir, e);
+        }
     }
 
     private static void deleteRecursively(Path root) {

@@ -458,22 +458,29 @@ public final class FolesiumDatabase implements AutoCloseable {
     /**
      * Applies a new configuration to this live store.
      *
-     * <p>Every setting except {@code shardCount} takes effect on the very next operation:
-     * the shards read the configuration afresh each time, so swapping the (immutable) config
-     * object is all that is needed. Concretely:</p>
+     * <p>Most settings take effect on the very next operation: the shards read the
+     * configuration afresh each time, so swapping the (immutable) config object is all
+     * that is needed. Concretely:</p>
      * <ul>
      *   <li>{@code compression} / {@code compressionLevel} - used for new writes; existing
      *       records keep the codec stored in their own header, so nothing is migrated.</li>
      *   <li>{@code durability} - the group-commit thread is started or stopped to match.</li>
      *   <li>{@code batchFlushMillis} - the group-commit thread is woken to pick up the
      *       new interval immediately instead of after the old one elapses.</li>
-     *   <li>{@code compactRatio} / {@code compactMinBytes} / {@code verifyChecksums} - read
-     *       per operation.</li>
+     *   <li>{@code compactRatio} / {@code compactMinBytes} / {@code verifyChecksums} /
+     *       {@code workloadCompaction} / {@code compactIoLimit} - read per operation (the
+     *       last two by {@link #compactIfNeeded()}).</li>
      *   <li>{@code shardCount} - physical; recorded as pending and applied by the automatic
      *       reshard on the next store open. The live store keeps its current layout.</li>
+     *   <li>{@code indexCacheBytes} / {@code indexMode} / {@code dictionaryCompression} -
+     *       read only when a keyspace is opened, so they take effect on the next store
+     *       open; a change is reported in {@code notes} instead of being applied.</li>
+     *   <li>{@code backupOnConvert} - read only by the converters, so it takes effect on
+     *       the next conversion; a change is reported in {@code notes} instead of being
+     *       applied.</li>
      * </ul>
      *
-     * @return what changed, plus any setting that had to be rejected
+     * @return what changed, plus any setting that had to be rejected or deferred
      */
     public ConfigReloadResult applyRuntimeConfig(FolesiumConfig next) {
         Objects.requireNonNull(next, "next");
@@ -498,6 +505,26 @@ public final class FolesiumDatabase implements AutoCloseable {
             if (reshardRequired) {
                 notes.add("shards=" + next.shardCount() + " will be applied by an automatic reshard on the next"
                         + " server start (currently " + current.shardCount() + ")");
+            }
+            // Open-only settings: the engine does not re-read them on a live store, so they cannot
+            // be applied here. Report them instead of silently dropping them (same treatment as
+            // shards above); a changed value is picked up on the next store open / conversion.
+            if (next.indexCacheBytes() != requestedBaseline.indexCacheBytes()) {
+                notes.add("indexCacheBytes=" + next.indexCacheBytes()
+                        + " takes effect on next store open (currently " + current.indexCacheBytes() + ")");
+            }
+            if (next.indexMode() != requestedBaseline.indexMode()) {
+                notes.add("indexMode=" + next.indexMode()
+                        + " takes effect on next store open (currently " + current.indexMode() + ")");
+            }
+            if (next.dictionaryCompression() != requestedBaseline.dictionaryCompression()) {
+                notes.add("dictionaryCompression=" + next.dictionaryCompression()
+                        + " takes effect on next store open (currently " + current.dictionaryCompression() + ")");
+            }
+            if (next.backupOnConvert() != requestedBaseline.backupOnConvert()) {
+                notes.add("backupOnConvert=" + next.backupOnConvert()
+                        + " is read by the converters and takes effect on the next conversion"
+                        + " (currently " + current.backupOnConvert() + ")");
             }
 
             List<String> changes = current.diff(effective);
@@ -558,6 +585,12 @@ public final class FolesiumDatabase implements AutoCloseable {
         }
         if (next.verifyChecksums() != baseline.verifyChecksums()) {
             merged = merged.withVerifyChecksums(next.verifyChecksums());
+        }
+        if (next.workloadCompaction() != baseline.workloadCompaction()) {
+            merged = merged.withWorkloadCompaction(next.workloadCompaction());
+        }
+        if (next.compactIoLimit() != baseline.compactIoLimit()) {
+            merged = merged.withCompactIoLimit(next.compactIoLimit());
         }
         return merged;
     }

@@ -170,9 +170,16 @@ public final class ShardFile implements AutoCloseable {
      * the bytes.
      */
     private final byte[] keyspaceDict;
+    /**
+     * Read-only mode: the shard may be read but never written. The channel is opened
+     * without CREATE/WRITE, a fresh or torn-header shard is treated as empty (nothing is
+     * written, nothing truncated), torn tails are left in place, {@link #compact()} is a
+     * no-op, and {@link #close()} skips the fsync and the hint file.
+     */
+    private final boolean readOnly;
 
     public ShardFile(Path path, int shardIndex, FolesiumConfig config, PageIndex pageIndex,
-                     String shardName, boolean pageAuthoritative, byte[] keyspaceDict) {
+                     String shardName, boolean pageAuthoritative, byte[] keyspaceDict, boolean readOnly) {
         this.path = path;
         this.hintPath = path.resolveSibling(path.getFileName() + ".fidx");
         this.shardIndex = shardIndex;
@@ -182,14 +189,23 @@ public final class ShardFile implements AutoCloseable {
         this.shardName = shardName;
         this.pageAuthoritative = pageAuthoritative;
         this.keyspaceDict = keyspaceDict;
+        this.readOnly = readOnly;
         try {
             boolean fresh = !Files.exists(path) || Files.size(path) == 0;
-            this.channel = FileChannel.open(path,
-                    StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE);
+            this.channel = FileChannel.open(path, readOnly
+                    ? new StandardOpenOption[]{StandardOpenOption.READ}
+                    : new StandardOpenOption[]{StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE});
             if (fresh) {
-                writeFileHeader();
-                this.writePos = FILE_HEADER_LEN;
+                if (readOnly) {
+                    // Nothing may be written in read-only mode: an empty shard stays empty
+                    // (no header is written), with the write position at the header offset.
+                    this.writePos = FILE_HEADER_LEN;
+                } else {
+                    writeFileHeader();
+                    this.writePos = FILE_HEADER_LEN;
+                }
             } else {
+                boolean tornInReadOnly = false;
                 try {
                     validateFileHeader();
                 } catch (EOFException tornHeader) {
@@ -201,9 +217,21 @@ public final class ShardFile implements AutoCloseable {
                     // the store opens with) propagates and fails the open with the file's data
                     // intact - a mismatched shard is valid data, not torn debris. Shards with a
                     // valid header are unaffected - scanAndRecover() keeps handling torn tails.
-                    discardTornShard(tornHeader.toString());
+                    if (readOnly) {
+                        // Read-only mode must not truncate or rewrite the file: treat the torn
+                        // header as an empty shard and warn instead. The next read-write open
+                        // performs the real torn-header recovery.
+                        LOGGER.log(System.Logger.Level.WARNING,
+                                "Folesium recovery: shard {0} has a torn/corrupt header ({1}); "
+                                        + "read-only open treats it as empty",
+                                path, tornHeader.toString());
+                        this.writePos = FILE_HEADER_LEN;
+                        tornInReadOnly = true;
+                    } else {
+                        discardTornShard(tornHeader.toString());
+                    }
                 }
-                if (!tryLoadHint()) {
+                if (!tornInReadOnly && !tryLoadHint()) {
                     scanAndRecover();
                 }
             }
@@ -322,12 +350,22 @@ public final class ShardFile implements AutoCloseable {
         this.writePos = FILE_HEADER_LEN;
     }
 
-    /** Full sequential scan; truncates at the first torn/corrupt record. */
+    /** Full sequential scan; truncates at the first torn/corrupt record (read-only: leaves the tail). */
     private void scanAndRecover() throws IOException {
         long fileSize = channel.size();
         ScanOutcome outcome = scanRange(FILE_HEADER_LEN, fileSize, this::applyScanRecord);
         if (outcome.firstInvalidOffset < fileSize) {
-            truncateAt(outcome.firstInvalidOffset, outcome.reason);
+            if (readOnly) {
+                // Read-only mode never truncates: the torn tail stays on disk, but the
+                // index (and writePos, the logical end of valid data) stop at the first
+                // invalid record. The tail is repaired by the next read-write open.
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Folesium recovery: shard {0} has a torn tail at {1} ({2}); "
+                                + "read-only open leaves it in place",
+                        path, outcome.firstInvalidOffset, outcome.reason);
+            } else {
+                truncateAt(outcome.firstInvalidOffset, outcome.reason);
+            }
         }
         writePos = outcome.firstInvalidOffset;
     }
@@ -482,7 +520,14 @@ public final class ShardFile implements AutoCloseable {
             }
         });
         if (outcome.firstInvalidOffset < eof) {
-            truncateAt(outcome.firstInvalidOffset, outcome.reason);
+            if (readOnly) {
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Folesium recovery: shard {0} has a torn tail at {1} ({2}); "
+                                + "read-only open leaves it in place",
+                        path, outcome.firstInvalidOffset, outcome.reason);
+            } else {
+                truncateAt(outcome.firstInvalidOffset, outcome.reason);
+            }
         }
     }
 
@@ -826,18 +871,35 @@ public final class ShardFile implements AutoCloseable {
         if (pageIndex == null || key.length() != 8) {
             return;
         }
+        int regionX = 0;
+        int regionZ = 0;
+        int slot = 0;
         try {
             long chunkKey = LongKeys.decode(key.array());
-            int regionX = RegionPage.regionXFromChunk(chunkKey);
-            int regionZ = RegionPage.regionZFromChunk(chunkKey);
-            int slot = RegionPage.slotIndex(LongKeys.chunkX(chunkKey), LongKeys.chunkZ(chunkKey));
+            regionX = RegionPage.regionXFromChunk(chunkKey);
+            regionZ = RegionPage.regionZFromChunk(chunkKey);
+            slot = RegionPage.slotIndex(LongKeys.chunkX(chunkKey), LongKeys.chunkZ(chunkKey));
             pageIndex.updateSlot(regionX, regionZ, slot, tombstone ? 0 : (int) off);
         } catch (RuntimeException e) {
             // The page index is a disposable cache: a slot update failure (e.g. a corrupt
             // page file) must never fail a write that is already durable in the log and
-            // the HashMap index. Reads fall back to the HashMap until the page recovers.
+            // the HashMap index. Repair the damage in place - drop the cached entry and
+            // delete the corrupt file (exactly like the open-time build) - and retry the
+            // slot update once against the fresh page; if that still fails, log and move
+            // on (reads fall back to the HashMap; the damage is retried on the next
+            // write). When the file cannot be removed (read-only mode, permissions),
+            // rebuildPageFrom reports the page as still damaged and the retry is skipped.
             LOGGER.log(System.Logger.Level.WARNING,
                     "Folesium: page index update failed for {0} (key {1}): {2}", path, key, e.toString());
+            if (pageIndex.rebuildPageFrom(regionX, regionZ)) {
+                try {
+                    pageIndex.updateSlot(regionX, regionZ, slot, tombstone ? 0 : (int) off);
+                } catch (RuntimeException retryFailure) {
+                    LOGGER.log(System.Logger.Level.WARNING,
+                            "Folesium: page index update retry failed for {0} (key {1}): {2}",
+                            path, key, retryFailure.toString());
+                }
+            }
         }
     }
 
@@ -886,24 +948,39 @@ public final class ShardFile implements AutoCloseable {
         try {
             off = pageIndex.pageFor(regionX, regionZ).get(slot);
         } catch (RuntimeException e) {
-            // A damaged or unreadable page (corrupt cache file) must not break reads; the
-            // HashMap index is authoritative. The page is repaired on the next write.
+            // A damaged or unreadable page file must not silently lose data - in PAGE
+            // mode the page is the only index, so a corrupt file would read as "absent"
+            // forever. Repair it in place, exactly like the open-time build does: drop the
+            // cached entry and delete the corrupt file so the next access rebuilds a fresh
+            // page (writes replay the log into it; the next open replays from the
+            // compaction watermark), then report a miss. If the file cannot be removed
+            // (read-only mode, permissions), the page stays damaged and the repair is
+            // retried on the next access.
+            boolean repaired = pageIndex.rebuildPageFrom(regionX, regionZ);
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: damaged page of region ({0}, {1}) in {2} ({3}); repaired={4}",
+                    regionX, regionZ, path, e.toString(), repaired);
             return null;
         }
         if (off == 0) {
-            return null;
+            return null; // empty slot: no record for this chunk
         }
-        // Page trimming: a slot offset at or beyond the current log EOF references a
-        // record that torn-tail recovery truncated away after the page was written -
-        // treat it as a miss (PAGE mode: absent; AUTO mode: HashMap fallback). A
-        // negative slot is a garbage u32 read from a damaged page: also a miss.
-        if (off < 0 || off >= channel.size()) {
+        // The slot stores the record offset as an unsigned 32-bit value (the write side
+        // casts the long log offset to int, preserving the bit pattern), so read it back
+        // with u32 semantics: offsets in [2^31, 2^32) come back negative as ints but are
+        // valid log positions - the old off < 0 miss branch dropped them silently. The
+        // only misses are an empty slot (0) and a slot at or past the current log EOF
+        // (page trimming: torn-tail recovery may have truncated the log below a slot
+        // written earlier; a garbage slot read from a damaged page is treated the same).
+        // A u32 can never reach 2^32, so no slot value is a miss on its face.
+        long slotOffset = Integer.toUnsignedLong(off);
+        if (slotOffset >= channel.size()) {
             return null;
         }
         // The slot stores only the offset; keyLen/rawValLen/storedValLen/flags live in the
         // 12-byte record header, so read it back to build a Loc for the shared read paths.
         ByteBuffer h = ByteBuffer.allocate(RECORD_HEADER_LEN);
-        readFully(h, off);
+        readFully(h, slotOffset);
         byte magic = h.get();
         byte flags = h.get();
         int keyLen = h.getShort() & 0xFFFF;
@@ -914,7 +991,7 @@ public final class ShardFile implements AutoCloseable {
                 || storedValLen < 0 || storedValLen > MAX_VALUE_LEN) {
             return null;
         }
-        return new Loc(off, RECORD_HEADER_LEN + keyLen + storedValLen + 4, keyLen, rawValLen, storedValLen, flags);
+        return new Loc(slotOffset, RECORD_HEADER_LEN + keyLen + storedValLen + 4, keyLen, rawValLen, storedValLen, flags);
     }
 
     // ------------------------------------------------------------- maintenance
@@ -991,6 +1068,14 @@ public final class ShardFile implements AutoCloseable {
         Path tmp = path.resolveSibling(path.getFileName() + ".compact");
         boolean swapped = false;
         try {
+            if (readOnly) {
+                // A read-only shard must never be rewritten: no-op with a warning. The
+                // compaction scheduler is expected to skip read-only keyspaces, but this
+                // guard keeps a misconfiguration from ever touching the file.
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Folesium: compaction of read-only shard {0} skipped", path);
+                return;
+            }
             Map<Bytes, Loc> newIndex = new HashMap<>(Math.max(16, index.size() * 2));
             long pos = FILE_HEADER_LEN;
             try (FileChannel out = FileChannel.open(tmp,
@@ -1054,9 +1139,9 @@ public final class ShardFile implements AutoCloseable {
                     // compacted log starts at the header and holds every live record, so a
                     // replay of [0, EOF) rebuilds all pages from scratch. Anchoring at EOF
                     // would replay nothing - the pages were invalidated here and their
-                    // files deleted on close, so PAGE-mode reads of pre-compaction records
-                    // would be lost forever. A stale or missing anchor only makes that
-                    // replay longer, so a write failure is logged, not fatal.
+                    // files deleted right below, so PAGE-mode reads of pre-compaction
+                    // records would be lost forever. A stale or missing anchor only makes
+                    // that replay longer, so a write failure is logged, not fatal.
                     try {
                         pageIndex.setCompactionWatermark(shardName, 0);
                     } catch (IOException e) {
@@ -1065,6 +1150,15 @@ public final class ShardFile implements AutoCloseable {
                                 path, e.toString());
                     }
                 }
+                // Delete the stale page files immediately instead of waiting for close():
+                // a crash between the swap above and close() used to leave page files
+                // holding pre-compaction offsets, which the next open would load as live
+                // slots - wrong values for records that moved, or PAGE-mode misses. The
+                // watermark was reset to 0 above, so a reopen after a crash replays the
+                // whole compacted log and rebuilds every page from scratch; with no page
+                // files left there is nothing stale to load. Best-effort: failures are
+                // logged inside.
+                pageIndex.deleteAllPageFiles();
             }
         } catch (IOException e) {
             FolesiumException failure = new FolesiumException("Compaction failed for " + path, e);
@@ -1202,8 +1296,12 @@ public final class ShardFile implements AutoCloseable {
         lock.writeLock().lock();
         try {
             if (channel.isOpen()) {
-                channel.force(false);
-                writeHint();
+                if (!readOnly) {
+                    // Read-only mode never fsyncs (nothing was written) and never writes
+                    // the hint file (it would describe a log this open may not touch).
+                    channel.force(false);
+                    writeHint();
+                }
                 channel.close();
             }
         } catch (IOException e) {

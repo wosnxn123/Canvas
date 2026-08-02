@@ -28,8 +28,11 @@ import dev.folesium.core.util.UuidKeys;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.function.BiConsumer;
+import java.util.stream.Stream;
 
 /**
  * A named, sharded key-value namespace (e.g. {@code chunks}, {@code entities},
@@ -41,7 +44,21 @@ import java.util.function.BiConsumer;
  */
 public final class Keyspace implements AutoCloseable {
     private final String name;
+    /**
+     * One slot per shard index of the on-disk layout, in routing order. Read-write
+     * keyspaces eagerly open every shard of {@link FolesiumConfig#shardCount()};
+     * read-only keyspaces size the array from the shard files actually present on disk
+     * (see {@link #discoveredShardIndices(Path, String)}) and leave the slot of a
+     * missing shard {@code null}. Fixed at construction and never mutated.
+     */
     private final ShardFile[] shards;
+    /**
+     * Dense, non-null view of {@link #shards} in routing order (identical to
+     * {@code shards} for read-write keyspaces, where every slot is open). The
+     * iteration and maintenance paths walk this array, so an absent read-only shard is
+     * simply skipped instead of crashing on a null slot.
+     */
+    private final ShardFile[] liveShards;
     private final int shardMask;
     /**
      * Region-page index for this keyspace, or {@code null} for non-region-keyed keyspaces
@@ -52,34 +69,49 @@ public final class Keyspace implements AutoCloseable {
     private final PageIndex pageIndex;
     /**
      * Immutable per-keyspace dictionary for codec-3 (ZSTD_DICT) records, or {@code null} when
-     * dictionary compression is disabled, the keyspace is not region-keyed, or no
-     * {@code <store>/idx/<name>/dict.bin} exists. Loaded once at open (also in read-only mode -
-     * reading codec-3 records needs it) and shared by every shard. A corrupt dictionary fails
-     * the open with a clear {@link FolesiumException}.
+     * the keyspace is not region-keyed or no {@code <store>/idx/<name>/dict.bin} exists.
+     * Loaded once at open whenever the dictionary file is present - also in read-only mode and
+     * even when dictionary compression is currently disabled, because existing codec-3 records
+     * cannot be decoded without it (whether new writes use the dictionary is decided per record
+     * by {@link FolesiumConfig#dictionaryCompression()} in {@link ShardFile}). Shared by every
+     * shard. A corrupt dictionary fails the open with a clear {@link FolesiumException}.
      */
     private final byte[] keyspaceDict;
 
     Keyspace(Path dir, String name, FolesiumConfig config, boolean readOnly) {
         this.name = name;
-        this.shards = new ShardFile[config.shardCount()];
-        this.shardMask = config.shardCount() - 1;
+        int[] discovered = readOnly ? discoveredShardIndices(dir, name) : null;
+        int shardCount = readOnly
+                ? (discovered.length == 0 ? 0 : discovered[discovered.length - 1] + 1)
+                : config.shardCount();
+        this.shards = new ShardFile[shardCount];
+        this.shardMask = shardCount - 1;
         this.pageIndex = createPageIndex(dir, name, config, readOnly);
-        this.keyspaceDict = loadKeyspaceDict(dir, name, config);
-        int opened = 0;
+        this.keyspaceDict = loadKeyspaceDict(dir, name);
         try {
-            for (; opened < shards.length; opened++) {
-                String shardName = String.format("%s-%04d", name, opened);
-                shards[opened] = new ShardFile(dir.resolve(shardName + ".flog"), opened, config, pageIndex,
-                        shardName, config.indexMode() == FolesiumConfig.IndexMode.PAGE, keyspaceDict);
+            for (int i = 0; i < shards.length; i++) {
+                if (readOnly && Arrays.binarySearch(discovered, i) < 0) {
+                    // Read-only: no shard file exists for this index (a keyspace that was
+                    // never written, or an old layout with fewer shards than the current
+                    // configuration expects). Read-only shards must never create the file,
+                    // so leave the slot null: reads treat the shard as absent data, and the
+                    // iteration/maintenance paths skip it (see {@link #liveShards}).
+                    continue;
+                }
+                String shardName = String.format("%s-%04d", name, i);
+                shards[i] = new ShardFile(dir.resolve(shardName + ".flog"), i, config, pageIndex,
+                        shardName, config.indexMode() == FolesiumConfig.IndexMode.PAGE, keyspaceDict, readOnly);
             }
         } catch (RuntimeException e) {
             // One bad shard must not leak the handles of the shards already opened: nobody
             // holds a reference to this half-built keyspace, so nothing else can close them.
-            for (int i = 0; i < opened; i++) {
-                try {
-                    shards[i].close();
-                } catch (RuntimeException suppressed) {
-                    e.addSuppressed(suppressed);
+            for (ShardFile s : shards) {
+                if (s != null) {
+                    try {
+                        s.close();
+                    } catch (RuntimeException suppressed) {
+                        e.addSuppressed(suppressed);
+                    }
                 }
             }
             if (pageIndex != null) {
@@ -91,6 +123,48 @@ public final class Keyspace implements AutoCloseable {
             }
             throw e;
         }
+        this.liveShards = readOnly
+                ? Arrays.stream(shards).filter(Objects::nonNull).toArray(ShardFile[]::new)
+                : shards;
+    }
+
+    /**
+     * Indices of the shard files ({@code <name>-NNNN.flog}) present in {@code dir},
+     * sorted ascending. Read-only opens discover the shard topology from disk instead of
+     * trusting {@link FolesiumConfig#shardCount()}: the current configuration (or the
+     * store metadata) may name more shards than the files actually written - an old
+     * layout, or a keyspace that was never written to - and a read-only shard must never
+     * create or touch a missing file. Files that do not belong to this keyspace (other
+     * keyspaces, {@code .fidx} hints, {@code .tmp} scratch files) are ignored.
+     */
+    private static int[] discoveredShardIndices(Path dir, String name) {
+        String prefix = name + "-";
+        try (Stream<Path> files = Files.list(dir)) {
+            return files.filter(Files::isRegularFile)
+                    .map(p -> p.getFileName().toString())
+                    .filter(fn -> fn.startsWith(prefix) && fn.endsWith(".flog"))
+                    .map(fn -> fn.substring(prefix.length(), fn.length() - ".flog".length()))
+                    .filter(Keyspace::isDecimalIndex)
+                    .mapToInt(Integer::parseInt)
+                    .sorted()
+                    .toArray();
+        } catch (IOException e) {
+            throw new FolesiumException("Cannot list " + dir + " to discover the shards of keyspace '"
+                    + name + "'", e);
+        }
+    }
+
+    private static boolean isDecimalIndex(String s) {
+        if (s.isEmpty()) {
+            return false;
+        }
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < '0' || c > '9') {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** True for keyspaces whose keys are region coordinates (chunks/entities/poi). */
@@ -121,14 +195,17 @@ public final class Keyspace implements AutoCloseable {
     }
 
     /**
-     * Loads the per-keyspace dictionary ({@code <store>/idx/<name>/dict.bin}) when dictionary
-     * compression is enabled for a region-keyed keyspace. Missing dictionary means no codec-3
-     * record can exist yet, so {@code null} (plain compression) is correct. A corrupt or
-     * unreadable dictionary fails the open: codec-3 records would be undecodable. Also loaded
-     * in read-only mode, where reads of codec-3 records still need it.
+     * Loads the per-keyspace dictionary ({@code <store>/idx/<name>/dict.bin}) for a
+     * region-keyed keyspace. The dictionary is objective data required to decode existing
+     * codec-3 (ZSTD_DICT) records, so it is loaded whenever the file exists - regardless of
+     * whether dictionary compression is currently enabled (the write path decides per record
+     * in {@link ShardFile}, gated on {@link FolesiumConfig#dictionaryCompression()}). Missing
+     * dictionary means no codec-3 record can exist yet, so {@code null} (plain compression) is
+     * correct. A corrupt or unreadable dictionary fails the open: codec-3 records would be
+     * undecodable. Also loaded in read-only mode, where reads of codec-3 records still need it.
      */
-    private static byte[] loadKeyspaceDict(Path dir, String name, FolesiumConfig config) {
-        if (!config.dictionaryCompression() || !isRegionKeyed(name)) {
+    private static byte[] loadKeyspaceDict(Path dir, String name) {
+        if (!isRegionKeyed(name)) {
             return null;
         }
         Path dictFile = dir.resolve("idx").resolve(name).resolve("dict.bin");
@@ -150,18 +227,26 @@ public final class Keyspace implements AutoCloseable {
         return name;
     }
 
+    /**
+     * Number of shard slots in this keyspace's layout. Read-write keyspaces return
+     * {@link FolesiumConfig#shardCount()}; read-only keyspaces return the on-disk layout
+     * discovered at open - the highest present shard index plus one, {@code 0} when no
+     * shard file exists. Slots whose file is missing on disk are {@code null} (see
+     * {@link #shards}); routing via {@link #shardIndexFor(byte[])} never exceeds this
+     * count.
+     */
     public int shardCount() {
         return shards.length;
     }
 
     /**
-     * The shards of this keyspace, in routing order. Package-private: the database
-     * reads it to collect compaction candidates across keyspaces for
-     * workload-ordered compaction. The array is fixed at construction and never
-     * mutated; callers must not modify it.
+     * The shards of this keyspace, in routing order, with absent read-only shards (no
+     * file on disk) omitted. Package-private: the database reads it to collect
+     * compaction candidates across keyspaces for workload-ordered compaction. The array
+     * is fixed at construction and never mutated; callers must not modify it.
      */
     ShardFile[] shards() {
-        return shards;
+        return liveShards;
     }
 
     /**
@@ -176,34 +261,47 @@ public final class Keyspace implements AutoCloseable {
             throw new IllegalArgumentException("Cannot change shardCount on the open keyspace '"
                     + name + "' (" + shards.length + " -> " + next.shardCount() + ")");
         }
-        for (ShardFile s : shards) {
+        for (ShardFile s : liveShards) {
             s.applyRuntimeConfig(next);
         }
     }
 
     private ShardFile shardFor(byte[] key) {
+        if (shards.length == 0) {
+            // No shard files exist at all (an empty read-only store): every key is absent.
+            return null;
+        }
         return shards[(int) (Bytes.mix64(key) & shardMask)];
     }
 
+    /**
+     * The shard index of {@code key} under this keyspace's routing mask, or {@code -1}
+     * when the keyspace has no shards at all (an empty read-only store).
+     */
     public int shardIndexFor(byte[] key) {
+        if (shards.length == 0) {
+            return -1;
+        }
         return (int) (Bytes.mix64(key) & shardMask);
     }
 
     // ------------------------------------------------------------- byte[] API
 
     public byte[] get(byte[] key) {
-        return shardFor(key).get(new Bytes(key));
+        ShardFile shard = shardFor(key);
+        return shard == null ? null : shard.get(new Bytes(key));
     }
 
     public boolean contains(byte[] key) {
-        return shardFor(key).contains(new Bytes(key));
+        ShardFile shard = shardFor(key);
+        return shard != null && shard.contains(new Bytes(key));
     }
 
     public void put(byte[] key, byte[] value) {
         if (value == null) {
             throw new IllegalArgumentException("null value; use delete()");
         }
-        shardFor(key).put(new Bytes(key), value);
+        requireShardForWrite(key).put(new Bytes(key), value);
     }
 
     /** Stores the value only if the key is absent; returns {@code true} if written. */
@@ -211,11 +309,27 @@ public final class Keyspace implements AutoCloseable {
         if (value == null) {
             throw new IllegalArgumentException("null value; use delete()");
         }
-        return shardFor(key).putIfAbsent(new Bytes(key), value);
+        return requireShardForWrite(key).putIfAbsent(new Bytes(key), value);
     }
 
     public void delete(byte[] key) {
-        shardFor(key).delete(new Bytes(key));
+        requireShardForWrite(key).delete(new Bytes(key));
+    }
+
+    /**
+     * The shard owning {@code key}, failing loudly when no shard exists for it. A null
+     * slot means the key's shard file is absent from disk - only possible in a
+     * read-only keyspace (read-write keyspaces eagerly open every shard), where writes
+     * must never be silently dropped. The read paths ({@link #get}, {@link #contains})
+     * treat the same situation as absent data instead.
+     */
+    private ShardFile requireShardForWrite(byte[] key) {
+        ShardFile shard = shardFor(key);
+        if (shard == null) {
+            throw new IllegalStateException("Cannot write in read-only keyspace '" + name
+                    + "': the key's shard file is missing from disk");
+        }
+        return shard;
     }
 
     // --------------------------------------------------------- chunk-key API
@@ -267,7 +381,7 @@ public final class Keyspace implements AutoCloseable {
     // ------------------------------------------------------------ maintenance
 
     public void forEach(BiConsumer<byte[], byte[]> consumer) {
-        for (ShardFile s : shards) {
+        for (ShardFile s : liveShards) {
             s.forEach(consumer);
         }
     }
@@ -277,22 +391,28 @@ public final class Keyspace implements AutoCloseable {
      * when only the key set is needed, since no record is read back or decompressed.
      */
     public void forEachKey(java.util.function.Consumer<byte[]> consumer) {
-        for (ShardFile s : shards) {
+        for (ShardFile s : liveShards) {
             s.forEachKey(consumer);
         }
     }
 
-    /** Iterates one shard only; lets callers parallelise a full scan safely. */
+    /**
+     * Iterates one shard only; lets callers parallelise a full scan safely. A shard
+     * absent from disk in a read-only keyspace is skipped.
+     */
     public void forEachShard(int shardIndex, BiConsumer<byte[], byte[]> consumer) {
         if (shardIndex < 0 || shardIndex >= shards.length) {
             throw new IndexOutOfBoundsException("shardIndex " + shardIndex + " outside [0,"
                     + shards.length + ") of keyspace '" + name + "'");
         }
-        shards[shardIndex].forEach(consumer);
+        ShardFile shard = shards[shardIndex];
+        if (shard != null) {
+            shard.forEach(consumer);
+        }
     }
 
     public void flush() {
-        for (ShardFile s : shards) {
+        for (ShardFile s : liveShards) {
             s.flushIfDirty();
         }
         // Log-first: dirty pages must never be persisted ahead of the log data they
@@ -303,7 +423,7 @@ public final class Keyspace implements AutoCloseable {
     }
 
     public void compactIfNeeded() {
-        for (ShardFile s : shards) {
+        for (ShardFile s : liveShards) {
             if (s.needsCompaction()) {
                 s.compact();
             }
@@ -311,14 +431,14 @@ public final class Keyspace implements AutoCloseable {
     }
 
     public void compactAll() {
-        for (ShardFile s : shards) {
+        for (ShardFile s : liveShards) {
             s.compact();
         }
     }
 
     public long count() {
         long n = 0;
-        for (ShardFile s : shards) {
+        for (ShardFile s : liveShards) {
             n += s.count();
         }
         return n;
@@ -326,7 +446,7 @@ public final class Keyspace implements AutoCloseable {
 
     public long sizeBytes() {
         long n = 0;
-        for (ShardFile s : shards) {
+        for (ShardFile s : liveShards) {
             n += s.sizeBytes();
         }
         return n;
@@ -334,7 +454,7 @@ public final class Keyspace implements AutoCloseable {
 
     public long deadBytes() {
         long n = 0;
-        for (ShardFile s : shards) {
+        for (ShardFile s : liveShards) {
             n += s.deadBytes();
         }
         return n;
@@ -346,6 +466,15 @@ public final class Keyspace implements AutoCloseable {
      */
     public PageIndex pageIndex() {
         return pageIndex;
+    }
+
+    /**
+     * The per-keyspace codec-3 (ZSTD_DICT) dictionary of this keyspace, or {@code null} when
+     * none is loaded. Package-private: the resharder forwards it to the staged shard files so
+     * the rewritten records keep using the same trained dictionary.
+     */
+    byte[] keyspaceDict() {
+        return keyspaceDict;
     }
 
     /**
@@ -368,7 +497,7 @@ public final class Keyspace implements AutoCloseable {
     @Override
     public void close() {
         FolesiumException first = null;
-        for (ShardFile s : shards) {
+        for (ShardFile s : liveShards) {
             try {
                 s.close();
             } catch (FolesiumException e) {

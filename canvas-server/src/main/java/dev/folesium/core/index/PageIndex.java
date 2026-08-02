@@ -335,7 +335,9 @@ public final class PageIndex implements AutoCloseable {
      * {@link #isInvalidated()} and fall back to the HashMap after compaction/reshard;
      * {@link #updateSlot()} and {@link #flush()} become no-ops. The page files written
      * before the invalidation hold pre-compaction offsets and are removed by
-     * {@link #close()} so the next open cannot load stale slots.
+     * {@link #deleteAllPageFiles()} (called by the shard right after compaction, and
+     * again on {@link #close()} as a safety net) so the next open cannot load stale
+     * slots.
      */
     public void invalidateAll() {
         if (closed) {
@@ -448,14 +450,22 @@ public final class PageIndex implements AutoCloseable {
             // flush() guards on closed, so call the work directly here.
             flushPages();
             if (invalidated) {
-                deleteStalePages();
+                deleteAllPageFiles();
             }
             writeHint();
         }
     }
 
-    /** Best-effort removal of page files whose slots refer to a superseded log layout. */
-    private void deleteStalePages() {
+    /**
+     * Deletes every region page file ({@code *.idx}) in the index directory, keeping the
+     * dictionary, watermark and hint files. Called by the shard right after compaction -
+     * the stale pages hold pre-compaction log offsets and must not survive to the next
+     * open - and again on {@link #close()} as a safety net. Best-effort: failures are
+     * logged, never thrown. Callers must have invalidated the index first (e.g. via
+     * {@link #invalidateAll()}) so no in-memory page can be flushed back over the
+     * deletion.
+     */
+    public void deleteAllPageFiles() {
         if (!Files.isDirectory(idxDir)) {
             return;
         }
@@ -465,7 +475,7 @@ public final class PageIndex implements AutoCloseable {
                     Files.deleteIfExists(p);
                 } catch (IOException e) {
                     LOGGER.log(System.Logger.Level.WARNING,
-                            "Folesium: failed to delete stale region page {0}: {1}", p, e.toString());
+                            "Folesium: failed to delete region page {0}: {1}", p, e.toString());
                 }
             });
         } catch (IOException e) {
