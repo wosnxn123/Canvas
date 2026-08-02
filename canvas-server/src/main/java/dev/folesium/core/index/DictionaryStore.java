@@ -85,16 +85,37 @@ public final class DictionaryStore {
     /**
      * Loads and validates the dictionary file.
      *
-     * @return the dictionary bytes, or {@code null} if {@code dictFile} does not exist (or is not
-     *         a regular file) - the "no dictionary" case, distinct from "dictionary is corrupt"
-     * @throws FolesiumException if the file exists but is not a valid zstd dictionary (missing,
-     *                           short, or wrong magic header): codec-3 records of this keyspace
-     *                           cannot be decoded without a valid dictionary
+     * <p>A dictionary whose magic validates but that is truncated below what the zstd format
+     * needs is <em>not</em> rejected here - only the 64-byte floor and the magic are checked,
+     * because {@code load} reads arbitrary existing dictionaries - and instead fails loudly at
+     * the first decode with the zstd error code. Keeping the truncated file registered (rather
+     * than misreporting it as "no dictionary") preserves that loud decode-time attribution.</p>
+     *
+     * @return the dictionary bytes, or {@code null} if {@code dictFile} does not exist - the
+     *         "no dictionary" case, distinct from "dictionary is corrupt"
+     * @throws FolesiumException if the file exists but is not a valid zstd dictionary (a
+     *                           directory or other non-regular file, a short file, or a wrong
+     *                           magic header): codec-3 records of this keyspace cannot be
+     *                           decoded without a valid dictionary
      * @throws IOException       if the file cannot be read
      */
     public static byte[] load(Path dictFile) throws IOException {
-        if (!Files.isRegularFile(dictFile)) {
+        if (!Files.exists(dictFile)) {
+            // The "no dictionary" case: no codec-3 record can exist without a dict.bin, so a
+            // missing file means plain compression. This is deliberately distinct from "the
+            // dictionary is corrupt" below, which fails the open loudly.
             return null;
+        }
+        if (!Files.isRegularFile(dictFile)) {
+            // Exists but is not a regular file (e.g. a directory where dict.bin should be):
+            // something replaced the dictionary with a foreign object. That is corruption, not
+            // "no dictionary" - any codec-3 record is undecodable either way - so fail loudly
+            // instead of silently opening the store as if no dictionary existed.
+            throw new FolesiumException(
+                    "Dictionary path " + dictFile + " is corrupt: it exists but is not a regular file"
+                            + " (a directory or special file where dict.bin should be). Restore dict.bin"
+                            + " from a backup, or delete it and re-run the conversion; codec-3 records"
+                            + " in this keyspace are not decodable without the dictionary.");
         }
         // Pre-check the size before reading the bytes: a file this big is never a dictionary,
         // and loading it whole would be an OOM for what is a corrupt/foreign file anyway

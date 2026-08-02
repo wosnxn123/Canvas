@@ -177,6 +177,20 @@ public final class ShardFile implements AutoCloseable {
      * no-op, and {@link #close()} skips the fsync and the hint file.
      */
     private final boolean readOnly;
+    /**
+     * Whether the open-time region-page rebuild left unresolved damage: a region whose
+     * corrupt page file could not be removed (the page stayed corrupt, so PAGE-mode
+     * reads must keep falling back to the HashMap and the next open retries the
+     * repair), or the build was skipped entirely because the shard header was
+     * torn/invalid in a read-only open (nothing was replayed, so this shard's chunks
+     * are absent from every rebuilt region page). Set by the constructor; consumed by
+     * the {@code Keyspace}, which aggregates the flags of all shards before deciding
+     * whether the keyspace-global {@link PageIndex} damage markers may be cleared: a
+     * single shard's clean rebuild cannot prove every shared region page complete (a
+     * region's chunks hash across shards), so markers are kept unless <em>every</em>
+     * shard rebuilt without unresolved regions.
+     */
+    private boolean hasUnresolvedRegions;
 
     public ShardFile(Path path, int shardIndex, FolesiumConfig config, PageIndex pageIndex,
                      String shardName, boolean pageAuthoritative, byte[] keyspaceDict, boolean readOnly) {
@@ -263,19 +277,25 @@ public final class ShardFile implements AutoCloseable {
             // misaligned records into page slots the HashMap does not know about.
             if (!tornInReadOnly && pageIndex != null) {
                 Set<Long> unresolvedRegions = buildPagesFromCompactionAnchor();
-                // The open-time replay is done: every region page has been rebuilt from
-                // the log, so damage markers set during the rebuild (or left over from
-                // the previous session) are stale. Runtime single-slot writes never clear
-                // markers (they cannot prove the rest of the page complete), so this full
-                // rebuild is what restores PAGE mode for marked regions. A torn/invalid
-                // header in a read-only open skips the build above - nothing was replayed,
-                // so markers are deliberately left in place. See PageIndex.clearAllDamage.
-                // A region whose page file could not be removed during the build keeps
-                // its marker: the page stayed corrupt, so PAGE-mode reads must keep
-                // falling back to the HashMap and the next open retries the repair.
-                if (unresolvedRegions.isEmpty()) {
-                    pageIndex.clearAllDamage();
-                }
+                // The damage-marker set lives on the keyspace-global PageIndex shared by
+                // every shard, while the replay above only rebuilt this shard's own log
+                // range into the shared region pages - and a region's chunks hash across
+                // shards. No single shard can therefore decide that every marker is
+                // stale: the previous per-shard clearAllDamage let one shard's clean
+                // build wipe the unresolved-region markers another shard had just set,
+                // silently losing PAGE-mode data for those regions. Record whether this
+                // build left any region whose corrupt page file could not be removed
+                // (the page stayed corrupt, so PAGE-mode reads must keep falling back
+                // to the HashMap and the next open retries the repair); the Keyspace
+                // aggregates the flags of every shard and clears the markers only when
+                // all of them rebuilt cleanly. See PageIndex.clearAllDamage.
+                hasUnresolvedRegions = !unresolvedRegions.isEmpty();
+            } else if (tornInReadOnly) {
+                // A torn/invalid header in a read-only open skips the build above -
+                // nothing was replayed, so this shard's chunks are absent from every
+                // rebuilt region page and no marker may be cleared on its account.
+                // Treat the shard as having unresolved regions (conservative).
+                hasUnresolvedRegions = true;
             }
         } catch (Throwable e) {
             closeAfterOpenFailure(e);
@@ -320,6 +340,20 @@ public final class ShardFile implements AutoCloseable {
     /** Physical shard topology recorded in this file's header. */
     public int shardCount() {
         return shardCount;
+    }
+
+    /**
+     * Returns whether this shard's open-time page rebuild left unresolved region damage
+     * markers: a corrupt page file that could not be removed during the build, or a
+     * build skipped because the shard header was torn/invalid in a read-only open. The
+     * {@code Keyspace} aggregates this flag across all shards: it clears the
+     * keyspace-global {@link PageIndex} damage markers only when every shard reports
+     * {@code false}, and keeps every marker when any shard reports {@code true}
+     * (conservative - a region's chunks hash across shards, so a partial rebuild
+     * leaves the whole region untrustworthy in PAGE mode until the next open).
+     */
+    public boolean hasUnresolvedRegions() {
+        return hasUnresolvedRegions;
     }
 
     /**

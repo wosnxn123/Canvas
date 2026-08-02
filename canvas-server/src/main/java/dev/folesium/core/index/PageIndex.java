@@ -56,9 +56,12 @@ import java.util.concurrent.locks.ReentrantLock;
  * (fresh, empty) page and fall back to the HashMap, which the shard write path always
  * maintains, so the other live chunks of the region keep reading correctly instead of
  * silently missing. The marker survives until the open-time rebuild completes
- * (ShardFile calls {@link #clearAllDamage()} after {@code buildPagesFromCompactionAnchor}
- * when the rebuild repaired every region; a region whose corrupt page file could not
- * be removed keeps its marker and the next open retries) or
+ * (the {@code Keyspace} calls {@link #clearAllDamage()} once every shard's
+ * {@code buildPagesFromCompactionAnchor} replay finished, and only when all of them
+ * repaired every region - a single shard's clean replay cannot prove the shared
+ * region pages complete, since a region's chunks hash across shards; a region whose
+ * corrupt page file could not be removed keeps its marker and the next open retries)
+ * or
  * {@link #invalidateAll()}/{@link #close()} reset the set: a runtime single-slot
  * write cannot prove the rest of the page complete, so {@link #updateSlot} never
  * clears a marker.</p>
@@ -162,9 +165,10 @@ public final class PageIndex implements AutoCloseable {
      * nothing about records written before this session, so every other live chunk of
      * the region would read as absent - and fall back to the HashMap, which the shard
      * write path always maintains (see {@link #isRegionDamaged}). The markers are
-     * cleared only by {@link #clearAllDamage()} (ShardFile calls it once the open-time
-     * rebuild has replayed the whole log, and only when that rebuild left no region
-     * whose corrupt page file could not be removed), {@link #invalidateAll()} and
+     * cleared only by {@link #clearAllDamage()} (the {@code Keyspace} calls it once
+     * every shard's open-time rebuild has replayed its log range, and only when none
+     * of them left a region whose corrupt page file could not be removed),
+     * {@link #invalidateAll()} and
      * {@link #close()}: a runtime single-slot {@link #updateSlot} never clears one,
      * because one slot write cannot prove the rest of the page complete. In-memory
      * only: the next open rebuilds the pages from the log and starts with an empty
@@ -315,8 +319,10 @@ public final class PageIndex implements AutoCloseable {
      * Whether the region's page cannot be trusted: its page file was deleted by
      * {@link #rebuildPageFrom} after damage, or stays corrupt and undeletable on disk
      * (read-only mode), and has not been rebuilt since. The marker is cleared only by
-     * {@link #clearAllDamage()} (ShardFile calls it once the open-time rebuild
-     * completes, and only when that rebuild repaired every region), {@link #invalidateAll()}
+     * {@link #clearAllDamage()} (the {@code Keyspace} calls it once every shard's
+     * open-time rebuild completes, and only when all of them repaired every region -
+     * a single shard's clean replay cannot prove the shared region pages complete,
+     * since a region's chunks hash across shards), {@link #invalidateAll()}
      * or {@link #close()} - a runtime
      * single-slot {@link #updateSlot} never clears it, because one slot write cannot
      * prove the rest of the page complete. While {@code true}, PAGE-mode readers must
@@ -331,13 +337,17 @@ public final class PageIndex implements AutoCloseable {
     }
 
     /**
-     * Clears every region damage marker. Called by ShardFile once the open-time page
-     * rebuild ({@code buildPagesFromCompactionAnchor}) completes, provided that rebuild
-     * repaired every region (a region whose corrupt page file could not be removed
-     * keeps its marker so PAGE-mode readers keep falling back to the HashMap and the
-     * next open retries the repair): the full log replay has made every region page
-     * complete again, so markers set during the rebuild (or left over from the previous
-     * session) are stale and PAGE-mode readers can trust the pages once more. Runtime
+     * Clears every region damage marker. Called by the {@code Keyspace} once every
+     * shard's open-time page rebuild ({@code buildPagesFromCompactionAnchor}) has
+     * completed, provided all of them repaired every region (a region whose corrupt
+     * page file could not be removed keeps its marker so PAGE-mode readers keep falling
+     * back to the HashMap and the next open retries the repair): only then has the
+     * full log replay made every region page complete again - a region's chunks hash
+     * across shards, so a single shard's clean rebuild cannot prove a page complete,
+     * and the previous per-shard clearing let one shard's clean build wipe another
+     * shard's unresolved-region markers, silently losing PAGE-mode data. When every
+     * shard rebuilt cleanly the markers set during the rebuilds are stale and PAGE-mode
+     * readers can trust the pages once more. Runtime
      * single-slot writes never clear markers (see {@link #updateSlot}); only this
      * method, {@link #invalidateAll()} and {@link #close()} do. Harmless when no
      * region is marked.

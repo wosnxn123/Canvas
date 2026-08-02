@@ -91,16 +91,43 @@ public final class AnvilRegionFile implements Closeable {
     private final int[] timestamps = new int[CHUNKS_PER_REGION];
     private final BitSet usedSectors = new BitSet();
 
+    /** Opens {@code path} read-write, creating and initializing it like vanilla. */
     public AnvilRegionFile(Path path) throws IOException {
+        this(path, false);
+    }
+
+    /**
+     * Opens {@code path} read-only: the channel is opened with {@code READ} only, so a
+     * missing file fails instead of being created, and a file shorter than the two
+     * header sectors is rejected instead of being initialized as an empty region (the
+     * writable constructor pads such a file, which a read-only open must never do).
+     * Chunk reads behave exactly as on a writable region file; {@link #writeChunk},
+     * {@link #deleteChunk} and {@link #sync} fail with a
+     * {@link java.nio.channels.NonWritableChannelException} on the read-only channel.
+     *
+     * <p>Intended for source worlds during conversion, where a region file must already
+     * exist with real content and must never be touched.</p>
+     */
+    public static AnvilRegionFile openReadOnly(Path path) throws IOException {
+        return new AnvilRegionFile(path, true);
+    }
+
+    private AnvilRegionFile(Path path, boolean readOnly) throws IOException {
         this.path = path;
         FileChannel opened = null;
         try {
-            opened = FileChannel.open(path,
-                    StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE);
+            opened = FileChannel.open(path, readOnly
+                    ? new StandardOpenOption[]{StandardOpenOption.READ}
+                    : new StandardOpenOption[]{StandardOpenOption.CREATE, StandardOpenOption.READ,
+                            StandardOpenOption.WRITE});
             BitSet loadedSectors = new BitSet();
             loadedSectors.set(0, 2); // header sectors
             long size = opened.size();
             if (size < 2L * SECTOR_BYTES) {
+                if (readOnly) {
+                    throw new IOException("Region file " + path + " is too short to hold an Anvil "
+                            + "header (" + size + " bytes)");
+                }
                 // A partial or fresh file is initialized as a complete empty header.
                 writeFully(opened, ByteBuffer.allocate(2 * SECTOR_BYTES), 0);
             } else {

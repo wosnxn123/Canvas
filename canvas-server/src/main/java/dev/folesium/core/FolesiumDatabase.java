@@ -878,6 +878,15 @@ public final class FolesiumDatabase implements AutoCloseable {
      * <p>It is woken through the monitor rather than interrupted, because an interrupt during
      * {@code FileChannel.force} closes the channel ({@link java.nio.channels.ClosedByInterruptException}).
      * Interruption is kept only as a last resort if the thread does not come back in time.</p>
+     *
+     * <p>The interrupt is purely a retirement wakeup: it is only ever sent after the thread
+     * was retired ({@code flusher} set to {@code null}) or the store closed, so the
+     * retirement conditions in {@link #flushLoop} hold when it lands and the thread exits
+     * without touching any channel. {@code flushLoop} itself guards against a stray or
+     * external interrupt: it clears the pending interrupt status and keeps looping instead
+     * of letting the next blocking {@code FileChannel} operation close the shard channel
+     * permanently (a set interrupt status closes an interruptible channel on the next
+     * blocking operation).</p>
      */
     private void awaitFlusherExit(Thread t) {
         try {
@@ -915,8 +924,25 @@ public final class FolesiumDatabase implements AutoCloseable {
                     try {
                         flusherLock.wait(Math.max(1, snapshot.batchFlushMillis()));
                     } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        return;
+                        // Retirement wakeup: awaitFlusherExit's last-resort interrupt (or
+                        // the store closing) arrives only after this thread was retired
+                        // (flusher set to null) or closed was set, so exit without doing
+                        // any more channel I/O. Only exit when the retirement conditions
+                        // actually hold: an external/spurious interrupt must not silently
+                        // stop group commit for a healthy store.
+                        if (closed.get() || flusher != Thread.currentThread()) {
+                            Thread.currentThread().interrupt();
+                            return;
+                        }
+                        // External/spurious interrupt while this thread is still the
+                        // active flusher: clear the pending interrupt status instead of
+                        // exiting. A left-over interrupt would be picked up by the next
+                        // blocking FileChannel operation (flush -> force) and close the
+                        // shard channel permanently (FileChannel contract: an interrupt
+                        // before a blocking operation closes an interruptible channel),
+                        // breaking every subsequent write with ClosedChannelException.
+                        // Keep looping with a clean status.
+                        Thread.interrupted();
                     }
                     if (closed.get() || flusher != Thread.currentThread()) {
                         return;

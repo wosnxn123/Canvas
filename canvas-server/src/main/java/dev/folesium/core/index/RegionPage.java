@@ -178,7 +178,9 @@ public final class RegionPage {
      * {@link StandardCopyOption#ATOMIC_MOVE} and falling back to a plain replace move. The
      * tail carries the CRC (over header + slots) and the live slot count; the 8 reserved
      * tail bytes stay zero. The unique temporary name makes concurrent writers to the same
-     * file safe: no two calls share a staging path.
+     * file safe: no two calls share a staging path. After the rename the parent directory
+     * is fsynced (best-effort, mirroring {@code DictionaryStore.train}) so the new page
+     * file name survives a crash.
      */
     public void write(Path file) throws IOException {
         ByteBuffer b = ByteBuffer.allocate(PAGE_SIZE);
@@ -210,6 +212,10 @@ public final class RegionPage {
                 channel.force(true);
             }
             moveReplacing(tmp, file);
+            // The rename is the commit: fsync the parent directory so the new page file
+            // name survives a crash (mirrors DictionaryStore.train; silently skipped on
+            // filesystems without directory fsync, e.g. some Windows filesystems).
+            fsyncDirectory(parent);
         } catch (IOException | RuntimeException | Error e) {
             // Any other failure propagating out of the write is remembered so the cleanup
             // below attaches to it instead of masking it.
@@ -317,6 +323,23 @@ public final class RegionPage {
             // Best-effort only: the error message may omit the region coordinates.
         }
         return header;
+    }
+
+    /**
+     * Best-effort directory fsync so a completed rename survives a crash. Mirrors the
+     * directory-fsync pattern of {@code DictionaryStore.train} (opening the directory with
+     * {@code READ} and forcing flushes the rename on filesystems that support directory
+     * fsync); filesystems that reject it (some Windows filesystems) are skipped silently.
+     */
+    private static void fsyncDirectory(Path dir) {
+        if (dir == null) {
+            return;
+        }
+        try (FileChannel channel = FileChannel.open(dir, StandardOpenOption.READ)) {
+            channel.force(true);
+        } catch (IOException | UnsupportedOperationException ignored) {
+            // Directory fsync is unavailable on some Windows filesystems.
+        }
     }
 
     /**

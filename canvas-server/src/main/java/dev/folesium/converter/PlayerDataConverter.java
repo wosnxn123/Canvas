@@ -160,21 +160,27 @@ public final class PlayerDataConverter {
 
     /** True when none of the 26.x per-player directories under {@code players/} holds a player file. */
     private static boolean modernTreeIsEmpty(Path playersRoot) {
-        return MODERN_MAPPINGS.stream().noneMatch(m -> hasPlayerFiles(playersRoot.resolve(m.dir())));
+        return MODERN_MAPPINGS.stream().noneMatch(m -> hasPlayerFiles(playersRoot.resolve(m.dir()), m.extension()));
     }
 
     /** True when at least one legacy root-level per-player directory holds a player file. */
     private static boolean legacyTreeHasData(Path worldRoot) {
-        return LEGACY_MAPPINGS.stream().anyMatch(m -> hasPlayerFiles(worldRoot.resolve(m.dir())));
+        return LEGACY_MAPPINGS.stream().anyMatch(m -> hasPlayerFiles(worldRoot.resolve(m.dir()), m.extension()));
     }
 
-    /** True when the directory exists and contains at least one {@code <uuid>.dat} / {@code <uuid>.json} file. */
-    private static boolean hasPlayerFiles(Path dir) {
+    /**
+     * True when the directory exists and contains at least one player file whose extension
+     * matches the mapping ({@code <uuid>.dat} for a playerdata mapping, {@code <uuid>.json}
+     * for an advancements/stats mapping). A directory holding only files of the other
+     * mapping's extension is not player data for this directory.
+     */
+    private static boolean hasPlayerFiles(Path dir, String extension) {
         if (!Files.isDirectory(dir)) {
             return false;
         }
         try (var s = Files.list(dir)) {
             return s.anyMatch(p -> Files.isRegularFile(p)
+                    && p.getFileName().toString().endsWith(extension)
                     && UUID_FILE.matcher(p.getFileName().toString()).matches());
         } catch (IOException e) {
             // The layout decision in playerRootFor is made on incomplete data when a
@@ -209,7 +215,7 @@ public final class PlayerDataConverter {
     public static boolean hasVanillaPlayerData(Path worldRoot) {
         Path playerRoot = playerRootFor(worldRoot);
         for (Mapping m : mappingsFor(worldRoot, playerRoot)) {
-            if (hasPlayerFiles(m.resolve(worldRoot, playerRoot))) {
+            if (hasPlayerFiles(m.resolve(worldRoot, playerRoot), m.extension())) {
                 return true;
             }
         }
@@ -366,14 +372,17 @@ public final class PlayerDataConverter {
         }
 
         // Export only: read the existing layout without rewriting it first. The target
-        // follows the world's layout: a world with a players/ directory gets the 26.x
-        // tree (players/data, players/advancements, players/stats); a world without one
-        // gets the root-level legacy directories (playerdata/, advancements/, stats/)
-        // that pre-26 servers read. The players/ container is deliberately NOT created
-        // here -- fabricating it on a legacy world would hide the rolled-back players
-        // from a pre-26 server.
-        boolean modern = Files.isDirectory(worldRoot.resolve(DIR_PLAYERS_26));
-        Path exportRoot = modern ? worldRoot.resolve(DIR_PLAYERS_26) : worldRoot;
+        // follows the world's layout, mirroring playerRootFor (and therefore the import
+        // side): a world with a players/ directory gets the 26.x tree
+        // (players/data, players/advancements, players/stats); a world without one gets
+        // the root-level legacy directories (playerdata/, advancements/, stats/) that
+        // pre-26 servers read. A players/ directory that is an empty shell while the
+        // root-level legacy tree holds data is treated as the legacy layout, so the
+        // export lands where the world actually reads it. The players/ container is
+        // deliberately NOT created here -- fabricating it on a legacy world would hide
+        // the rolled-back players from a pre-26 server.
+        Path exportRoot = playerRootFor(worldRoot);
+        boolean modern = !exportRoot.equals(worldRoot);
         List<Mapping> mappings = modern ? MODERN_MAPPINGS : LEGACY_MAPPINGS;
         try (FolesiumDatabase db = FolesiumDatabase.open(storeDir,
                 FolesiumConfig.defaults().withDurability(FolesiumConfig.DurabilityMode.EXPLICIT),

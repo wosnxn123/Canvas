@@ -33,7 +33,8 @@ import java.util.UUID;
 /**
  * Drop-in replacements for the three {@code java.nio.file.Files} calls that
  * {@code PlayerAdvancements} and {@code ServerStatsCounter} use to read and write
- * {@code <world>/advancements/<uuid>.json} and {@code <world>/stats/<uuid>.json}.
+ * {@code <world>/players/advancements/<uuid>.json} and
+ * {@code <world>/players/stats/<uuid>.json}.
  *
  * <p>Both classes follow the same shape -- {@code Files.isRegularFile(path)} to decide
  * whether there is anything to load, then {@code Files.newBufferedReader} /

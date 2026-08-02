@@ -190,7 +190,7 @@ public final class WorldConverter {
                                     + ": region coordinates out of range");
                             return;
                         }
-                        try (AnvilRegionFile rf = new AnvilRegionFile(mca)) {
+                        try (AnvilRegionFile rf = AnvilRegionFile.openReadOnly(mca)) {
                             for (int[] xz : rf.listChunks()) {
                                 byte[] payload = rf.readChunk(xz[0], xz[1]);
                                 if (payload == null) {

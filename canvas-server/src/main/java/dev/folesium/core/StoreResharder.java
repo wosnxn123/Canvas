@@ -659,17 +659,27 @@ final class StoreResharder {
      * back - when the backup holds no shard file at all (a previous invocation already
      * moved the complete old set back) - to the first readable header of the surviving
      * shard files in {@code dir}, which are restored old files sharing the layout's
-     * count. -1 when the old count cannot be established: the backup holds shard files
-     * but none has a readable header, or the dir holds no readable shard header.
+     * count. Index hints ({@code .fidx}) are ignored: they carry no shard header and are
+     * rebuildable, so a backup holding only hints is treated as empty. -1 when the old
+     * count cannot be established: the backup holds shard files but none has a readable
+     * header, or the dir holds no readable shard header.
      */
     private static int oldLayoutShardCount(Path dir, List<Path> backupShards) {
-        for (Path p : backupShards) {
+        // Index hints (".fidx") carry no shard header and are rebuildable, so they are
+        // ignored when deriving the count: a backup reduced to only hints (every old
+        // shard already moved back by a previous invocation) must fall through to the
+        // dir fallback below instead of looking like a non-empty backup whose header
+        // cannot be read.
+        List<Path> shards = backupShards.stream()
+                .filter(p -> !p.getFileName().toString().endsWith(".fidx"))
+                .toList();
+        for (Path p : shards) {
             int count = recordedShardCount(p);
             if (count > 0) {
                 return count;
             }
         }
-        if (!backupShards.isEmpty()) {
+        if (!shards.isEmpty()) {
             // A non-empty backup with no readable header: the old count is genuinely
             // unknown, and the dir may still hold partial new files whose headers name
             // the new layout - reading those would corrupt the leftover boundary. Be

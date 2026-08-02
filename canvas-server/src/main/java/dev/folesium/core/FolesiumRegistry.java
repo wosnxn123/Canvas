@@ -156,7 +156,14 @@ public final class FolesiumRegistry {
      * <p>Important: {@link Properties#load} does not understand inline comments, so every
      * {@code key=value} is written on its own line with no trailing comment.</p>
      */
-    private static void generateDefaultConfigFile(Path file) {
+    /**
+     * The auto-tuned default configuration text that {@link #generateDefaultConfigFile}
+     * writes. Deterministic per machine (the auto-tuned values and the machine description
+     * do not change within a JVM run), which is what lets the config watcher recognise a
+     * regenerated file - a deleted {@code folesium.properties} recreated by
+     * {@link #fileProperties()} - and skip reloading it as if it were an operator edit.
+     */
+    private static String defaultConfigContent() {
         // The generated file carries this machine's auto-tuned defaults (docs/AUTO-CONFIG.md),
         // so a fresh install already uses ZSTD + a shard count matched to its CPU cores.
         FolesiumConfig defaults = autoTunedConfig();
@@ -233,11 +240,16 @@ public final class FolesiumRegistry {
         sb.append('\n');
         sb.append("# How often (seconds) this file is checked for edits when autoReload is on.\n");
         sb.append("autoReloadSeconds=10\n");
+        return sb.toString();
+    }
+
+    private static void generateDefaultConfigFile(Path file) {
+        String content = defaultConfigContent();
         try {
             if (file.getParent() != null) {
                 Files.createDirectories(file.getParent());
             }
-            Files.writeString(file, sb.toString(), StandardCharsets.UTF_8);
+            Files.writeString(file, content, StandardCharsets.UTF_8);
             LOGGER.log(System.Logger.Level.INFO,
                     "Folesium: no {0} found; created auto-tuned default at {1} (enabled=false). Edit it to enable.",
                     CONFIG_FILE, file.toAbsolutePath());
@@ -526,6 +538,25 @@ public final class FolesiumRegistry {
      * @return one entry per open store, in directory order
      */
     public static List<ReloadReport> reload() {
+        // Programmatic reloads apply the same parse precheck as the watcher: an existing
+        // file with a malformed backslash-u escape must not silently fall back to the
+        // auto-tuned defaults (fileProperties() discards the unparseable prefix and yields
+        // defaults) - keep the previous configuration instead. parsesAsProperties() logged
+        // the clear error. A missing file is not an error here: reload() then proceeds from
+        // system properties + defaults exactly as it always has.
+        Path configFile = configFilePath();
+        if (Files.isRegularFile(configFile)) {
+            String content = configFileContent();
+            if (content == null) {
+                LOGGER.log(System.Logger.Level.ERROR,
+                        "Folesium: cannot read {0} for reload; keeping the previous configuration",
+                        configFile.toAbsolutePath());
+                return List.of();
+            }
+            if (!parsesAsProperties(content)) {
+                return List.of();
+            }
+        }
         List<FolesiumDatabase> snapshot;
         FolesiumConfig cfg;
         boolean enabledBefore;
@@ -658,7 +689,19 @@ public final class FolesiumRegistry {
                         configWatcher = null;
                         return;
                     }
-                    seconds = Math.max(1, intProperty("autoReloadSeconds", 10));
+                    try {
+                        seconds = Math.max(1, intProperty("autoReloadSeconds", 10));
+                    } catch (UncheckedIOException e) {
+                        // The poll head re-reads the config file (intProperty -> property ->
+                        // fileProperties()); a transient read failure - e.g. an editor is
+                        // still writing - must not kill the watcher (same guard as the
+                        // reload path below). Log a warning and retry on the next poll.
+                        LOGGER.log(System.Logger.Level.WARNING,
+                                "Folesium: cannot read {0} to determine the reload interval;"
+                                        + " will retry on the next poll: {1}",
+                                configFilePath().toAbsolutePath(), e.toString());
+                        continue;
+                    }
                 }
                 try {
                     Thread.sleep(seconds * 1000L);
@@ -703,11 +746,29 @@ public final class FolesiumRegistry {
                     // parsesAsProperties() logged the clear error; keep the previous configuration.
                     continue;
                 }
+                // A file that our own machinery regenerated (the previous file was deleted and
+                // fileProperties() recreated the auto-tuned default) is not an operator edit:
+                // applying the defaults would silently override the running server's current
+                // configuration. Recognise it by its exact generated content (deterministic
+                // per machine) and skip the reload, leaving the stamp stale so the skip is
+                // re-evaluated on every poll until the operator actually edits the file.
+                if (after.equals(defaultConfigContent())) {
+                    LOGGER.log(System.Logger.Level.INFO,
+                            "Folesium: {0} was regenerated (previously deleted?); keeping the running configuration",
+                            configFilePath().toAbsolutePath());
+                    continue;
+                }
                 LOGGER.log(System.Logger.Level.INFO,
                         "Folesium: {0} changed on disk, applying it to the running server", configFilePath());
+                boolean anyStoreFailed = false;
                 try {
                     for (ReloadReport r : reload()) {
                         if (r.error() != null) {
+                            // One failing store must not commit the stamp: the change is
+                            // retried on the next poll (the same promise as the exception
+                            // paths below), so a transient per-store failure cannot be
+                            // skipped forever.
+                            anyStoreFailed = true;
                             LOGGER.log(System.Logger.Level.ERROR, "Folesium: {0}: {1}", r.directory(), r.error());
                         }
                         if (r.result() == null) {
@@ -736,10 +797,16 @@ public final class FolesiumRegistry {
                     // The stamp stays stale, so the change is retried on the next poll.
                     continue;
                 }
-                // The reload ran to completion without an exception, so the new configuration
-                // is in effect: only now is the stamp committed. A change whose reload failed
-                // (above) leaves the stamp stale and is retried on the next poll instead of
-                // being skipped forever.
+                if (anyStoreFailed) {
+                    // At least one store rejected the change: leave the stamp stale so the
+                    // whole change is retried on the next poll (the same promise as the
+                    // exception paths above) instead of being skipped forever.
+                    continue;
+                }
+                // The reload ran to completion without an exception and every store accepted
+                // the new configuration: only now is the stamp committed. A change whose
+                // reload failed (above) leaves the stamp stale and is retried on the next
+                // poll instead of being skipped forever.
                 synchronized (FolesiumRegistry.class) {
                     configFileStamp = stamp;
                 }

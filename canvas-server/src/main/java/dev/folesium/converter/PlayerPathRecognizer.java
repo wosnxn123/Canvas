@@ -111,7 +111,7 @@ public final class PlayerPathRecognizer {
         // 26.x layout: the per-player directories are grouped under <world>/players.
         Path playersParent = parent.getParent();
         return playersParent != null
-                && DIR_PLAYERS.equals(parent.getFileName().toString())
+                && DIR_PLAYERS.equalsIgnoreCase(parent.getFileName().toString())
                 && worldRoot.equals(playersParent.toAbsolutePath().normalize());
     }
 

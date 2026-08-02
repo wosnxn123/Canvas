@@ -31,9 +31,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.function.BiConsumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
@@ -52,8 +56,9 @@ public final class Keyspace implements AutoCloseable {
      * keyspaces eagerly open every shard of {@link FolesiumConfig#shardCount()};
      * read-only keyspaces size the array from the shard count recorded in the shard file
      * headers on disk (see {@link #readRecordedShardCount}: disagreeing readable headers
-     * resolve to the lowest-index readable one - the new layout's count - and the
-     * names-derived fallback fires only when every discovered header is unreadable) and
+     * resolve to the count a majority of the readable headers record - the layout the swap
+     * is converging to - and the names-derived fallback fires only when every discovered
+     * header is unreadable) and
      * leave the slot of a
      * missing shard {@code null}. Fixed at construction and never mutated.
      */
@@ -161,6 +166,29 @@ public final class Keyspace implements AutoCloseable {
         this.liveShards = readOnly
                 ? Arrays.stream(shards).filter(Objects::nonNull).toArray(ShardFile[]::new)
                 : shards;
+        // The PageIndex damage-marker set is keyspace-global, while each shard's
+        // open-time rebuild (ShardFile constructor) only replayed that shard's own log
+        // range into the shared region pages - and a region's chunks hash across
+        // shards. A single shard's clean rebuild therefore cannot prove every region
+        // page complete: the previous per-shard clearAllDamage let a later shard's
+        // clean build wipe the unresolved-region markers of an earlier shard, silently
+        // losing PAGE-mode data for the affected regions. Clear the markers only when
+        // every shard rebuilt without unresolved regions; if any shard left one (or
+        // skipped its build - a torn/invalid header in a read-only open), keep every
+        // marker so PAGE-mode reads keep falling back to the HashMap (conservative -
+        // partial damage keeps all markers, and the next open retries the repair).
+        if (pageIndex != null) {
+            boolean anyUnresolved = false;
+            for (ShardFile s : liveShards) {
+                if (s.hasUnresolvedRegions()) {
+                    anyUnresolved = true;
+                    break;
+                }
+            }
+            if (!anyUnresolved) {
+                pageIndex.clearAllDamage();
+            }
+        }
     }
 
     /**
@@ -170,25 +198,23 @@ public final class Keyspace implements AutoCloseable {
      * store metadata) may name more shards than the files actually written - an old
      * layout, or a keyspace that was never written to - and a read-only shard must never
      * create or touch a missing file. Files that do not belong to this keyspace (other
-     * keyspaces, {@code .fidx} hints, {@code .tmp} scratch files) are ignored.
+     * keyspaces, {@code .fidx} hints, {@code .tmp} scratch files) are ignored. Only
+     * canonical names are accepted: the index part must be exactly four digits, matching
+     * {@code StoreResharder.SHARD_FILE} and the {@code String.format("%s-%04d", name, i)}
+     * names this keyspace itself opens. A non-canonical file (e.g. {@code chunks-12345.flog}
+     * or {@code chunks-1.flog}) is skipped, so the discovered indices always match the
+     * names the constructor and {@link #readRecordedShardCount} resolve ({@code %04d}) -
+     * discovered and opened layouts stay identical.
      */
     private static int[] discoveredShardIndices(Path dir, String name) {
-        String prefix = name + "-";
+        Pattern shardFile = Pattern.compile("^" + Pattern.quote(name) + "-(\\d{4})\\.flog$");
         try (Stream<Path> files = Files.list(dir)) {
             return files.filter(Files::isRegularFile)
                     .map(p -> p.getFileName().toString())
-                    .filter(fn -> fn.startsWith(prefix) && fn.endsWith(".flog"))
-                    .map(fn -> fn.substring(prefix.length(), fn.length() - ".flog".length()))
-                    .filter(Keyspace::isDecimalIndex)
-                    // isDecimalIndex() only checks that the suffix is all digits, without any
-                    // length limit: a suffix too long for int overflows Integer.parseInt, so skip
-                    // such files instead of failing the whole keyspace open.
-                    .flatMapToInt(s -> {
-                        try {
-                            return IntStream.of(Integer.parseInt(s));
-                        } catch (NumberFormatException e) {
-                            return IntStream.empty();
-                        }
+                    .flatMapToInt(fn -> {
+                        Matcher m = shardFile.matcher(fn);
+                        // Exactly four digits, so Integer.parseInt cannot overflow.
+                        return m.matches() ? IntStream.of(Integer.parseInt(m.group(1))) : IntStream.empty();
                     })
                     .sorted()
                     .toArray();
@@ -221,11 +247,15 @@ public final class Keyspace implements AutoCloseable {
      * same value: a reshard interrupted between the file swap and the metadata rewrite
      * can leave a mixture of old- and new-layout shard files, and taking the first
      * readable header's count would size the keyspace by chance. When the readable
-     * headers disagree, the count of the <em>lowest-index</em> readable header wins:
-     * the swap replaces low-index files first, so the lowest-index readable file belongs
-     * to the new layout and names the count the reshard is committing to, whereas the
-     * names-derived count (below) would reproduce the old layout's count in exactly that
-     * mixed state.
+     * headers disagree, the count that a <em>majority</em> of the readable headers
+     * record wins: the swap rewrites the store one file at a time, so in the mixed
+     * state most readable files already carry the layout being converged to, and
+     * trusting it leaves only the minority of straggler files outside the routing mask -
+     * the majority's visibility lower bound beats any fixed-index rule, which can hide
+     * the majority when the swap has not reached that index yet (the names-derived
+     * count below would reproduce the old layout's count in exactly that mixed state).
+     * An exact tie resolves to the lowest-index readable header's count, keeping the
+     * decision deterministic.
      * Only when <em>every</em> discovered header is unreadable does the count fall back
      * to the layout the file names imply: shard files are named by index under the
      * store's power-of-two shard count, so {@code highest index + 1} reproduces the
@@ -238,7 +268,8 @@ public final class Keyspace implements AutoCloseable {
         RuntimeException lastFailure = null;
         Integer recorded = null;   // the count every readable header must agree on
         boolean conflicting = false; // two readable headers recorded different counts
-        Integer lowestReadableCount = null; // count of the lowest-index readable header
+        Integer firstReadableCount = null; // count of the lowest-index readable header (tie-break)
+        Map<Integer, Integer> votes = new HashMap<>(); // count -> number of readable headers naming it
         for (int index : discovered) {
             Path shardFile = dir.resolve(String.format("%s-%04d.flog", name, index));
             try (FileChannel ch = FileChannel.open(shardFile, StandardOpenOption.READ)) {
@@ -274,19 +305,19 @@ public final class Keyspace implements AutoCloseable {
                 if (count < 1 || count > 1024 || Integer.bitCount(count) != 1) {
                     throw new FolesiumException("Invalid shard count " + count + " in header of " + shardFile);
                 }
-                if (lowestReadableCount == null) {
+                if (firstReadableCount == null) {
                     // discovered is ascending, so the first readable header is the
-                    // lowest-index one. In a mixed old/new-layout state this is the new
-                    // layout's count (the swap replaces low-index files first); see the
-                    // conflicting branch below.
-                    lowestReadableCount = count;
+                    // lowest-index one; its count is the deterministic tie-break when the
+                    // readable headers split exactly 50/50.
+                    firstReadableCount = count;
                 }
+                votes.merge(count, 1, Integer::sum);
                 // The count is store-wide and stamped into every header, so every readable
                 // header must agree on it: a reshard interrupted between the file swap and
                 // the metadata rewrite can leave a mixture of old- and new-layout shard
                 // files, and trusting whichever header happens to be read first would size
                 // the keyspace by chance. Any disagreement is resolved below via the
-                // lowest-index readable header (the new layout's count), not by chance.
+                // majority readable count, not by chance.
                 if (recorded == null) {
                     recorded = count;
                 } else if (recorded != count) {
@@ -306,13 +337,24 @@ public final class Keyspace implements AutoCloseable {
         if (conflicting) {
             // The readable headers disagree: a reshard interrupted between the file swap
             // and the metadata rewrite left old- and new-layout shard files mixed. The
-            // swap replaces low-index files first, so the lowest-index readable header
-            // belongs to the new layout and names the count the reshard is committing to;
-            // the names-derived fallback would reproduce the old layout's count in
-            // exactly this state (the highest present file is still an old-layout one),
-            // so it must not win here. Trust the new layout - it is what the swap is
-            // converging to - and size the keyspace from its count.
-            return lowestReadableCount;
+            // swap rewrites the store one file at a time, so in the mixed state most
+            // readable files already carry the layout being converged to; the count most
+            // of them record is that layout, and trusting it hides only the minority of
+            // stragglers from the other layout - a better visibility lower bound than any
+            // fixed-index rule, which can hide the majority when the swap has not reached
+            // that index yet (the names-derived fallback would reproduce the old layout's
+            // count in exactly this state). An exact tie resolves to the lowest-index
+            // readable header's count, the previous rule, keeping the decision
+            // deterministic.
+            int best = firstReadableCount;
+            int bestVotes = votes.getOrDefault(best, 0);
+            for (var entry : votes.entrySet()) {
+                if (entry.getValue() > bestVotes) {
+                    best = entry.getKey();
+                    bestVotes = entry.getValue();
+                }
+            }
+            return best;
         }
         // Every discovered header is unreadable (e.g. a crash truncated the whole lowest
         // shard before any header was written, or every header failed the
@@ -327,20 +369,6 @@ public final class Keyspace implements AutoCloseable {
                 + " (all torn, unreadable or disagreeing)", lastFailure);
     }
 
-    private static boolean isDecimalIndex(String s) {
-        if (s.isEmpty()) {
-            return false;
-        }
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (c < '0' || c > '9') {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /** True for keyspaces whose keys are region coordinates (chunks/entities/poi). */
     private static boolean isRegionKeyed(String name) {
         return FolesiumDatabase.KS_CHUNKS.equals(name)
                 || FolesiumDatabase.KS_ENTITIES.equals(name)
