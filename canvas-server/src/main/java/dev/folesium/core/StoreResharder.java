@@ -23,11 +23,13 @@ import dev.folesium.core.util.Bytes;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
@@ -105,6 +107,18 @@ final class StoreResharder {
      * Completes or discards an interrupted reshard. Cheap no-op when no reshard is in
      * flight, so it is safe to call on every open; it also repairs metadata that a crash
      * left disagreeing with the shard files (see {@link #reconcileStaleMetadata}).
+     *
+     * <p><b>Side effects:</b> whenever an interrupted reshard is detected this method
+     * performs layout-changing writes: it moves shard files between the store directory
+     * and the backup tree, deletes both scratch trees, rewrites {@code store.shardCount}
+     * (and {@code store.previousShardCount}/{@code store.reshardedAt}) and drops the
+     * rebuildable page index. It must therefore only be called on a read-write open
+     * ({@code applyLayoutChanges == true}); a read-only open ({@code applyLayoutChanges
+     * == false}) must skip the call entirely rather than run these writes. Skipping is
+     * safe: a read-only open never writes, so the worst case is a torn read of a store
+     * whose reshard was interrupted mid-swap, and the next read-write open repairs the
+     * layout before any keyspace is used. The read-only guard belongs at the single call
+     * site in the {@link FolesiumDatabase} constructor, not in this signature.</p>
      */
     static void recover(Path dir) {
         Path staging = dir.resolve(STAGING_DIR);
@@ -157,6 +171,31 @@ final class StoreResharder {
                     throw new FolesiumException(
                             "Cannot restore the old layout of " + dir + " after an incomplete reshard",
                             restoreFailure);
+                }
+                // The reshard switched store.shardCount to the new value before the swap
+                // started (phase 2 of reshard()), so restoring the old files leaves the
+                // metadata naming a layout that no longer exists: the store would fail to
+                // open with a shard topology mismatch (or route keys under the wrong
+                // mask). Rewrite the metadata to the old layout's count, inferred from
+                // the restored shard files - the same realignment the other recover
+                // branches perform via reconcileStaleMetadata.
+                int restoredCount = restoredLayoutShardCount(dir);
+                if (restoredCount > 0) {
+                    Integer metaCount = metadataShardCount(dir);
+                    if (metaCount == null || metaCount != restoredCount) {
+                        LOGGER.log(System.Logger.Level.WARNING,
+                                "Folesium: reshard of {0} was rolled back to the {1}-shard layout "
+                                        + "but store.shardCount still said {2}; repairing the metadata "
+                                        + "to match the restored files",
+                                dir, restoredCount,
+                                metaCount == null ? "nothing" : Integer.toString(metaCount));
+                        applyShardCountMetadata(dir, restoredCount);
+                    }
+                } else {
+                    LOGGER.log(System.Logger.Level.WARNING,
+                            "Folesium: cannot determine the shard count of the restored layout of {0}; "
+                                    + "store.shardCount was left unchanged",
+                            dir);
                 }
                 return;
             }
@@ -524,6 +563,67 @@ final class StoreResharder {
         deleteRecursively(staging);
         deleteRecursively(backup);
         fsyncDirectory(dir);
+    }
+
+    /**
+     * The shard count of the layout {@link #restoreOldLayout} just restored: the header
+     * shard count of the first shard file in {@code dir} (every restored file was written
+     * with the same old topology), falling back to the index-derived
+     * {@link #consistentOnDiskShardCount} when no shard header is readable. -1 when no
+     * shard file survives, i.e. the old layout's count cannot be established.
+     */
+    private static int restoredLayoutShardCount(Path dir) {
+        try (Stream<Path> files = Files.list(dir)) {
+            for (Path p : files.sorted().toList()) {
+                if (SHARD_FILE.matcher(p.getFileName().toString()).matches()) {
+                    int count = recordedShardCount(p);
+                    if (count > 0) {
+                        return count;
+                    }
+                }
+            }
+        } catch (IOException e) {
+            // Fall through to the index-derived count.
+        }
+        return consistentOnDiskShardCount(dir);
+    }
+
+    /**
+     * The shard count stamped in a shard file's header - the physical topology the file
+     * was written with - or -1 when the file is absent, shorter than the fixed header, or
+     * its header is invalid. Mirrors {@link ShardFile}'s header layout ({@code "FLSM" |
+     * u16 version=1 | u16 reserved | u32 shardIndex | u32 shardCount}); the magic and
+     * version are checked locally because {@link ShardFile}'s constants are
+     * package-private to {@code dev.folesium.core.shard}.
+     */
+    private static int recordedShardCount(Path shardFile) {
+        if (!Files.isRegularFile(shardFile)) {
+            return -1;
+        }
+        ByteBuffer header = ByteBuffer.allocate(ShardFile.FILE_HEADER_LEN);
+        try (var channel = java.nio.channels.FileChannel.open(shardFile,
+                java.nio.file.StandardOpenOption.READ)) {
+            while (header.hasRemaining()) {
+                if (channel.read(header) < 0) {
+                    return -1; // shorter than the header
+                }
+            }
+        } catch (IOException e) {
+            return -1;
+        }
+        header.flip();
+        byte[] magic = new byte[4];
+        header.get(magic);
+        if (!Arrays.equals(magic, new byte[]{'F', 'L', 'S', 'M'}) || header.getShort() != 1) {
+            return -1;
+        }
+        header.getShort(); // reserved
+        header.getInt();   // shardIndex
+        int count = header.getInt();
+        if (Integer.bitCount(count) != 1 || count < 1 || count > 1024) {
+            return -1;
+        }
+        return count;
     }
 
     /** Number of populated {@code .flog} shard files of one keyspace directly inside {@code dir}. */

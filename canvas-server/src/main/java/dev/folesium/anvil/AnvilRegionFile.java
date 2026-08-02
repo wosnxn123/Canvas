@@ -250,8 +250,18 @@ public final class AnvilRegionFile implements Closeable {
         return path.resolveSibling("c." + chunkX + "." + chunkZ + ".mcc");
     }
 
-    /** Compresses (zlib) and writes a chunk payload, allocating sectors first-fit. */
+    /**
+     * Compresses (zlib) and writes a chunk payload, allocating sectors first-fit. Rejects
+     * payloads larger than {@link #MAX_CHUNK_PAYLOAD_BYTES} up front, mirroring the same
+     * bound enforced when decompressing in {@link #readChunk}.
+     *
+     * @throws IllegalArgumentException if {@code uncompressed.length > MAX_CHUNK_PAYLOAD_BYTES}
+     */
     public void writeChunk(int localX, int localZ, byte[] uncompressed) throws IOException {
+        if (uncompressed.length > MAX_CHUNK_PAYLOAD_BYTES) {
+            throw new IllegalArgumentException("Chunk payload of " + uncompressed.length
+                    + " bytes exceeds the " + MAX_CHUNK_PAYLOAD_BYTES + " byte limit");
+        }
         ByteArrayOutputStream bos = new ByteArrayOutputStream(Math.max(64, uncompressed.length / 4));
         try (DeflaterOutputStream dos = new DeflaterOutputStream(bos)) {
             dos.write(uncompressed);

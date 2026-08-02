@@ -60,6 +60,12 @@ public final class DictionaryStore {
     /** Trained dictionary size (contract: {@code 1024 * 16} bytes). */
     private static final int DICT_SIZE = 1024 * 16;
 
+    /**
+     * Smallest plausible zstd dictionary: a real trained dictionary (or even a hand-built
+     * raw-content one) is well over 64 bytes; anything shorter is a truncated or foreign file.
+     */
+    private static final int MIN_DICT_BYTES = 64;
+
     /** {@code Zstd.trainFromBuffer} rejects fewer than 11 samples. */
     private static final int MIN_SAMPLES = 11;
 
@@ -81,6 +87,14 @@ public final class DictionaryStore {
             return null;
         }
         byte[] bytes = Files.readAllBytes(dictFile);
+        if (bytes.length < MIN_DICT_BYTES) {
+            throw new FolesiumException(
+                    "Dictionary file " + dictFile + " is corrupt: only " + bytes.length
+                            + " bytes, but a valid zstd dictionary is at least " + MIN_DICT_BYTES
+                            + " bytes (truncated header?). Restore dict.bin from a backup, or delete "
+                            + "it and re-run the conversion; codec-3 records in this keyspace are "
+                            + "not decodable without the dictionary.");
+        }
         if (!hasDictionaryMagic(bytes)) {
             throw new FolesiumException(
                     "Dictionary file " + dictFile + " is corrupt: not a valid zstd dictionary "
@@ -94,12 +108,20 @@ public final class DictionaryStore {
     /**
      * Trains a dictionary from {@code samples} (at least {@link #MIN_SAMPLES} of them), writes it
      * atomically to {@code dictFile}, and returns the trained bytes so the caller can cache them
-     * without re-reading the file.
+     * without re-reading the file. Refuses to overwrite an existing dictionary: a different
+     * dictionary would make existing codec-3 records undecodable, so retraining requires
+     * deleting {@code dictFile} first.
      *
-     * @throws FolesiumException if fewer than {@link #MIN_SAMPLES} samples are provided
+     * @throws FolesiumException if {@code dictFile} already exists, or if fewer than
+     *                           {@link #MIN_SAMPLES} samples are provided
      * @throws IOException       if the file cannot be written
      */
     public static byte[] train(Path dictFile, List<byte[]> samples) throws IOException {
+        if (Files.exists(dictFile)) {
+            throw new FolesiumException("Dictionary file " + dictFile + " already exists; refusing to "
+                    + "overwrite it (existing codec-3 records may depend on the trained dictionary). "
+                    + "Delete dict.bin first to retrain.");
+        }
         if (samples.size() < MIN_SAMPLES) {
             throw new FolesiumException("Cannot train a dictionary from " + samples.size()
                     + " samples; zstd requires at least " + MIN_SAMPLES);
@@ -124,6 +146,25 @@ public final class DictionaryStore {
             Files.deleteIfExists(tmp);
         }
         return trained;
+    }
+
+    /**
+     * Trains and persists a dictionary only when none exists yet - the conversion pipeline's
+     * post-conversion bootstrap path ({@code WorldConverter}). Unlike {@link #train}, an
+     * existing dictionary is not an error: it is left untouched, because a different
+     * dictionary would make existing codec-3 records undecodable (the immutable-once-minted
+     * contract).
+     *
+     * @return the trained bytes when a new dictionary was written, or {@code null} when
+     *         {@code dictFile} already exists
+     * @throws FolesiumException if fewer than {@link #MIN_SAMPLES} samples are provided
+     * @throws IOException       if the file cannot be written
+     */
+    public static byte[] trainIfMissing(Path dictFile, List<byte[]> samples) throws IOException {
+        if (Files.exists(dictFile)) {
+            return null;
+        }
+        return train(dictFile, samples);
     }
 
     /**

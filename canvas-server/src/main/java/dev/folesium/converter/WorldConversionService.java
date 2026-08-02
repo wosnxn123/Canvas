@@ -147,6 +147,25 @@ public final class WorldConversionService {
                         System.out.println("Folesium: the player store), so its Anvil data (region/, entities/, poi/) is left unconverted.");
                         continue;
                     }
+                    // Same collision before any player store exists: on a pre-1.21 world
+                    // without player data, convertPlayerData above creates nothing, so the
+                    // root's folesium/ dir is still the reserved legacy player-store
+                    // location (storeDirectoryFor == worldRoot/folesium) even though no
+                    // store is there yet. Converting the root as a dimension would create
+                    // a DIMENSION store on that reserved path and block the player store
+                    // (role conflict) once player data appears. Skip the root dimension
+                    // and say why; its Anvil data stays on disk unconverted.
+                    if (dim.equals(worldRoot)
+                            && folesiumStore.equals(PlayerDataConverter.storeDirectoryFor(worldRoot))) {
+                        System.out.println("Folesium: skipped dimension " + dim + ": " + folesiumStore
+                                + " is the reserved location of the legacy player store, so on a pre-1.21 world");
+                        System.out.println("Folesium: the root dimension cannot get a store of its own (path collision with");
+                        System.out.println("Folesium: the player store), even when no player data exists yet. Its Anvil data");
+                        System.out.println("Folesium: (region/, entities/, poi/) is left unconverted; to convert the root");
+                        System.out.println("Folesium: dimension, handle it separately (e.g. --folesiumWorldDir on a world");
+                        System.out.println("Folesium: whose root is a pure dimension, not the legacy player-store host).");
+                        continue;
+                    }
                     stats = converter.anvilToFolesium(dim, folesiumStore, config);
                 }
                 case TO_ANVIL -> {

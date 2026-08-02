@@ -24,7 +24,6 @@ import dev.folesium.core.shard.ShardFile;
 import dev.folesium.core.util.Bytes;
 import dev.folesium.core.util.LongKeys;
 import dev.folesium.core.util.UuidKeys;
-
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -78,6 +77,13 @@ public final class Keyspace implements AutoCloseable {
      * cannot be decoded without it (whether new writes use the dictionary is decided per record
      * by {@link FolesiumConfig#dictionaryCompression()} in {@link ShardFile}). Shared by every
      * shard. A corrupt dictionary fails the open with a clear {@link FolesiumException}.
+     *
+     * <p>Training is deliberately not part of the open path: a keyspace whose dictionary file
+     * is missing opens with {@code null} here, and reads of any codec-3 record then fail
+     * loudly - the intended "missing dictionary" semantic. The dictionary is minted by the
+     * conversion pipeline after a successful conversion (see
+     * {@code dev.folesium.converter.WorldConverter}) and by tests via {@link DictionaryStore#train};
+     * the resharder forwards this field to staged shard files, keeping rewrites consistent.</p>
      */
     private final byte[] keyspaceDict;
 
@@ -93,8 +99,7 @@ public final class Keyspace implements AutoCloseable {
                 // not the count of files found: a sparse or torn layout (missing shard
                 // files) must still route every present file to itself. The shard file
                 // header records the authoritative shard count; absent slots stay null.
-                shardCount = readRecordedShardCount(
-                        dir.resolve(String.format("%s-%04d.flog", name, discovered[0])));
+                shardCount = readRecordedShardCount(dir, name, discovered);
             }
         } else {
             shardCount = config.shardCount();
@@ -102,8 +107,9 @@ public final class Keyspace implements AutoCloseable {
         this.shards = new ShardFile[shardCount];
         this.shardMask = shardCount - 1;
         this.pageIndex = createPageIndex(dir, name, config, readOnly);
+        byte[] dict;
         try {
-            this.keyspaceDict = loadKeyspaceDict(dir, name);
+            dict = loadKeyspaceDict(dir, name);
             for (int i = 0; i < shards.length; i++) {
                 if (readOnly && Arrays.binarySearch(discovered, i) < 0) {
                     // Read-only: no shard file exists for this index (a keyspace that was
@@ -115,7 +121,7 @@ public final class Keyspace implements AutoCloseable {
                 }
                 String shardName = String.format("%s-%04d", name, i);
                 shards[i] = new ShardFile(dir.resolve(shardName + ".flog"), i, config, pageIndex,
-                        shardName, config.indexMode() == FolesiumConfig.IndexMode.PAGE, keyspaceDict, readOnly);
+                        shardName, config.indexMode() == FolesiumConfig.IndexMode.PAGE, dict, readOnly);
             }
         } catch (RuntimeException e) {
             // One bad shard must not leak the handles of the shards already opened: nobody
@@ -138,6 +144,7 @@ public final class Keyspace implements AutoCloseable {
             }
             throw e;
         }
+        this.keyspaceDict = dict;
         this.liveShards = readOnly
                 ? Arrays.stream(shards).filter(Objects::nonNull).toArray(ShardFile[]::new)
                 : shards;
@@ -173,24 +180,53 @@ public final class Keyspace implements AutoCloseable {
      * Reads the authoritative shard count from a shard file header (shard count at
      * offset 12, u32 big-endian, matching {@code ShardFile}'s file header). Validates
      * the power-of-two invariant so the read-only routing mask is always legal.
+     *
+     * <p>Torn-header tolerant: the count is store-wide and stamped into every shard file
+     * header, so any intact shard names the layout. Every discovered file is tried in
+     * ascending order - the lowest shard may be torn (a crash truncated it before its
+     * header was ever written; {@code ShardFile} itself tolerates this and treats such a
+     * shard as empty) while the higher shards are intact. Only when <em>every</em>
+     * discovered header is unreadable does the count fall back to the layout the file
+     * names imply: shard files are named by index under the store's power-of-two shard
+     * count, so {@code highest index + 1} reproduces the original count. This fallback is
+     * a tolerance path - the keyspace then opens with an empty slot per unreadable shard
+     * instead of failing the whole keyspace - and is only used when the derived count is
+     * itself a legal power of two (otherwise the layout is genuinely unreadable and the
+     * failure is reported).
      */
-    private static int readRecordedShardCount(Path shardFile) {
-        try (FileChannel ch = FileChannel.open(shardFile, StandardOpenOption.READ)) {
-            ByteBuffer header = ByteBuffer.allocate(16);
-            int n = ch.read(header, 0);
-            if (n < 16) {
-                throw new FolesiumException("Shard file too short to read its header: " + shardFile);
+    private static int readRecordedShardCount(Path dir, String name, int[] discovered) {
+        RuntimeException lastFailure = null;
+        for (int index : discovered) {
+            Path shardFile = dir.resolve(String.format("%s-%04d.flog", name, index));
+            try (FileChannel ch = FileChannel.open(shardFile, StandardOpenOption.READ)) {
+                ByteBuffer header = ByteBuffer.allocate(16);
+                int n = ch.read(header, 0);
+                if (n < 16) {
+                    throw new FolesiumException("Shard file too short to read its header: " + shardFile);
+                }
+                header.flip();
+                header.position(12);
+                int count = header.getInt();
+                if (count < 1 || count > 1024 || Integer.bitCount(count) != 1) {
+                    throw new FolesiumException("Invalid shard count " + count + " in header of " + shardFile);
+                }
+                return count;
+            } catch (IOException e) {
+                lastFailure = new FolesiumException("Cannot read shard header " + shardFile, e);
+            } catch (FolesiumException e) {
+                lastFailure = e;
             }
-            header.flip();
-            header.position(12);
-            int count = header.getInt();
-            if (count < 1 || count > 1024 || Integer.bitCount(count) != 1) {
-                throw new FolesiumException("Invalid shard count " + count + " in header of " + shardFile);
-            }
-            return count;
-        } catch (IOException e) {
-            throw new FolesiumException("Cannot read shard header " + shardFile, e);
         }
+        // Every discovered header is unreadable (e.g. a crash truncated the whole lowest
+        // shard before any header was written). Fall back to the names-derived count; see
+        // the method javadoc for why this reproduces the original power-of-two layout.
+        int byNames = discovered[discovered.length - 1] + 1;
+        if (byNames >= 1 && byNames <= 1024 && Integer.bitCount(byNames) == 1) {
+            return byNames;
+        }
+        throw new FolesiumException("Cannot read the shard header of any of the " + discovered.length
+                + " discovered shard files of keyspace '" + name + "' in " + dir
+                + " (all torn or unreadable)", lastFailure);
     }
 
     private static boolean isDecimalIndex(String s) {

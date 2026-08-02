@@ -227,9 +227,17 @@ public final class FolesiumDatabase implements AutoCloseable {
             requireCompressionUsable(requested.compression());
         }
 
-        // Converge any reshard that a previous run was killed in the middle of, before a
-        // single shard file is opened.
-        StoreResharder.recover(dir);
+        if (!readOnly) {
+            // Converge any reshard that a previous run was killed in the middle of, before a
+            // single shard file is opened. Skipped for read-only opens: recover() deletes
+            // staging/backup trees, moves shard files into place and rewrites metadata - a
+            // converter/export (applyLayoutChanges == false) must never rewrite or delete a
+            // store it is about to abandon. A read-only open instead reads the interrupted
+            // layout exactly as it lies: missing, torn or partial shards surface as absent
+            // data, which is what a read-only export needs. A consumer that requires
+            // recover()'s full-layout consistency must open the store writable.
+            StoreResharder.recover(dir);
+        }
 
         this.config = reconcileMetadata(requested, applyLayoutChanges);
 

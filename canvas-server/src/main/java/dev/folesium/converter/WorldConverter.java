@@ -22,7 +22,9 @@ import dev.folesium.anvil.AnvilRegionFile;
 import dev.folesium.core.FolesiumConfig;
 import dev.folesium.core.FolesiumDatabase;
 import dev.folesium.core.Keyspace;
+import dev.folesium.core.index.DictionaryStore;
 import dev.folesium.core.util.LongKeys;
+import dev.folesium.core.util.ZstdNative;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -97,6 +99,11 @@ public final class WorldConverter {
      * {@code .folesium-backup-*} sibling before the fresh store is created, turning
      * the merge into a full rebuild of the store (the previous store is preserved
      * under the backup name).</p>
+     *
+     * <p>When dictionary compression is enabled, the per-keyspace dictionaries
+     * ({@code <store>/idx/<name>/dict.bin}) of the converted region keyspaces are trained
+     * after the flush, so codec-3 (ZSTD_DICT) writes begin on the next open; see
+     * {@link #trainDictionariesIfMissing(Path, List, FolesiumConfig)}.</p>
      */
     public Stats anvilToFolesium(Path dimensionDir, Path folesiumDir, FolesiumConfig config) throws IOException {
         long start = System.nanoTime();
@@ -109,12 +116,14 @@ public final class WorldConverter {
 
         try (FolesiumDatabase db = FolesiumDatabase.open(folesiumDir,
                 config.withDurability(FolesiumConfig.DurabilityMode.EXPLICIT))) {
+            List<Keyspace> converted = new ArrayList<>();
             for (Map.Entry<String, String> e : DIR_TO_KEYSPACE.entrySet()) {
                 Path src = dimensionDir.resolve(e.getKey());
                 if (!Files.isDirectory(src)) {
                     continue;
                 }
                 Keyspace ks = db.keyspace(e.getValue());
+                converted.add(ks);
                 List<Path> mcaFiles;
                 try (var s = Files.list(src)) {
                     mcaFiles = s.filter(p -> MCA.matcher(p.getFileName().toString()).matches()).toList();
@@ -130,8 +139,13 @@ public final class WorldConverter {
                         regionX = Integer.parseInt(m.group(1));
                         regionZ = Integer.parseInt(m.group(2));
                         // Reject coordinates whose region -> chunk shift would overflow int
-                        // (|region| >= 2^26); such names are corrupt or foreign files.
-                        if (Math.abs(regionX) >= (1 << 26) || Math.abs(regionZ) >= (1 << 26)) {
+                        // (|region| >= 2^26); such names are corrupt or foreign files. Compare in
+                        // long so that region == Integer.MIN_VALUE cannot slip past Math.abs
+                        // (whose overflow keeps the value negative).
+                        long rx = regionX;
+                        long rz = regionZ;
+                        if (rx >= (1L << 26) || rx <= -(1L << 26)
+                                || rz >= (1L << 26) || rz <= -(1L << 26)) {
                             throw new NumberFormatException("region coordinate out of range");
                         }
                     } catch (NumberFormatException ex) {
@@ -161,8 +175,73 @@ public final class WorldConverter {
                 });
             }
             db.flush();
+            trainDictionariesIfMissing(folesiumDir, converted, config);
         }
         return new Stats(chunkCount.get(), byteCount.get(), (System.nanoTime() - start) / 1_000_000);
+    }
+
+    /**
+     * Converter-tail dictionary bootstrap: after a successful conversion (every region record
+     * written and flushed, close pending), train the per-keyspace zstd dictionary
+     * ({@code <store>/idx/<name>/dict.bin}) for each converted region-keyed keyspace whose
+     * dictionary is still missing, so codec-3 (ZSTD_DICT) writes begin on the next open of the
+     * store. The records just written are plain-compressed - their shards snapshot the
+     * dictionary at construction, when dict.bin did not exist yet - so training here is safe:
+     * no record on disk depends on the new dictionary. A keyspace already carrying a dictionary
+     * (a previous conversion, or a manual {@code DictionaryStore.train}) is left untouched.
+     *
+     * <p>Sampling mirrors the store's own scheme: the first 64 live record values, keys
+     * collected via a keys-only pass ({@link Keyspace#forEachKey}) and the values read back
+     * individually. A keyspace with no live records cannot yield a useful dictionary and is
+     * skipped. Training failure never fails the conversion: the store is simply left without a
+     * dictionary (plain compression) and a warning is logged.</p>
+     */
+    private static void trainDictionariesIfMissing(Path storeDir, List<Keyspace> converted,
+                                                   FolesiumConfig config) {
+        if (!config.dictionaryCompression() || !ZstdNative.dictAvailable()) {
+            return;
+        }
+        for (Keyspace ks : converted) {
+            Path dictFile = storeDir.resolve("idx").resolve(ks.name()).resolve("dict.bin");
+            if (DictionaryStore.exists(dictFile)) {
+                // Already trained; a different dictionary would make existing codec-3 records
+                // undecodable, so it is never retrained.
+                continue;
+            }
+            if (ks.count() == 0) {
+                // Nothing to sample: an empty keyspace cannot yield a useful dictionary.
+                continue;
+            }
+            List<byte[]> sampleKeys = new ArrayList<>(64);
+            ks.forEachKey(key -> {
+                if (sampleKeys.size() < 64) {
+                    sampleKeys.add(key);
+                }
+            });
+            if (sampleKeys.isEmpty()) {
+                continue;
+            }
+            List<byte[]> samples = new ArrayList<>(sampleKeys.size());
+            for (byte[] key : sampleKeys) {
+                byte[] value = ks.get(key);
+                if (value != null) {
+                    samples.add(value);
+                }
+            }
+            if (samples.isEmpty()) {
+                continue;
+            }
+            try {
+                DictionaryStore.trainIfMissing(dictFile, samples);
+            } catch (IOException | RuntimeException e) {
+                // Never block the conversion on a dictionary; the store stays on plain
+                // compression and codec-3 writes begin only after a successful retrain.
+                System.getLogger("Folesium").log(System.Logger.Level.WARNING,
+                        "Folesium: could not train the dictionary of keyspace '" + ks.name()
+                                + "' from " + samples.size() + " samples; the store stays on plain "
+                                + "compression until a retrain succeeds: " + e);
+            }
+        }
     }
 
     // ------------------------------------------------------- folesium -> anvil

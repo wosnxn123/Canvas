@@ -23,11 +23,14 @@ import dev.folesium.core.util.LongKeys;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
+import java.util.UUID;
 import java.util.zip.CRC32C;
 
 /**
@@ -141,10 +144,12 @@ public final class RegionPage {
     }
 
     /**
-     * Atomically writes this page: serializes to a {@code .tmp} sibling and moves it over
-     * the target, preferring {@link StandardCopyOption#ATOMIC_MOVE} and falling back to a
-     * plain replace move. The tail carries the CRC (over header + slots) and the live slot
-     * count; the 8 reserved tail bytes stay zero.
+     * Atomically writes this page: serializes to a unique {@code .tmp-<uuid>} sibling,
+     * forces it to disk (including metadata), and moves it over the target, preferring
+     * {@link StandardCopyOption#ATOMIC_MOVE} and falling back to a plain replace move. The
+     * tail carries the CRC (over header + slots) and the live slot count; the 8 reserved
+     * tail bytes stay zero. The unique temporary name makes concurrent writers to the same
+     * file safe: no two calls share a staging path.
      */
     public void write(Path file) throws IOException {
         ByteBuffer b = ByteBuffer.allocate(PAGE_SIZE);
@@ -157,13 +162,27 @@ public final class RegionPage {
         crc.update(b.array(), 0, TAIL_CRC_OFF);
         b.putInt((int) crc.getValue());
         b.putInt(count());
+        // The 8 reserved tail bytes: the buffer is written position-limited (flip below),
+        // so they must be explicitly zeroed or the file comes out 8 bytes short.
+        b.putLong(0L);
         Path parent = file.getParent();
         if (parent != null) {
             Files.createDirectories(parent);
         }
-        Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
-        Files.write(tmp, b.array());
-        moveReplacing(tmp, file);
+        Path tmp = file.resolveSibling(file.getFileName() + ".tmp-" + UUID.randomUUID());
+        try {
+            b.flip();
+            try (FileChannel channel = FileChannel.open(tmp, StandardOpenOption.CREATE,
+                    StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
+                while (b.hasRemaining()) {
+                    channel.write(b);
+                }
+                channel.force(true);
+            }
+            moveReplacing(tmp, file);
+        } finally {
+            Files.deleteIfExists(tmp);
+        }
     }
 
     /** Absolute log offset of the given slot; 0 = the slot has no record. */
