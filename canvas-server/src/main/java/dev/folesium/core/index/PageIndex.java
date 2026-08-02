@@ -660,12 +660,25 @@ public final class PageIndex implements AutoCloseable {
             return;
         }
         try (var stream = Files.list(idxDir)) {
-            stream.filter(p -> p.getFileName().toString().endsWith(PAGE_SUFFIX)).forEach(p -> {
+            java.util.List<Path> files = stream.toList();
+            files.stream().filter(p -> p.getFileName().toString().endsWith(PAGE_SUFFIX)).forEach(p -> {
                 try {
                     Files.deleteIfExists(p);
                 } catch (IOException e) {
                     LOGGER.log(System.Logger.Level.WARNING,
                             "Folesium: failed to delete region page {0}: {1}", p, e.toString());
+                }
+            });
+            // Also sweep stale '<page>.tmp-<uuid>' staging files left by a crash between
+            // RegionPage.write's staging write and its atomic rename. They are inert (never
+            // read by any load path) but accumulate across crashes; this full-delete pass is
+            // the natural place to collect them.
+            files.stream().filter(p -> p.getFileName().toString().contains(".tmp-")).forEach(p -> {
+                try {
+                    Files.deleteIfExists(p);
+                } catch (IOException e) {
+                    LOGGER.log(System.Logger.Level.WARNING,
+                            "Folesium: failed to delete stale page staging file {0}: {1}", p, e.toString());
                 }
             });
         } catch (IOException e) {

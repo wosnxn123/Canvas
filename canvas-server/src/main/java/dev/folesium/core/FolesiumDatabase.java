@@ -381,23 +381,23 @@ public final class FolesiumDatabase implements AutoCloseable {
         }
 
         if (comp != requested.compression()) {
-            // Existing records keep the on-disk codec, so it must stay decodable after the
-            // switch: e.g. switching a ZSTD_DICT store away in an environment without the
-            // zstd-jni dictionary API would make every old codec-3 record unreadable. That
-            // refusal is skipped when the on-disk codec is itself unusable here (e.g. the
-            // store records ZSTD_DICT but this environment lacks the zstd-jni dictionary
-            // API): the old records are already unreadable - that is the degraded-environment
-            // reality - so switching to the requested (usable, pre-checked) codec only
-            // improves the store, and refusing would lock a writable open out of a store
-            // whose records it cannot decode anyway.
+            // Existing records keep the on-disk codec, so the switch itself needs no
+            // migration and is always safe to allow. When the on-disk codec is usable
+            // here (e.g. switching a ZSTD_DICT store away on a server that has the
+            // zstd-jni dictionary API) the old records stay decodable. When it is not
+            // (e.g. the store records ZSTD_DICT but this environment lacks the zstd-jni
+            // dictionary API), the old records are already unreadable - that is the
+            // degraded-environment reality - so switching to the requested (usable,
+            // pre-checked) codec only improves the store, and refusing would lock a
+            // writable open out of a store whose records it cannot decode anyway. The
+            // only action, then, is a warning naming the disk codec this environment
+            // cannot satisfy.
             String diskReason = compressionUnusableReason(comp);
             if (diskReason != null) {
                 LOGGER.log(System.Logger.Level.WARNING,
                         "Folesium: {0} records {1} compression, but {2}; those records are already"
                                 + " undecodable here, allowing the switch to {3} anyway",
                         dir, comp, diskReason, requested.compression());
-            } else {
-                requireCompressionUsable(comp);
             }
             LOGGER.log(System.Logger.Level.INFO,
                     "Folesium: {0} switches compression {1} -> {2}; existing records keep their own codec",
@@ -505,6 +505,36 @@ public final class FolesiumDatabase implements AutoCloseable {
         }
         p.setProperty("store.compression", compression.name());
         writeMetadataAtomically(meta, p);
+    }
+
+    /**
+     * The codec currently recorded in this store's metadata, or {@code null} when the
+     * metadata file does not exist or records no codec. Compared against the requested
+     * codec in {@link #applyRuntimeConfig}'s persist gate to keep the persist idempotent
+     * (skip the fsync-rewrite when the disk already records the same value); the metadata
+     * is written at open, so {@code null} is a corrupt/foreign-directory case, not a
+     * normal state.
+     */
+    private FolesiumConfig.Compression diskCompression() {
+        Path meta = dir.resolve(METADATA_FILE);
+        if (!Files.isRegularFile(meta)) {
+            return null;
+        }
+        Properties p = new Properties();
+        try (var reader = Files.newBufferedReader(meta, StandardCharsets.UTF_8)) {
+            p.load(reader);
+        } catch (IOException e) {
+            throw new FolesiumException("Cannot read " + meta, e);
+        }
+        String raw = p.getProperty("store.compression");
+        if (raw == null) {
+            return null;
+        }
+        try {
+            return FolesiumConfig.Compression.valueOf(raw.trim().toUpperCase(java.util.Locale.ROOT));
+        } catch (RuntimeException e) {
+            throw new FolesiumException("Unknown store.compression '" + raw + "' in " + meta, e);
+        }
     }
 
     public Path directory() {
@@ -670,25 +700,28 @@ public final class FolesiumDatabase implements AutoCloseable {
             // Persist gate: the on-disk codec is the persistence of the operator's intent,
             // so a reload records a codec only when it actually made a codec decision:
             // this reload changed the codec (`next.compression()` differs from the reload
-            // baseline - i.e. `changes` contains a compression entry) and the requested
-            // codec is usable in this environment. A degradation is a session-only
-            // accommodation and is never persisted, and an unrelated reload (e.g. a
-            // durability tweak) must not rewrite an intent recorded by an earlier reload -
-            // the previous gate compared the requested codec against the on-disk codec on
-            // every reload, so any divergence between the attribute and the disk intent
-            // (which the next open corrects) would be clobbered by a reload that never
-            // touched compression. When a codec is recorded it is the pre-degradation
-            // `requestedCodec` (never the fallback), so the metadata carries the operator's
-            // intent and the next open re-evaluates - exactly what the degradation note
-            // promises. An operator who explicitly switches to the codec a previous reload
-            // degraded to (attribute zstd == this session's ZSTD) produces no compression
-            // change and is therefore not persisted either: acceptable - the next open's
-            // reconcileMetadata corrects the disk codec from the attribute (the degraded
-            // value was never recorded, so the disk still carries the pre-degradation
-            // intent, and the attribute now agrees with the session fallback).
+            // baseline - i.e. `changes` contains a compression entry), the requested
+            // codec is usable in this environment, and the disk does not already record it
+            // (`requestedCodec != diskCompression()` keeps the persist idempotent: in a
+            // degraded session - the disk already carries the intent an earlier reload
+            // persisted, while the session runs the fallback - an unrelated later reload
+            // would otherwise fsync-rewrite byte-identical metadata on every poll). A
+            // degradation is a session-only accommodation and is never persisted, and an
+            // unrelated reload (e.g. a durability tweak) must not rewrite an intent
+            // recorded by an earlier reload. When a codec is recorded it is the
+            // pre-degradation `requestedCodec` (never the fallback), so the metadata
+            // carries the operator's intent and the next open re-evaluates - exactly what
+            // the degradation note promises. An operator who explicitly switches to the
+            // codec a previous reload degraded to (attribute zstd == this session's ZSTD)
+            // produces no compression change and is therefore not persisted either:
+            // acceptable - the next open's reconcileMetadata corrects the disk codec from
+            // the attribute (the degraded value was never recorded, so the disk still
+            // carries the pre-degradation intent, and the attribute now agrees with the
+            // session fallback).
             boolean persistedCodec = false;
             if (next.compression() != requestedBaseline.compression()
-                    && compressionUnusableReason(requestedCodec) == null) {
+                    && compressionUnusableReason(requestedCodec) == null
+                    && requestedCodec != diskCompression()) {
                 persistCompression(requestedCodec);
                 persistedCodec = true;
             }
@@ -846,6 +879,14 @@ public final class FolesiumDatabase implements AutoCloseable {
         }
         long ioLimit = config.compactIoLimit();
         long bytesSinceSleep = 0;
+        // Whether THIS caller is the group-commit thread. The retirement check after a
+        // rate-limit sleep below only applies to the flusher: a retired/superseded flusher
+        // must stop compacting, but a non-flusher caller (the server save thread via
+        // {@link FolesiumRegistry#flushAll()}, which also drives
+        // {@link #compactIfNeededThrottled()}) legitimately runs this pass on its own
+        // thread, where comparing against the flusher field would abort the pass after
+        // every rate-limit sleep.
+        boolean callerIsFlusher = Thread.currentThread() == flusher;
         for (ShardFile s : candidates) {
             s.compact();
             // compactIoLimit: cap compaction I/O near `limit` bytes/second. Simple
@@ -858,13 +899,16 @@ public final class FolesiumDatabase implements AutoCloseable {
                 if (sleepMillis > 0) {
                     sleepQuietly(sleepMillis);
                     // Retirement check after the rate-limit sleep: a store that was closed
-                    // while the pass slept (close() is tearing shards down) or whose
-                    // group-commit thread was retired/replaced in the meantime (durability
-                    // switched away from BATCH, or a new flusher owns the loop now) must
-                    // not keep compacting. Abort the pass - do not clear the interrupt
-                    // again (sleepQuietly already did) and do not continue with the next
-                    // shard, whose compact() may hit channels close() is closing.
-                    if (closed.get() || flusher != Thread.currentThread()) {
+                    // while the pass slept (close() is tearing shards down) must not keep
+                    // compacting, and a group-commit thread that was retired/replaced in
+                    // the meantime (durability switched away from BATCH, or a new flusher
+                    // owns the loop now) must stop too - but only when the caller IS the
+                    // flusher: `flusher != Thread.currentThread()` is always true for a
+                    // non-flusher caller, so the identity comparison is skipped for them.
+                    // Abort the pass - do not clear the interrupt again (sleepQuietly
+                    // already did) and do not continue with the next shard, whose
+                    // compact() may hit channels close() is closing.
+                    if (closed.get() || (callerIsFlusher && flusher != Thread.currentThread())) {
                         break;
                     }
                     bytesSinceSleep = 0;

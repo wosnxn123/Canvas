@@ -260,7 +260,17 @@ public final class DictionaryStore {
         if (Files.exists(dictFile)) {
             return null;
         }
-        return train(dictFile, samples);
+        try {
+            return train(dictFile, samples);
+        } catch (FolesiumException e) {
+            // A dictionary appeared in the window between the exists() check above and the
+            // train() move: that is the documented 'existing dictionary is not an error'
+            // case, so report it as such instead of surfacing a spurious refusal.
+            if (Files.exists(dictFile)) {
+                return null;
+            }
+            throw e;
+        }
     }
 
     /**

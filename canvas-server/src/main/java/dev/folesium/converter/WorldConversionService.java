@@ -246,11 +246,11 @@ public final class WorldConversionService {
             System.out.println("    " + p);
         }
         if (backupOnConvert) {
-            System.out.println("Folesium: replaced vanilla trees were kept too, as .folesium-backup-* siblings of the");
-            System.out.println("Folesium: restored directories (e.g. <dir>.folesium-backup-<id>/); backup trees from");
-            System.out.println("Folesium: earlier conversions are pruned, so backups do not accumulate across runs.");
-            System.out.println("Folesium: delete them manually once the restored world is verified - and always BEFORE");
-            System.out.println("Folesium: converting back to Folesium if you have played on Anvil in the meantime.");
+            System.out.println("Folesium: where the restored targets already existed, the replaced vanilla trees were");
+            System.out.println("Folesium: kept as .folesium-backup-* siblings (e.g. <dir>.folesium-backup-<id>/); backup");
+            System.out.println("Folesium: trees from earlier conversions are pruned, so backups do not accumulate.");
+            System.out.println("Folesium: delete those backup trees manually once the restored world is verified - and");
+            System.out.println("Folesium: always BEFORE converting back to Folesium if you played on Anvil meanwhile.");
         } else {
             System.out.println("Folesium: targets were overwritten in place (backupOnConvert=false), so no .folesium-backup-*");
             System.out.println("Folesium: trees exist; the stores above are the only redundant data left on disk.");

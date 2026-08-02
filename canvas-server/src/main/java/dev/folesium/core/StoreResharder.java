@@ -232,6 +232,13 @@ final class StoreResharder {
                 LOGGER.log(System.Logger.Level.INFO,
                         "Folesium: removing the backup of a completed reshard of {0}", dir);
                 deleteRecursively(backup);
+                // This branch performs no other fsync fallback (reconcileStaleMetadata
+                // below only rewrites the metadata when it is stale), so persist the
+                // backup-tree deletion explicitly: the unlink of the backup directory
+                // itself lives in the store directory's entry, and without an fsync a
+                // power cut could resurrect the MOVED marker and the swapped-out old
+                // shards, which recovery would then mistake for a layout in flight.
+                fsyncDirectory(dir);
             } else {
                 LOGGER.log(System.Logger.Level.WARNING,
                         "Folesium: keeping the backup {0} of {1}: the shard files hold {2} "
@@ -1023,9 +1030,12 @@ final class StoreResharder {
             // are unlinked, not overwritten, so without it a crash could resurrect stale
             // pages pointing at the wrong records in the new layout. The idx root covers
             // the unlinks of pruned subdirectories (and of files directly under it); each
-            // surviving subdirectory covers the deletions inside it. fsyncDirectory
-            // swallows failures - Windows cannot open directories for reading - matching
-            // its use everywhere else.
+            // surviving subdirectory covers the deletions inside it. When the whole tree
+            // was pruned (no dict.bin survived) the idx root itself is gone, so its unlink
+            // must be covered by fsyncing the store directory instead - fsyncing idx is
+            // impossible (it no longer exists) and would not cover its removal anyway.
+            // fsyncDirectory swallows failures - Windows cannot open directories for
+            // reading - matching its use everywhere else.
             if (Files.isDirectory(idx)) {
                 fsyncDirectory(idx);
                 for (Path d : survivingDirs) {
@@ -1033,6 +1043,8 @@ final class StoreResharder {
                         fsyncDirectory(d);
                     }
                 }
+            } else {
+                fsyncDirectory(dir);
             }
         } catch (IOException e) {
             throw new FolesiumException("Cannot remove the page index of " + dir, e);

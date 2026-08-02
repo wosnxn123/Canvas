@@ -420,6 +420,22 @@ public final class PlayerDataConverter {
      * would hide the rolled-back players from a pre-26 server.</p>
      */
     public static Stats folesiumToAnvil(Path storeDir, Path worldRoot, FolesiumConfig config) throws IOException {
+        return folesiumToAnvil(storeDir, worldRoot, config, null);
+    }
+
+    /**
+     * Same as {@link #folesiumToAnvil(Path, Path, FolesiumConfig)}, but reports each
+     * {@code .folesium-backup-*} sibling actually created by a backup-mode swap through
+     * {@code backupSink}, once the export has succeeded. The sink is invoked only when a
+     * pre-existing vanilla directory was moved aside (an empty store replaces nothing),
+     * so callers can tell the operator exactly which vanilla trees were kept.
+     *
+     * @param backupSink receives the {@code .folesium-backup-*} sibling of each replaced
+     *                   vanilla directory after a successful backup-mode swap;
+     *                   {@code null} to ignore
+     */
+    public static Stats folesiumToAnvil(Path storeDir, Path worldRoot, FolesiumConfig config,
+                                        Consumer<Path> backupSink) throws IOException {
         long start = System.nanoTime();
         long entries = 0;
         long bytes = 0;
@@ -451,7 +467,7 @@ public final class PlayerDataConverter {
                     continue;
                 }
                 long[] inc = config.backupOnConvert()
-                        ? convertMappingViaStaging(out, ks, m)
+                        ? convertMappingViaStaging(out, ks, m, backupSink)
                         : convertMappingInPlace(out, ks, m);
                 entries += inc[0];
                 bytes += inc[1];
@@ -461,12 +477,16 @@ public final class PlayerDataConverter {
     }
 
     /** Backup-mode path: clean staging tree + atomic swap, previous dir kept as backup. */
-    private static long[] convertMappingViaStaging(Path out, Keyspace ks, Mapping m) throws IOException {
+    private static long[] convertMappingViaStaging(Path out, Keyspace ks, Mapping m, Consumer<Path> backupSink)
+            throws IOException {
         Path staging = siblingPath(out, ".folesium-staging-");
         Files.createDirectories(staging);
         try {
             long[] inc = writeMapping(staging, ks, m);
-            replaceDirectory(out, staging);
+            Path backup = replaceDirectory(out, staging);
+            if (backup != null && backupSink != null) {
+                backupSink.accept(backup);
+            }
             return inc;
         } catch (IOException | RuntimeException ex) {
             deleteTreeQuietly(staging);
@@ -484,23 +504,26 @@ public final class PlayerDataConverter {
         Files.createDirectories(out);
         long[] inc = writeMapping(out, ks, m);
         prunePlayerFilesMissingFromStore(out, ks, m.extension());
-        cleanStagingAndBackupSiblings(out);
+        cleanStagingSiblings(out);
         return inc;
     }
 
     /**
-     * Best-effort removal of {@code .folesium-staging-*} / {@code .folesium-backup-*}
-     * siblings of {@code out} left behind by an earlier backup-mode run or an interrupted
-     * conversion. Only directories whose name starts with {@code <out-name>.folesium-} are
-     * touched, so unrelated data is never deleted; failures are ignored (the leftovers are
-     * inert and the backup-mode paths prune their own trees).
+     * Best-effort removal of {@code .folesium-staging-*} siblings of {@code out} left
+     * behind by an interrupted backup-mode conversion (a crash between creating the
+     * staging tree and swapping it in). Only directories whose name starts with
+     * {@code <out-name>.folesium-staging-} are touched, so unrelated data is never
+     * deleted; {@code .folesium-backup-*} trees are deliberately left alone (their
+     * lifecycle belongs to the backup-mode {@link #pruneOldBackups}, and a default-mode
+     * run must not break the backup chain), and failures are ignored (the leftovers are
+     * inert).
      */
-    private static void cleanStagingAndBackupSiblings(Path out) {
+    private static void cleanStagingSiblings(Path out) {
         Path parent = out.getParent();
         if (parent == null) {
             return;
         }
-        String prefix = out.getFileName().toString() + ".folesium-";
+        String prefix = out.getFileName().toString() + ".folesium-staging-";
         try (Stream<Path> files = Files.list(parent)) {
             files.filter(Files::isDirectory)
                     .filter(p -> p.getFileName().toString().startsWith(prefix))
@@ -605,7 +628,13 @@ public final class PlayerDataConverter {
         }
     }
 
-    private static void replaceDirectory(Path destination, Path staging) throws IOException {
+    /**
+     * Replaces a destination directory while retaining the previous tree as a backup.
+     *
+     * @return the {@code .folesium-backup-*} sibling the previous destination was moved
+     *         to, or {@code null} when the destination did not exist (nothing replaced)
+     */
+    private static Path replaceDirectory(Path destination, Path staging) throws IOException {
         Path parent = destination.toAbsolutePath().normalize().getParent();
         if (parent == null) {
             parent = destination.toAbsolutePath().normalize().getRoot();
@@ -637,6 +666,7 @@ public final class PlayerDataConverter {
             }
             throw failure;
         }
+        return backedUp ? backup : null;
     }
 
     /**

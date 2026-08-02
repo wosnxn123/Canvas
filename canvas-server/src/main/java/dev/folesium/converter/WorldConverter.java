@@ -51,6 +51,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * Converts a Minecraft dimension between Anvil directories
@@ -381,6 +382,28 @@ public final class WorldConverter {
         // every existing region file in the target tree that the store no longer contains,
         // including regions the store has dropped entirely (a shrunken or emptied store).
         pruneSlotsMissingFromStore(out, byRegion);
+        cleanStagingSiblings(out);
+    }
+
+    /**
+     * Best-effort removal of {@code .folesium-staging-*} siblings of {@code out} left
+     * behind by an interrupted backup-mode conversion (crash between staging and swap).
+     * {@code .folesium-backup-*} trees are left alone (backup-mode lifecycle); failures
+     * are ignored (the leftovers are inert).
+     */
+    private static void cleanStagingSiblings(Path out) {
+        Path parent = out.getParent();
+        if (parent == null) {
+            return;
+        }
+        String prefix = out.getFileName().toString() + ".folesium-staging-";
+        try (Stream<Path> files = Files.list(parent)) {
+            files.filter(Files::isDirectory)
+                    .filter(p -> p.getFileName().toString().startsWith(prefix))
+                    .forEach(WorldConverter::deleteTreeQuietly);
+        } catch (IOException ignored) {
+            // best-effort only
+        }
     }
 
     /**
