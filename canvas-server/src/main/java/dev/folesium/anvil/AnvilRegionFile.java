@@ -608,38 +608,30 @@ public final class AnvilRegionFile implements Closeable {
 
     /**
      * Decompresses an LZ4 chunk with the same output bound as {@link #readBounded}.
-     * Mirrors {@link Lz4Native}'s reflection bridge (lz4-java is an optional runtime
-     * dependency) but reads through a {@link LimitedInputStream}, because
-     * {@link Lz4Native#decompress} has no size bound and would materialize the whole
-     * expansion before returning. The error behavior for a missing lz4 library matches
-     * {@link Lz4Native} (an {@link UnsupportedOperationException}); corrupt data, which
-     * {@code Lz4Native} reports as an unchecked {@code LZ4Exception}, is wrapped in an
-     * {@link IOException} here so that every decode failure of {@link #readChunk} is a
-     * checked one.
+     * Reads through {@link Lz4Native#newInputStream} -- which reuses the constructor
+     * cached in {@code Lz4Native}'s static bridge (lz4-java is an optional runtime
+     * dependency), so no per-chunk reflection lookup happens -- and a
+     * {@link LimitedInputStream}, because {@link Lz4Native#decompress} has no size
+     * bound and would materialize the whole expansion before returning. The error
+     * behavior for a missing lz4 library matches {@link Lz4Native} (an
+     * {@link UnsupportedOperationException}); corrupt data, which {@code Lz4Native}
+     * reports as an unchecked {@code LZ4Exception}, is wrapped in an {@link IOException}
+     * here so that every decode failure of {@link #readChunk} is a checked one -- the
+     * same checked-{@code Exception} -> {@link IOException} wrapping
+     * {@link Lz4Native#decompress} applies.
      */
     private static byte[] decompressLz4Bounded(byte[] data) throws IOException {
-        try {
-            Class<?> cls = Class.forName("net.jpountz.lz4.LZ4BlockInputStream");
-            InputStream in = (InputStream) cls.getConstructor(InputStream.class)
-                    .newInstance(new ByteArrayInputStream(data));
+        if (!Lz4Native.available()) {
+            throw new UnsupportedOperationException(
+                    "Cannot read LZ4-compressed Anvil chunk: lz4-java is not on the classpath. "
+                            + "Run the conversion on a Folia/Canvas server, or add net.jpountz.lz4:lz4.");
+        }
+        try (InputStream in = Lz4Native.newInputStream(data)) {
             return readBounded(in, MAX_CHUNK_PAYLOAD_BYTES);
-        } catch (IOException e) {
-            throw e; // includes the bounded-read limit violation
-        } catch (java.lang.reflect.InvocationTargetException e) {
-            // The reflective constructor wrapped a failure from the lz4 layer itself:
-            // surface it as an IOException so readChunk's decode-failure contract stays
-            // uniform (callers of readChunk expect IOException, never an unchecked leak).
-            throw new IOException("LZ4 decompression failed", e.getCause());
         } catch (RuntimeException e) {
             // LZ4Exception on corrupt data: Lz4Native throws it unchecked, but this path
             // feeds readChunk, which promises IOException for chunk read/decode failures.
             throw new IOException("LZ4 decompression failed", e);
-        } catch (ClassNotFoundException e) {
-            throw new UnsupportedOperationException(
-                    "Cannot read LZ4-compressed Anvil chunk: lz4-java is not on the classpath. "
-                            + "Run the conversion on a Folia/Canvas server, or add net.jpountz.lz4:lz4.");
-        } catch (Exception e) {
-            throw new IllegalStateException("LZ4 decompression failed", e);
         }
     }
 

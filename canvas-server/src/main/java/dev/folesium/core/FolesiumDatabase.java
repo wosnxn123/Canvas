@@ -988,13 +988,25 @@ public final class FolesiumDatabase implements AutoCloseable {
         if (now - previous < COMPACT_CHECK_INTERVAL_NANOS || !lastCompactCheck.compareAndSet(previous, now)) {
             return false;
         }
-        if (!compactIfNeeded()) {
-            // The pass aborted before rewriting every candidate - the retirement/closed
-            // checkpoint fired, or the store was closed the moment the pass started. The
-            // five-minute throttle must not be spent on a pass that never ran: reset the
-            // check slot so the next driver (a fresh flusher, the next flushAll) retries
-            // immediately instead of waiting out the interval.
-            lastCompactCheck.set(0);
+        try {
+            if (!compactIfNeeded()) {
+                // The pass aborted before rewriting every candidate - the retirement/closed
+                // checkpoint fired, or the store was closed the moment the pass started. The
+                // five-minute throttle must not be spent on a pass that never ran: reset the
+                // check slot so the next driver (a fresh flusher, the next flushAll) retries
+                // immediately instead of waiting out the interval. The reset is a CAS against
+                // this call's own stamp: a concurrent driver that already re-stamped the slot
+                // (only possible if the pass outlived the whole interval) must not be clobbered
+                // back to 0, or it would lose its own throttle slot.
+                lastCompactCheck.compareAndSet(now, 0);
+            }
+        } catch (RuntimeException | Error e) {
+            // A pass that threw did not run to completion either - symmetric with the abort
+            // path above: reset the stamp (CAS) so the next driver retries immediately instead
+            // of waiting out the interval, then propagate the failure to the caller (the
+            // group-commit loop or {@link FolesiumRegistry#flushAll()}).
+            lastCompactCheck.compareAndSet(now, 0);
+            throw e;
         }
         return true;
     }

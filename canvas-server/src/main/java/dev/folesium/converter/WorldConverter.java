@@ -336,13 +336,17 @@ public final class WorldConverter {
     /**
      * Same as {@link #folesiumToAnvil(Path, Path, FolesiumConfig, FolesiumDatabase.StoreRole)},
      * but reports each {@code .folesium-backup-*} sibling actually created by a backup-mode
-     * swap through {@code backupSink}, once the export has succeeded. The sink is invoked only
-     * when a pre-existing vanilla directory was moved aside (an empty store replaces nothing),
+     * swap through {@code backupSink}. The sink fires <em>eagerly</em>, right after each
+     * keyspace's swap succeeds -- not only once the whole export has succeeded: keyspaces
+     * are swapped one at a time, so when a later keyspace fails the dimension is left in a
+     * mixed exported/untouched state and the backups already swapped (and already reported)
+     * are exactly the trees the operator must restore. The sink is invoked only when a
+     * pre-existing vanilla directory was moved aside (an empty store replaces nothing),
      * so callers can tell the operator exactly which vanilla trees were kept.
      *
      * @param role       the store role to open {@code folesiumDir} as
      * @param backupSink receives the {@code .folesium-backup-*} sibling of each replaced
-     *                   vanilla directory after a successful backup-mode swap;
+     *                   vanilla directory right after its swap succeeds;
      *                   {@code null} to ignore
      * @throws FolesiumException if {@code role} is not
      *         {@link FolesiumDatabase.StoreRole#DIMENSION}: a PLAYERS store holds no chunk
@@ -362,7 +366,15 @@ public final class WorldConverter {
             return new Stats(0, 0, (System.nanoTime() - start) / 1_000_000);
         }
 
-        // Export only: read the store's existing layout without rewriting it first.
+        // Export only: read the store's existing layout without rewriting it first. Backup
+        // mode swaps each keyspace independently, so a failure mid-export leaves the
+        // dimension in a mixed state; collect the .folesium-backup-* trees created by the
+        // swaps that succeeded so the failure path can point at them explicitly.
+        List<Path> swapped = new ArrayList<>();
+        Consumer<Path> sink = swapped::add;
+        if (backupSink != null) {
+            sink = sink.andThen(backupSink);
+        }
         try (FolesiumDatabase db = FolesiumDatabase.open(folesiumDir,
                 FolesiumConfig.defaults().withDurability(FolesiumConfig.DurabilityMode.EXPLICIT),
                 role, false)) {
@@ -374,11 +386,29 @@ public final class WorldConverter {
                     continue;
                 }
                 if (config.backupOnConvert()) {
-                    convertKeyspaceViaStaging(out, ks, chunkCount, byteCount, backupSink);
+                    convertKeyspaceViaStaging(out, ks, chunkCount, byteCount, sink);
                 } else {
                     convertKeyspaceInPlace(out, ks, chunkCount, byteCount);
                 }
             }
+        } catch (RuntimeException | IOException ex) {
+            if (config.backupOnConvert() && !swapped.isEmpty()) {
+                // Keyspaces are swapped one at a time (a backup-mode dimension export is
+                // not atomic): the ones swapped before the failure hold the exported data,
+                // the rest are untouched, and the replaced vanilla trees survive only under
+                // the .folesium-backup-* names. Say where they are -- the driver's
+                // finally-report lists them too, but without this warning the operator
+                // would not know the export was left incomplete.
+                System.err.println("Folesium: WARNING: dimension " + dimensionDir.toAbsolutePath().normalize()
+                        + " left in mixed exported/untouched state: the export failed after some keyspaces");
+                System.err.println("Folesium: were already swapped (keyspaces swap independently, so a dimension export");
+                System.err.println("Folesium: is not atomic). The replaced vanilla trees are preserved as backups at:");
+                for (Path backup : swapped) {
+                    System.err.println("    " + backup.toAbsolutePath().normalize());
+                }
+                System.err.println("Folesium: restore those backups to undo the already-swapped keyspaces before re-running.");
+            }
+            throw ex;
         }
         return new Stats(chunkCount.get(), byteCount.get(), (System.nanoTime() - start) / 1_000_000);
     }

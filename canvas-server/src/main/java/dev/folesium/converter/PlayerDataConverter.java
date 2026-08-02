@@ -124,19 +124,36 @@ public final class PlayerDataConverter {
      * location is the layout authority (the server anchors its store at exactly this
      * spot), so such a world is a genuine 26.x+Folesium world and is never downgraded,
      * even when its 26.x per-player directories happen to be empty.</p>
+     *
+     * <p>The downgrade itself is reported <em>once per conversion run</em> by
+     * {@link WorldConversionService#convertWorld} (which checks {@link #isLegacyDowngrade});
+     * this method only makes the decision, so direct callers stay silent.</p>
      */
     public static Path playerRootFor(Path worldRoot) {
         Path players = playersContainer(worldRoot);
-        if (players != null && !hasModernStore(players)
-                && modernTreeIsEmpty(players) && legacyTreeHasData(worldRoot)) {
-            // Operator-facing: the decision changes which directories are read and where the
-            // store lives, so it must be visible even where the JUL logger is not wired up.
-            System.err.println("Folesium: " + worldRoot + " has a players/ directory with no player files,"
-                    + " while the legacy root-level playerdata/advancements/stats directories hold data;"
-                    + " using the legacy layout for this world");
+        if (legacyDowngrade(players, worldRoot)) {
             return worldRoot;
         }
         return players != null ? players : worldRoot;
+    }
+
+    /**
+     * True when {@link #playerRootFor} downgrades {@code worldRoot} to the legacy
+     * root-level layout (an empty 26.x {@code players/} shell while the pre-26
+     * root-level directories hold data). The world conversion driver calls this once
+     * per run to report the decision, instead of letting every {@link #playerRootFor}
+     * call inside the conversion print it (that fired 3-4 times per run: the
+     * vanilla-player probe, the import/export itself, and the root-dimension collision
+     * check).
+     */
+    public static boolean isLegacyDowngrade(Path worldRoot) {
+        return legacyDowngrade(playersContainer(worldRoot), worldRoot);
+    }
+
+    /** True when {@code players} is an empty 26.x shell while the legacy root tree holds data. */
+    private static boolean legacyDowngrade(Path players, Path worldRoot) {
+        return players != null && !hasModernStore(players)
+                && modernTreeIsEmpty(players) && legacyTreeHasData(worldRoot);
     }
 
     /**
@@ -426,12 +443,16 @@ public final class PlayerDataConverter {
     /**
      * Same as {@link #folesiumToAnvil(Path, Path, FolesiumConfig)}, but reports each
      * {@code .folesium-backup-*} sibling actually created by a backup-mode swap through
-     * {@code backupSink}, once the export has succeeded. The sink is invoked only when a
+     * {@code backupSink}. The sink fires <em>eagerly</em>, right after each mapping's swap
+     * succeeds -- not only once the whole export has succeeded: the player directories are
+     * swapped one at a time, so when a later mapping fails the world is left in a mixed
+     * exported/untouched state and the backups already swapped (and already reported) are
+     * exactly the trees the operator must restore. The sink is invoked only when a
      * pre-existing vanilla directory was moved aside (an empty store replaces nothing),
      * so callers can tell the operator exactly which vanilla trees were kept.
      *
      * @param backupSink receives the {@code .folesium-backup-*} sibling of each replaced
-     *                   vanilla directory after a successful backup-mode swap;
+     *                   vanilla directory right after its swap succeeds;
      *                   {@code null} to ignore
      */
     public static Stats folesiumToAnvil(Path storeDir, Path worldRoot, FolesiumConfig config,

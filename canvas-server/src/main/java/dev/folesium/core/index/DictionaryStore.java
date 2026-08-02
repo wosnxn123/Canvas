@@ -156,11 +156,24 @@ public final class DictionaryStore {
                             + " backup, or delete it and re-run the conversion; codec-3 records in this"
                             + " keyspace are not decodable without the dictionary.");
         }
+        // Second size check immediately before the read: narrows the TOCTOU window in which a
+        // concurrently growing file could slip past the pre-check and be read (and allocated)
+        // whole - the second guard of the RegionPage.read triple (pre-check, re-check,
+        // post-check). The post-read length check below still guards the remaining gap.
+        long size2 = Files.size(dictFile);
+        if (size2 > MAX_DICT_BYTES) {
+            throw new FolesiumException(
+                    "Dictionary file " + dictFile + " is corrupt: " + size2
+                            + " bytes, but a valid zstd dictionary is a small trained blob (well under 1 MiB;"
+                            + " trained ones are exactly " + DICT_SIZE + " bytes). Restore dict.bin from a"
+                            + " backup, or delete it and re-run the conversion; codec-3 records in this"
+                            + " keyspace are not decodable without the dictionary.");
+        }
         byte[] bytes = Files.readAllBytes(dictFile);
-        // Post-read size re-check: the file may have grown between the pre-check above and
+        // Post-read size re-check: the file may have grown between the re-check above and
         // the read (TOCTOU), so the bytes actually held must satisfy the same bound - the
         // third guard of the RegionPage.read triple (pre-check, re-check, post-check). A
-        // huge file that grew past the pre-check would otherwise be read into memory whole.
+        // huge file that grew past the re-check would otherwise be read into memory whole.
         if (bytes.length > MAX_DICT_BYTES) {
             throw new FolesiumException(
                     "Dictionary file " + dictFile + " is corrupt: " + bytes.length

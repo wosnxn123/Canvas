@@ -32,10 +32,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Properties;
-import java.util.Set;
 import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -723,7 +721,12 @@ final class StoreResharder {
      * invocation had moved some old files back, so their names were no longer in the
      * backup to be captured - which made a re-entry misidentify already-restored old
      * files as leftovers and delete the only surviving copies of their records. The
-     * header-derived count is stable across re-entries.</p>
+     * header-derived count is stable across re-entries, and so is the orphan-hint
+     * cleanup that follows: a hint ({@code .fidx}) is dropped only when its shard index
+     * is beyond the old count <em>and</em> no shard file of that name exists in
+     * {@code dir} - a hint below the old count, or one whose old shard file is present
+     * (restored by this or a previous invocation), is kept, so a re-entry never deletes
+     * a hint that was already moved back.</p>
      *
      * <p>Idempotent across crashes: a previous invocation may already have moved every
      * old shard back into {@code dir} and then crashed before the cleanup. The backup
@@ -741,17 +744,6 @@ final class StoreResharder {
      */
     private static void restoreOldLayout(Path dir, Path backup, Path staging) throws IOException {
         List<Path> backupShards = Files.isDirectory(backup) ? listShardFiles(backup) : List.of();
-        // The old layout's hint names, captured BEFORE step 1 moves the backup files back:
-        // a hint in dir that the old set did not hold belongs to a new-layout shard file
-        // and must be dropped with it (step 2), or readers would pair it with the restored
-        // old shard and follow record offsets written against the new-layout file.
-        Set<String> oldHintNames = new HashSet<>();
-        for (Path p : backupShards) {
-            String n = p.getFileName().toString();
-            if (n.endsWith(".fidx")) {
-                oldHintNames.add(n);
-            }
-        }
         // The old layout's shard count, derived from file headers BEFORE the move-back
         // invalidates the backup paths. -1 when no readable header exists anywhere.
         int oldCount = oldLayoutShardCount(dir, backupShards);
@@ -782,15 +774,23 @@ final class StoreResharder {
                     Files.deleteIfExists(dir.resolve(name + ".fidx"));
                 }
             }
-            // Orphaned new-layout hints: any .fidx in dir whose name the old set did not
-            // back up belongs to a new-layout shard file (the old shard at that index had
-            // no hint of its own, so step 1 had nothing to overwrite the leftover with).
-            // Mirroring the .flog pairing rule - hints of old files are kept, hints
-            // without a corresponding old .flog are removed - drop them so they cannot
-            // misdirect readers against the restored old shard at the same index.
+            // Orphaned new-layout hints: a hint whose shard file was removed above (its
+            // index is beyond the old count and no shard file of that name exists in dir)
+            // must not survive to misdirect readers against the restored old shard at the
+            // same index. The criterion reads only the stable on-disk state - a hint
+            // below the old count is kept, and a hint whose old shard file is present in
+            // dir was moved back by this or a previous invocation (the pair must stay
+            // together) - never this invocation's backup snapshot, so a re-entry after a
+            // mid-restore crash cannot delete hints a previous invocation already restored.
             for (Path p : listShardFiles(dir)) {
                 String n = p.getFileName().toString();
-                if (n.endsWith(".fidx") && !oldHintNames.contains(n)) {
+                if (!n.endsWith(".fidx")) {
+                    continue;
+                }
+                String flogName = n.substring(0, n.length() - ".fidx".length());
+                Matcher m = SHARD_FILE.matcher(flogName);
+                if (m.matches() && Integer.parseInt(m.group(2)) >= oldCount
+                        && !Files.isRegularFile(dir.resolve(flogName))) {
                     Files.deleteIfExists(p);
                 }
             }

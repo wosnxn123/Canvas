@@ -51,7 +51,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <ol>
  *   <li>system properties {@code folesium.*}</li>
  *   <li>{@code folesium.properties} in the server working directory</li>
- *   <li>{@link FolesiumConfig#defaults()}</li>
+ *   <li>the machine-tuned {@link #autoTunedConfig()}</li>
  * </ol>
  */
 public final class FolesiumRegistry {
@@ -246,10 +246,10 @@ public final class FolesiumRegistry {
     private static void generateDefaultConfigFile(Path file) {
         String content = defaultConfigContent();
         try {
-            if (file.getParent() != null) {
-                Files.createDirectories(file.getParent());
-            }
-            Files.writeString(file, content, StandardCharsets.UTF_8);
+            // Write through a sibling temporary file and an atomic rename: a reader (the
+            // config watcher poll or another acquire) must never observe a truncated or
+            // half-written config, and a crash mid-write must not leave one behind.
+            FolesiumDatabase.writeAtomically(file, content);
             LOGGER.log(System.Logger.Level.INFO,
                     "Folesium: no {0} found; created auto-tuned default at {1} (enabled=false). Edit it to enable.",
                     CONFIG_FILE, file.toAbsolutePath());
@@ -1004,13 +1004,18 @@ public final class FolesiumRegistry {
     /**
      * Opens (or joins) the dimension store in {@code dir} and increments its reference count.
      *
-     * @return the store, or {@code null} when the config file exists but cannot be read - a
-     *         read failure degrades to disabled (Folesium is opt-in: a config read failure
-     *         never crashes the world load path) and is logged as a WARNING
+     * <p>An already-open store is always joined without consulting the configuration: a store
+     * binds its backend at open time, so a transiently unreadable config file (e.g. while
+     * the watcher or an editor rewrites it) never misreports an open store as disabled.
+     * Only a store that is not open yet reads the config file.</p>
+     *
+     * @return the store, or {@code null} when the store is not open yet and the config file
+     *         exists but cannot be read - a read failure degrades to disabled (Folesium is
+     *         opt-in: a config read failure never crashes the world load path) and is
+     *         logged as a WARNING
      */
     public static synchronized FolesiumDatabase acquire(Path dir) {
-        FolesiumConfig config = configuredOrDefault();
-        return config == null ? null : acquire(dir, config, FolesiumDatabase.StoreRole.DIMENSION);
+        return acquire(dir, null, FolesiumDatabase.StoreRole.DIMENSION);
     }
 
     public static synchronized FolesiumDatabase acquire(Path dir, FolesiumConfig config) {
@@ -1020,16 +1025,62 @@ public final class FolesiumRegistry {
     /**
      * Opens (or joins) the store in {@code dir} with the given role, using configured defaults.
      *
-     * @return the store, or {@code null} when the config file exists but cannot be read - a
-     *         read failure degrades to disabled (see {@link #acquire(Path)})
+     * <p>An already-open store is always joined without consulting the configuration (see
+     * {@link #acquire(Path)}).</p>
+     *
+     * @return the store, or {@code null} when the store is not open yet and the config file
+     *         exists but cannot be read - a read failure degrades to disabled (see
+     *         {@link #acquire(Path)})
      */
     public static synchronized FolesiumDatabase acquire(Path dir, FolesiumDatabase.StoreRole role) {
-        FolesiumConfig config = configuredOrDefault();
-        return config == null ? null : acquire(dir, config, role);
+        return acquire(dir, null, role);
     }
 
+    /**
+     * Opens (or joins) the store in {@code dir} with the given role.
+     *
+     * <p>An already-open store is joined before any config file access - the config argument
+     * is ignored on that path (a store binds its backend at open time), so a transiently
+     * unreadable config file never misreports an open store as disabled; the watcher restart
+     * is best-effort only. The configuration is consulted exclusively on the open path: the
+     * property-reading forms pass {@code null} and resolve it here, degrading to disabled
+     * ({@code null}) when the config file exists but cannot be read; the explicit-config
+     * forms pass a ready config, and only the watcher's {@code autoReload} read can still
+     * fail, which degrades to disabled the same way (opt-in: a config read failure never
+     * crashes the world load path).</p>
+     */
     public static synchronized FolesiumDatabase acquire(Path dir, FolesiumConfig config, FolesiumDatabase.StoreRole role) {
         ensureShutdownHook();
+        Path key = canonical(dir);
+        Entry entry = OPEN.get(key);
+        if (entry != null && !entry.db.isClosed()) {
+            // Join an already-open store before any config file access. The watcher restart
+            // must not fail the join either: a transient read failure here logs and joins
+            // anyway (the watcher retries on its own polling).
+            try {
+                ensureConfigWatcher();
+            } catch (UncheckedIOException e) {
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Folesium: cannot read {0} ({1}); the config watcher will not be"
+                                + " (re)started now",
+                        configFilePath().toAbsolutePath(), e.toString());
+            }
+            if (entry.db.role() != role) {
+                throw new FolesiumException("Folesium store " + key + " is already open as "
+                        + entry.db.role() + "; cannot also open it as " + role);
+            }
+            entry.refCount++;
+            return entry.db;
+        }
+        // The store is not open yet - the only path that consults the configuration. The
+        // property-reading acquire() forms pass null and resolve it here, degrading to
+        // disabled (null) when the config file exists but cannot be read.
+        if (config == null) {
+            config = configuredOrDefault();
+            if (config == null) {
+                return null;
+            }
+        }
         try {
             ensureConfigWatcher();
         } catch (UncheckedIOException e) {
@@ -1047,19 +1098,12 @@ public final class FolesiumRegistry {
                     configFilePath().toAbsolutePath(), e.toString());
             return null;
         }
-        Path key = canonical(dir);
-        Entry entry = OPEN.get(key);
-        if (entry == null || entry.db.isClosed()) {
-            entry = new Entry(FolesiumDatabase.open(key, config, role));
-            OPEN.put(key, entry);
-            LOGGER.log(System.Logger.Level.INFO,
-                    "Folesium: opened {0} store {1} (shards={2}, durability={3}, compression={4})",
-                    entry.db.role(), key, entry.db.config().shardCount(),
-                    entry.db.config().durability(), entry.db.config().compression());
-        } else if (entry.db.role() != role) {
-            throw new FolesiumException("Folesium store " + key + " is already open as "
-                    + entry.db.role() + "; cannot also open it as " + role);
-        }
+        entry = new Entry(FolesiumDatabase.open(key, config, role));
+        OPEN.put(key, entry);
+        LOGGER.log(System.Logger.Level.INFO,
+                "Folesium: opened {0} store {1} (shards={2}, durability={3}, compression={4})",
+                entry.db.role(), key, entry.db.config().shardCount(),
+                entry.db.config().durability(), entry.db.config().compression());
         entry.refCount++;
         return entry.db;
     }

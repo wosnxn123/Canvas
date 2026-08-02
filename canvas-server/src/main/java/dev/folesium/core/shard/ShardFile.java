@@ -122,6 +122,14 @@ public final class ShardFile implements AutoCloseable {
 
     private FileChannel channel;
     private Map<Bytes, Loc> index = new HashMap<>();
+    /**
+     * Whether {@link #index} was populated from the hint file (see {@link #tryLoadHint})
+     * rather than by a full log scan. A build-time truncation (torn tail) invalidates
+     * hint-loaded entries at or past the new EOF, so {@link #truncateAt} triggers a full
+     * rescan to rebuild the index and drop those ghost entries. Only meaningful during the
+     * constructor's recovery phase.
+     */
+    private boolean hintLoaded;
     private long writePos;
     private long deadBytes;
     private volatile boolean dirty;
@@ -629,6 +637,21 @@ public final class ShardFile implements AutoCloseable {
         channel.truncate(pos);
         channel.force(false);
         writePos = pos;
+        if (hintLoaded) {
+            // The index was loaded from the hint, which described the pre-truncation log:
+            // every entry at or past the truncation point is now a ghost pointing past EOF.
+            // A later write reuses those offsets, so reading such a key would silently return
+            // another record's bytes (or fail) instead of the key's real value. Rebuild the
+            // index from the surviving prefix with a full rescan - the prefix precedes the
+            // first invalid record, so this scan cannot truncate again (worst case it finds
+            // another torn record below pos and truncates further, which is equally correct).
+            // The stale hint self-invalidates on the next open via its logLength check (the
+            // file is shorter now), so it does not need deleting here.
+            hintLoaded = false;
+            index = new HashMap<>();
+            deadBytes = 0;
+            scanAndRecover();
+        }
     }
 
     // ------------------------------------------------------------------ hint
@@ -701,6 +724,7 @@ public final class ShardFile implements AutoCloseable {
             this.index = loaded;
             this.writePos = logLength;
             this.deadBytes = dead;
+            this.hintLoaded = true;
             return true;
         } catch (IOException | RuntimeException e) {
             LOGGER.log(System.Logger.Level.WARNING, "Folesium: ignoring bad hint file {0}: {1}", hintPath, e.toString());
@@ -844,7 +868,8 @@ public final class ShardFile implements AutoCloseable {
      * Guards the write path. A read-only shard must never be written: its channel is
      * opened READ-only, so an unguarded write would only fail deep inside
      * {@code writeFully} with a confusing {@code NonWritableChannelException} wrapped
-     * in "Write failed" (and put/putIfAbsent would have wasted a compression first).
+     * in "Write failed" (put/putIfAbsent already skipped the compression for a
+     * key the read-lock pre-check found, but a genuine append still hits this guard).
      * A shard whose channel was released by a failed compaction restore must fail
      * loudly too: appending through the orphaned inode the field used to point at
      * would be silent data loss (every record lands in a file the next open never
@@ -920,6 +945,12 @@ public final class ShardFile implements AutoCloseable {
      * {@code true} if the record was actually appended. Used by merge-mode conversion
      * so chunks already migrated into the store (e.g. by a running server) are not
      * overwritten by the Anvil source.
+     *
+     * <p>Checks the HashMap for the key (under the read lock) <em>before</em> compressing
+     * the value: the common no-op case - the key already exists - then returns without
+     * paying for a compression whose result would be discarded. After compressing, the
+     * key is checked again under the write lock, because another writer may have appended
+     * it between the pre-check and the lock acquisition.</p>
      */
     public boolean putIfAbsent(Bytes key, byte[] rawValue) {
         if (key.length() == 0 || key.length() > MAX_KEY_LEN) {
@@ -927,6 +958,19 @@ public final class ShardFile implements AutoCloseable {
         }
         if (rawValue.length > MAX_VALUE_LEN) {
             throw new IllegalArgumentException("Value too large: " + rawValue.length);
+        }
+        // Fast path: a no-op putIfAbsent appends nothing, so skip the value compression
+        // below when the key already exists (merge-mode conversion re-encounters migrated
+        // chunks constantly, making this the common case). The index is consulted under
+        // the read lock; the authoritative re-check happens under the write lock after
+        // the compression, so a race cannot slip a duplicate past this pre-check.
+        lock.readLock().lock();
+        try {
+            if (index.containsKey(key)) {
+                return false;
+            }
+        } finally {
+            lock.readLock().unlock();
         }
         Compression c = config.compression();
         byte[] stored;
@@ -954,6 +998,8 @@ public final class ShardFile implements AutoCloseable {
         lock.writeLock().lock();
         try {
             ensureWritable();
+            // Re-check under the write lock: another writer may have appended the key
+            // between the read-lock pre-check above and this point.
             if (index.containsKey(key)) {
                 return false;
             }

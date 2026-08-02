@@ -220,13 +220,21 @@ public final class FolesiumPlayerStorage implements AutoCloseable {
 
     /** Saves a player's NBT as the gzip-compressed bytes vanilla would have written. */
     public void savePlayer(UUID id, CompoundTag tag) throws IOException {
-        if (tag == null) {
-            playerData.delete(id);
-            return;
+        try {
+            if (tag == null) {
+                playerData.delete(id);
+                return;
+            }
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream(8 * 1024);
+            NbtIo.writeCompressed(tag, bytes);
+            playerData.put(id, bytes.toByteArray());
+        } catch (RuntimeException e) {
+            // The engine signals store failures as FolesiumException (a RuntimeException),
+            // which vanilla's `catch (IOException)` around this call site does not catch --
+            // an unhandled leak would abort the autosave. Match vanilla's warn-and-continue
+            // semantics: log and skip this player's save.
+            LOGGER.log(System.Logger.Level.WARNING, "Folesium: failed to save player data for " + id, e);
         }
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream(8 * 1024);
-        NbtIo.writeCompressed(tag, bytes);
-        playerData.put(id, bytes.toByteArray());
     }
 
     /* ------------------------------------------------------------------ */

@@ -122,6 +122,15 @@ public final class WorldConversionService {
         int converted = 0;
         Set<Path> keptStores = new LinkedHashSet<>();
         try {
+            // The empty-26.x-shell downgrade decision used to print a warning on every
+            // playerRootFor() call (up to 3-4 times per run: the vanilla-player probe, the
+            // player import/export, and the root-dimension collision check); report the
+            // layout decision exactly once here.
+            if (PlayerDataConverter.isLegacyDowngrade(worldRoot)) {
+                System.err.println("Folesium: " + worldRoot + " has a players/ directory with no player files,"
+                        + " while the legacy root-level playerdata/advancements/stats directories hold data;"
+                        + " using the legacy layout for this world");
+            }
             players = convertPlayerData(worldRoot, dir, config, movedStores);
             if (dir == Direction.TO_ANVIL) {
                 // Problem B: list the PLAYER store whenever it actually exists as a PLAYERS
@@ -239,10 +248,12 @@ public final class WorldConversionService {
      * {@link #convertWorld}, so a dimension failing mid-way still reports the trees that were
      * already moved - otherwise their backups would be silently pruned by a later successful
      * run and the operator could lose the pre-conversion copies without ever knowing where
-     * they were kept. Both directions collect into the same list: TO_FOLESIUM moves
-     * pre-existing stores aside, TO_ANVIL moves the replaced vanilla trees aside.
+     * they were kept. Also used by the single-dimension CLI branch of {@link Main}, which
+     * collects the replaced vanilla trees through the same folesiumToAnvil sink. Both
+     * directions collect into the same list: TO_FOLESIUM moves pre-existing stores aside,
+     * TO_ANVIL moves the replaced vanilla trees aside.
      */
-    private static void printMovedStores(List<Path> movedStores, boolean backupOnConvert) {
+    public static void printMovedStores(List<Path> movedStores, boolean backupOnConvert) {
         if (!backupOnConvert || movedStores.isEmpty()) {
             return;
         }

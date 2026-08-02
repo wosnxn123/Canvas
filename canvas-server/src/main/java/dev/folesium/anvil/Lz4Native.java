@@ -19,8 +19,10 @@
 package dev.folesium.anvil;
 
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
 
 /**
  * Reflection bridge to {@code net.jpountz.lz4.LZ4BlockInputStream}, used to read
@@ -64,18 +66,56 @@ public final class Lz4Native {
         return AVAILABLE;
     }
 
-    public static byte[] decompress(byte[] data) {
+    /**
+     * Creates an LZ4 decompressing stream over {@code data}, reusing the constructor
+     * cached in {@code HANDLE} so per-chunk callers (e.g. the region reader's bounded
+     * decompression) do not pay the {@code Class.forName}/{@code getConstructor}
+     * reflection lookup again for every chunk. The lz4 layer's checked failures
+     * (constructor wrapping, stream creation) are surfaced as {@link IOException},
+     * matching {@link #decompress}; a missing lz4-java library stays an
+     * {@link UnsupportedOperationException}.
+     *
+     * @throws UnsupportedOperationException when lz4-java is not on the classpath
+     * @throws IOException when the lz4 layer fails to create the stream (e.g. corrupt
+     *         LZ4 block header)
+     */
+    public static InputStream newInputStream(byte[] data) throws IOException {
         if (HANDLE == null) {
             throw new UnsupportedOperationException(
                     "Cannot read LZ4-compressed Anvil chunk: lz4-java is not on the classpath. "
                             + "Run the conversion on a Folia/Canvas server, or add net.jpountz.lz4:lz4.");
         }
-        try (InputStream in = (InputStream) HANDLE.ctor.newInstance(new ByteArrayInputStream(data))) {
+        try {
+            return (InputStream) HANDLE.ctor.newInstance(new ByteArrayInputStream(data));
+        } catch (InvocationTargetException e) {
+            // The reflective constructor wrapped a failure from the lz4 layer itself
+            // (e.g. a corrupt LZ4 block header): surface it as an IOException, not an
+            // unchecked leak -- same contract as {@link #decompress}.
+            throw new IOException("LZ4 decompression failed", e.getCause());
+        } catch (ReflectiveOperationException e) {
+            throw new IOException("LZ4 decompression failed", e);
+        }
+    }
+
+    /**
+     * Decompresses {@code data} in full. Unchecked failures (a missing lz4-java
+     * library, an {@code LZ4Exception} on corrupt data) keep their type; every
+     * <em>checked</em> failure is wrapped in an {@link IOException}, mirroring
+     * {@link AnvilRegionFile#decompressLz4Bounded}.
+     *
+     * <p>Callers that must bound the decompressed size (e.g. region chunk reads)
+     * should use {@link #newInputStream} and read through a size-limited stream
+     * instead: this method materializes the whole expansion before returning.</p>
+     *
+     * @throws UnsupportedOperationException when lz4-java is not on the classpath
+     * @throws IOException when decompression fails
+     */
+    public static byte[] decompress(byte[] data) throws IOException {
+        try (InputStream in = newInputStream(data)) {
             return in.readAllBytes();
         } catch (RuntimeException e) {
+            // LZ4Exception on corrupt data: Lz4Native reports it unchecked by design.
             throw e;
-        } catch (Exception e) {
-            throw new IllegalStateException("LZ4 decompression failed", e);
         }
     }
 }

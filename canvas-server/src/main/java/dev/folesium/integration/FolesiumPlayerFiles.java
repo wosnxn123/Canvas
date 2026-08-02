@@ -54,6 +54,8 @@ import java.util.UUID;
  */
 public final class FolesiumPlayerFiles {
 
+    private static final System.Logger LOGGER = System.getLogger("Folesium");
+
     private FolesiumPlayerFiles() {
     }
 
@@ -127,7 +129,10 @@ public final class FolesiumPlayerFiles {
             // vanilla-file fallback (no lazy migration).
             return load(t) != null;
         } catch (IOException e) {
-            return Files.isRegularFile(path);
+            // The store is the only source of truth while Folesium is active (no lazy
+            // migration), so a read failure means "no data" -- never fall back to the
+            // vanilla file, which would resurrect pre-conversion data.
+            return false;
         }
     }
 
@@ -172,7 +177,16 @@ public final class FolesiumPlayerFiles {
             super.close();
             if (!committed) {
                 committed = true;
-                store(target, getBuffer().toString());
+                try {
+                    store(target, getBuffer().toString());
+                } catch (RuntimeException e) {
+                    // The engine signals store failures as FolesiumException (a
+                    // RuntimeException), which vanilla's IOException handling around the
+                    // autosave call site would not catch. Log and continue (vanilla's
+                    // warn-and-continue semantics) so one player's failure never aborts
+                    // the autosave for everyone.
+                    LOGGER.log(System.Logger.Level.WARNING, "Folesium: failed to store player JSON for " + target.player(), e);
+                }
             }
         }
     }
