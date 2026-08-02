@@ -262,6 +262,13 @@ public final class FolesiumDatabase implements AutoCloseable {
         Path meta = dir.resolve(METADATA_FILE);
         Properties p = new Properties();
         if (!Files.exists(meta)) {
+            if (!applyLayoutChanges) {
+                // A read-only open must never materialize metadata on a directory that
+                // is not (yet) a store: exporters and inspectors may be pointed at an
+                // arbitrary path, and creating folesium.properties + shard files there
+                // would silently turn it into one.
+                return requested;
+            }
             p.setProperty("store.version", Integer.toString(STORE_VERSION));
             p.setProperty("store.role", role.name());
             p.setProperty("store.shardCount", Integer.toString(requested.shardCount()));

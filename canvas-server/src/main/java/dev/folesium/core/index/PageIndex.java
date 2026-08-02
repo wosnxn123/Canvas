@@ -65,12 +65,20 @@ import java.util.concurrent.locks.ReentrantLock;
  * the same region page concurrently; the page's own monitor (the {@link Entry}) makes
  * slot mutation and the dirty-flag transition atomic regardless of which shard lock is
  * held, and also excludes a concurrent {@link #flush()} so a page is never written to
- * disk while being mutated. {@link #invalidateAll()} publishes the volatile invalidated
- * flag before clearing the segments; {@link #updateSlot} re-checks it under the page
- * monitor, so an in-flight update either completes (its entry is then dropped) or aborts
- * without touching the page. {@link #pageFor} does not take the page monitor: a slot
- * read racing a slot write may observe an older offset, which is still a valid log
- * position (the log is append-only) and is CRC-validated by the reader.</p>
+ * disk while being mutated. Nested locking always follows the order <em>segment lock,
+ * then page monitor</em>: {@link #updateSlot} performs the cache lookup and the slot
+ * update while holding the segment lock, so LRU eviction (which runs under the segment
+ * lock via {@code removeEldestEntry}) can never drop the entry between lookup and
+ * update; {@link #flush()} writes a page under its monitor alone, never taking a
+ * segment lock while the monitor is held, so no code path acquires the two locks in
+ * reverse order and the ordering cannot deadlock (the dirty counter is adjusted with an
+ * atomic non-negative decrement instead of a segment-locked one). {@link #invalidateAll()}
+ * publishes the volatile invalidated flag before clearing the segments;
+ * {@link #updateSlot} re-checks it under the page monitor, so an in-flight update
+ * either completes (its entry is then dropped) or aborts without touching the page.
+ * {@link #pageFor} does not take the page monitor: a slot read racing a slot write may
+ * observe an older offset, which is still a valid log position (the log is append-only)
+ * and is CRC-validated by the reader.</p>
  *
  * <p>{@code cacheBytes = 0} disables the index entirely (pure v1 hash behaviour):
  * {@link #isEnabled()} is {@code false} and all operations become no-ops or return
@@ -265,23 +273,48 @@ public final class PageIndex implements AutoCloseable {
      * consistent under the same lock); in addition, slot mutation and the dirty flag are
      * synchronized on the page's monitor so that two shard writers of the same region
      * (which hold different shard locks) and a concurrent {@link #flush()} are serialized
-     * on the page. After {@link #invalidateAll()} this is a no-op: the index is dormant
-     * and the HashMap is authoritative.</p>
+     * on the page. The lookup and the mutation run while holding the owning segment's
+     * lock (lock order: segment lock {@code ->} page monitor); LRU eviction runs under
+     * the segment lock via {@code removeEldestEntry}, so the entry can never be evicted
+     * between lookup and update and no dirty update can land on an orphaned entry. After
+     * {@link #invalidateAll()} this is a no-op: the index is dormant and the HashMap is
+     * authoritative.</p>
      */
     public void updateSlot(int regionX, int regionZ, int slot, int offset) {
         if (closed || !enabled || invalidated) {
             return;
         }
-        Entry e = entryFor(regionX, regionZ);
-        synchronized (e) {
-            if (invalidated) {
-                return; // invalidated while we were loading: leave the page untouched
+        long key = pack(regionX, regionZ);
+        Segment seg = segments[segmentIndex(key)];
+        seg.lock.lock();
+        try {
+            Entry e = seg.map.get(key);
+            if (e == null) {
+                cacheMisses.incrementAndGet();
+                Path file = pagePath(regionX, regionZ);
+                boolean exists = Files.exists(file);
+                RegionPage page = exists ? readPage(file) : RegionPage.create(regionX, regionZ);
+                e = new Entry(page);
+                e.persisted = exists;
+                seg.map.put(key, e);
+            } else {
+                cacheHits.incrementAndGet();
             }
-            e.page.set(slot, offset);
-            if (!e.dirty) {
-                e.dirty = true;
-                dirtyCount.incrementAndGet();
+            // The segment lock is still held here: eviction (removeEldestEntry) runs only
+            // inside map.put under this same lock, so the entry cannot be evicted between
+            // lookup and the slot update below.
+            synchronized (e) {
+                if (invalidated) {
+                    return; // invalidated while we were loading: leave the page untouched
+                }
+                e.page.set(slot, offset);
+                if (!e.dirty) {
+                    e.dirty = true;
+                    dirtyCount.incrementAndGet();
+                }
             }
+        } finally {
+            seg.lock.unlock();
         }
     }
 
@@ -307,7 +340,9 @@ public final class PageIndex implements AutoCloseable {
         try {
             Entry removed = seg.map.remove(key);
             if (removed != null && removed.dirty) {
-                dirtyCount.decrementAndGet();
+                // Clamped like the flush decrement: a concurrent flush may already have
+                // written this entry (and decremented) while it was still cached.
+                dirtyCount.updateAndGet(v -> Math.max(0, v - 1));
             }
         } finally {
             seg.lock.unlock();
@@ -360,7 +395,10 @@ public final class PageIndex implements AutoCloseable {
     /**
      * Writes all dirty pages to {@code <idxDir>/<rx>.<rz>.idx} (called by the background
      * checkpoint thread, which has already forced the log watermark). Each page is
-     * written under its own monitor, excluding concurrent {@link #updateSlot} mutations.
+     * written under its own monitor, excluding concurrent {@link #updateSlot} mutations,
+     * and without taking any segment lock while the monitor is held (the lock order is
+     * segment lock, then page monitor; the dirty count is adjusted with an atomic
+     * non-negative decrement).
      * No-op when disabled, read-only, closed, or invalidated (after invalidation the
      * cached pages would hold pre-compaction offsets and must not be persisted).
      *
@@ -375,14 +413,13 @@ public final class PageIndex implements AutoCloseable {
 
     /** Writes every dirty page; the caller has already passed the enable/close guards. */
     private void flushPages() {
-        List<SegmentEntry> dirty = new ArrayList<>();
+        List<Entry> dirty = new ArrayList<>();
         for (Segment seg : segments) {
             seg.lock.lock();
             try {
-                for (Map.Entry<Long, Entry> me : seg.map.entrySet()) {
-                    Entry e = me.getValue();
+                for (Entry e : seg.map.values()) {
                     if (e.dirty) {
-                        dirty.add(new SegmentEntry(seg, me.getKey(), e));
+                        dirty.add(e);
                     }
                 }
             } finally {
@@ -397,8 +434,14 @@ public final class PageIndex implements AutoCloseable {
         } catch (IOException e) {
             throw new FolesiumException("Failed to create page index directory " + idxDir, e);
         }
-        for (SegmentEntry se : dirty) {
-            Entry e = se.entry;
+        for (Entry e : dirty) {
+            // Write under the page monitor only - never take a segment lock while holding
+            // it (the lock order everywhere is segment lock -> page monitor). The dirty
+            // count is decremented atomically with a non-negative clamp instead: a
+            // concurrent rebuildPageFrom()/invalidateAll() may already have decremented or
+            // reset it for this entry, and the counter only backs dirtyPages() reporting
+            // (flush always re-scans the segment maps), so a spurious decrement is
+            // harmless as long as it never drives the counter negative.
             synchronized (e) {
                 if (!e.dirty || invalidated) {
                     continue;
@@ -407,26 +450,13 @@ public final class PageIndex implements AutoCloseable {
                     e.page.write(pagePath(e.page.regionX(), e.page.regionZ()));
                     e.dirty = false;
                     e.persisted = true;
-                    // Decrement only if the entry is still cached: a concurrent
-                    // invalidateAll() may have dropped it and reset the counter.
-                    Segment seg = se.segment;
-                    seg.lock.lock();
-                    try {
-                        if (seg.map.get(se.key) == e) {
-                            dirtyCount.decrementAndGet();
-                        }
-                    } finally {
-                        seg.lock.unlock();
-                    }
+                    dirtyCount.updateAndGet(v -> Math.max(0, v - 1));
                 } catch (IOException ex) {
                     throw new FolesiumException("Failed to write region page "
                             + pagePath(e.page.regionX(), e.page.regionZ()), ex);
                 }
             }
         }
-    }
-
-    private record SegmentEntry(Segment segment, long key, Entry entry) {
     }
 
     /**

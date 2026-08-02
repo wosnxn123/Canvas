@@ -102,8 +102,8 @@ public final class Keyspace implements AutoCloseable {
         this.shards = new ShardFile[shardCount];
         this.shardMask = shardCount - 1;
         this.pageIndex = createPageIndex(dir, name, config, readOnly);
-        this.keyspaceDict = loadKeyspaceDict(dir, name);
         try {
+            this.keyspaceDict = loadKeyspaceDict(dir, name);
             for (int i = 0; i < shards.length; i++) {
                 if (readOnly && Arrays.binarySearch(discovered, i) < 0) {
                     // Read-only: no shard file exists for this index (a keyspace that was

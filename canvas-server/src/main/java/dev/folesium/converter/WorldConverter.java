@@ -129,6 +129,11 @@ public final class WorldConverter {
                     try {
                         regionX = Integer.parseInt(m.group(1));
                         regionZ = Integer.parseInt(m.group(2));
+                        // Reject coordinates whose region -> chunk shift would overflow int
+                        // (|region| >= 2^26); such names are corrupt or foreign files.
+                        if (Math.abs(regionX) >= (1 << 26) || Math.abs(regionZ) >= (1 << 26)) {
+                            throw new NumberFormatException("region coordinate out of range");
+                        }
                     } catch (NumberFormatException ex) {
                         // Out-of-range coordinates (e.g. r.9999999999999999.0.mca from a
                         // corrupt or foreign file): skip the file instead of aborting the
