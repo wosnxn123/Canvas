@@ -672,6 +672,19 @@ public final class Keyspace implements AutoCloseable {
         }
     }
 
+    /**
+     * Reopens the file channel of any shard that a channel-closing flush failure left
+     * unusable (see {@code ShardFile.reopenIfClosed}): the store's group-commit loop
+     * calls this after a flush failed with {@link java.nio.channels.ClosedByInterruptException}
+     * (the last-resort interrupt landed on a blocking {@code FileChannel} operation and
+     * closed the shard channel permanently). No-op on healthy shards.
+     */
+    void reopenClosedShards() {
+        for (ShardFile s : liveShards) {
+            s.reopenIfClosed();
+        }
+    }
+
     public void compactIfNeeded() {
         if (closed || readOnly) {
             return; // do not touch shards close() is tearing down, or a read-only store

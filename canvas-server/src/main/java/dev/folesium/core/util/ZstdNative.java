@@ -126,7 +126,13 @@ public final class ZstdNative {
                 }
             } catch (Throwable probeFailure) {
                 // The class loads but the natives will not run here: ZSTD is unavailable.
+                // Drop the plain compress/decompress handles too: a live MethodHandle
+                // would otherwise let compress()/decompress() reach the broken native link
+                // and blow up with an UnsatisfiedLinkError on the first record instead of
+                // the clear IllegalStateException from the available() entry check.
                 available = false;
+                compress = null;
+                decompress = null;
                 compressUsingDict = null;
                 decompressUsingDict = null;
                 trainFromBuffer = null;
@@ -189,13 +195,23 @@ public final class ZstdNative {
         return !forcedUnavailable() && AVAILABLE;
     }
 
+    /**
+     * Clear explanation for the entry checks in {@link #compress}/{@link #decompress}:
+     * the handle is null or the native probe failed (or the test-only force switch is
+     * set), so the requested ZSTD operation cannot run here.
+     */
+    private static String unavailableMessage() {
+        return "Folesium ZSTD requested but zstd-jni is unavailable: the zstd-jni classes or their "
+                + "native library could not be loaded on this platform (absent from the classpath, "
+                + "or the native probe failed). Run on a Folia/Canvas server (which ships zstd-jni) "
+                + "or add com.github.luben:zstd-jni.";
+    }
+
     public static byte[] compress(byte[] src, int level) {
-        MethodHandle mh = COMPRESS;
-        if (mh == null) {
-            throw new UnsupportedOperationException(
-                    "Folesium ZSTD compression requested but zstd-jni is not on the classpath. "
-                            + "Run on a Folia/Canvas server (which ships zstd-jni) or add com.github.luben:zstd-jni.");
+        if (!available()) {
+            throw new IllegalStateException(unavailableMessage());
         }
+        MethodHandle mh = COMPRESS;
         try {
             return (byte[]) mh.invokeExact(src, level);
         } catch (RuntimeException | Error e) {
@@ -206,12 +222,10 @@ public final class ZstdNative {
     }
 
     public static byte[] decompress(byte[] src, int rawLen) {
-        MethodHandle mh = DECOMPRESS;
-        if (mh == null) {
-            throw new UnsupportedOperationException(
-                    "Folesium ZSTD decompression requested but zstd-jni is not on the classpath. "
-                            + "Run on a Folia/Canvas server (which ships zstd-jni) or add com.github.luben:zstd-jni.");
+        if (!available()) {
+            throw new IllegalStateException(unavailableMessage());
         }
+        MethodHandle mh = DECOMPRESS;
         try {
             return (byte[]) mh.invokeExact(src, rawLen);
         } catch (RuntimeException | Error e) {
@@ -242,10 +256,18 @@ public final class ZstdNative {
      * zstd-jni's offset-based {@code compressUsingDict}), then trimmed to the produced size.
      */
     public static byte[] compressUsingDict(byte[] raw, byte[] dict, int level) {
-        MethodHandle mh = COMPRESS_USING_DICT;
-        if (mh == null) {
-            throw new UnsupportedOperationException(dictUnavailableMessage());
+        // Entry checks mirroring compress()/decompress(): the handles can be bound while the
+        // native link is broken (the probe dropped only the plain pair, see the static
+        // initializer) or the test-only force switch is set - both must surface as the same
+        // clear failure the plain path reports, so the switch's negative semantics are
+        // closed over the dictionary entries too.
+        if (!available()) {
+            throw new IllegalStateException(unavailableMessage());
         }
+        if (!dictAvailable()) {
+            throw new IllegalStateException(dictUnavailableMessage());
+        }
+        MethodHandle mh = COMPRESS_USING_DICT;
         try {
             long bound = (long) COMPRESS_BOUND.invokeExact((long) raw.length);
             if (bound > Integer.MAX_VALUE - 8) {
@@ -275,10 +297,15 @@ public final class ZstdNative {
      * dictionary (or is corrupt) and fails loudly rather than returning truncated data.
      */
     public static byte[] decompressUsingDict(byte[] stored, byte[] dict, int rawLen) {
-        MethodHandle mh = DECOMPRESS_USING_DICT;
-        if (mh == null) {
-            throw new UnsupportedOperationException(dictUnavailableMessage());
+        // Entry checks mirroring compress()/decompress() - see compressUsingDict for why the
+        // availability probes must gate the dictionary entries too.
+        if (!available()) {
+            throw new IllegalStateException(unavailableMessage());
         }
+        if (!dictAvailable()) {
+            throw new IllegalStateException(dictUnavailableMessage());
+        }
+        MethodHandle mh = DECOMPRESS_USING_DICT;
         try {
             byte[] dst = new byte[rawLen];
             long n = (long) mh.invokeExact(dst, 0, stored, 0, stored.length, dict);
@@ -302,10 +329,15 @@ public final class ZstdNative {
      * native side wrote them. Requires at least 11 samples, matching {@code Zstd.trainFromBuffer}.
      */
     public static byte[] trainDict(byte[][] samples, int dictSize) {
-        MethodHandle mh = TRAIN_FROM_BUFFER;
-        if (mh == null) {
-            throw new UnsupportedOperationException(dictUnavailableMessage());
+        // Entry checks mirroring compress()/decompress() - see compressUsingDict for why the
+        // availability probes must gate the dictionary entries too.
+        if (!available()) {
+            throw new IllegalStateException(unavailableMessage());
         }
+        if (!dictAvailable()) {
+            throw new IllegalStateException(dictUnavailableMessage());
+        }
+        MethodHandle mh = TRAIN_FROM_BUFFER;
         if (dictSize < 1) {
             throw new IllegalArgumentException("dictSize must be >= 1: " + dictSize);
         }

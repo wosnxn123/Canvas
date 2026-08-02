@@ -786,6 +786,15 @@ public final class ShardFile implements AutoCloseable {
             try {
                 pageLoc = pageIndexLoc(key);
             } catch (IOException e) {
+                if (pageOnly(key)) {
+                    // PAGE mode: the page is the only index, so an I/O failure reading it
+                    // must not silently read as "key absent" - that would report live
+                    // records as missing. pageIndexLoc returns null only for validated
+                    // misses (empty/trimmed slot, stale or mismatched record); an
+                    // IOException is a real failure (e.g. a closed channel) and surfaces
+                    // loudly. AUTO mode falls back to the HashMap instead.
+                    throw new FolesiumException("Page index read failed for " + path, e);
+                }
                 pageLoc = null; // stale page entry (e.g. its record was truncated); AUTO falls back to the HashMap
             }
             if (pageLoc != null) {
@@ -860,6 +869,12 @@ public final class ShardFile implements AutoCloseable {
             try {
                 pageLoc = pageIndexLoc(key);
             } catch (IOException e) {
+                if (pageOnly(key)) {
+                    // PAGE mode: same loud-failure semantics as get() - a real I/O failure
+                    // reading the page must not report the key absent. AUTO mode falls back
+                    // to the HashMap instead.
+                    throw new FolesiumException("Page index read failed for " + path, e);
+                }
                 pageLoc = null; // stale page entry; AUTO mode falls back to the HashMap
             }
             if (pageLoc != null) {
@@ -1280,6 +1295,44 @@ public final class ShardFile implements AutoCloseable {
             }
         } catch (IOException e) {
             throw new FolesiumException("fsync failed for " + path, e);
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * Reopens this shard's file channel after an interrupt closed it. A blocking
+     * {@link FileChannel} operation (e.g. {@code force} during a flush) that is
+     * interrupted throws {@link java.nio.channels.ClosedByInterruptException} and closes
+     * the channel permanently, which would otherwise break every subsequent write and
+     * read of this shard. The file itself is untouched by the interruption, so a fresh
+     * channel restores full service; {@link #writePos} still describes the file exactly
+     * (an interrupted {@code force} changes nothing on disk, and the loop that calls this
+     * runs on the group-commit thread, never on a write path). No-op while the channel is
+     * open.
+     *
+     * <p>Deliberately does NOT reopen when {@link #channel} is {@code null}: that state
+     * means a failed compaction restore released the channel because the on-disk file no
+     * longer matches the in-memory index (see {@link #restoreOldShardAfterFailedReopen}),
+     * and reopening would silently serve - and append to - the wrong file.</p>
+     *
+     * <p>Package-private: called by the store's group-commit loop after a flush failed
+     * with a channel-closing exception (see {@code FolesiumDatabase.flushLoop}).</p>
+     */
+    void reopenIfClosed() {
+        lock.writeLock().lock();
+        try {
+            if (channel != null && !channel.isOpen()) {
+                try {
+                    channel = FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE);
+                    LOGGER.log(System.Logger.Level.WARNING,
+                            "Folesium: reopened channel of shard {0} (closed by an interrupt during flush)", path);
+                } catch (IOException reopenFailure) {
+                    LOGGER.log(System.Logger.Level.ERROR,
+                            "Folesium: failed to reopen channel of shard {0} after an interrupt closed it",
+                            path, reopenFailure);
+                }
+            }
         } finally {
             lock.writeLock().unlock();
         }

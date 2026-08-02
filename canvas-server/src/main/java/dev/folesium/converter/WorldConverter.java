@@ -35,10 +35,8 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletionService;
 import java.util.concurrent.ConcurrentHashMap;
@@ -481,15 +479,11 @@ public final class WorldConverter {
      * present in the target tree is swept -- including regions the store holds no records
      * in any more (a shrunken or emptied store), whose stale chunks would otherwise be
      * resurrected by the next conversion -- by comparing each region's live chunk slots
-     * against the full set of keys the store still holds. Regions are only touched when
-     * their .mca exists, so a fresh target tree stays untouched outside the regions
+     * against the keys the store still holds for that region. Regions are only touched
+     * when their .mca exists, so a fresh target tree stays untouched outside the regions
      * {@link #writeKeyspace} just wrote.
      */
     private void pruneSlotsMissingFromStore(Path out, Map<Long, List<Long>> byRegion) throws IOException {
-        Set<Long> stored = new HashSet<>();
-        for (List<Long> keys : byRegion.values()) {
-            stored.addAll(keys);
-        }
         List<Path> mcaFiles;
         try (var s = Files.list(out)) {
             mcaFiles = s.filter(p -> MCA.matcher(p.getFileName().toString()).matches()).toList();
@@ -534,10 +528,17 @@ public final class WorldConverter {
                     // Best-effort size probe; the open below reports real failures.
                 }
             }
+            // The store's keys for this region (at most 1024 = 32x32 chunk slots) are
+            // looked up per region instead of being merged into one global set of every
+            // stored key: that duplicate set would double the memory footprint of a large
+            // keyspace. The linear scan stays bounded by the 1024 slots a region can hold,
+            // so it is cheap even for a region full of chunks; a region absent from the
+            // map (a shrunken or emptied store) has no stored keys and is swept entirely.
+            List<Long> regionKeys = byRegion.get(LongKeys.chunkKey(rx, rz));
             try (AnvilRegionFile rf = new AnvilRegionFile(mca)) {
                 for (int[] xz : rf.listChunks()) {
                     long key = LongKeys.chunkKey((rx << 5) + xz[0], (rz << 5) + xz[1]);
-                    if (!stored.contains(key)) {
+                    if (regionKeys == null || !regionKeys.contains(key)) {
                         rf.deleteChunk(xz[0], xz[1]);
                     }
                 }

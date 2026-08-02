@@ -228,13 +228,6 @@ final class StoreResharder {
             invalidatePageIndex(dir);
             Integer metaCount = metadataShardCount(dir);
             int fileCount = consistentOnDiskShardCount(dir);
-            // The name-derived layout must also match the file headers, mirroring
-            // completeNewLayout's staging-empty branch (Branch A): every shard the metadata
-            // names must exist AND carry the committed count in its header. A file stamped
-            // with any other count is a leftover of a different layout, so the set is mixed
-            // and the backup - the only surviving copy of the records of the shards that
-            // were never swapped - must not be deleted.
-            boolean headersMatch = metaCount != null && completeNewLayoutInDir(dir, metaCount);
             if (movedAloneBackupDeletable(dir, metaCount, fileCount)) {
                 LOGGER.log(System.Logger.Level.INFO,
                         "Folesium: removing the backup of a completed reshard of {0}", dir);

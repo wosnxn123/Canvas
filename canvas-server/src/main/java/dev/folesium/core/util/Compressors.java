@@ -79,7 +79,23 @@ public final class Compressors {
         if (dict == null) {
             throw new IllegalArgumentException("ZSTD_DICT decompression requires a non-null dictionary");
         }
-        return ZstdNative.decompressUsingDict(stored, dict, rawLen);
+        byte[] out;
+        try {
+            out = ZstdNative.decompressUsingDict(stored, dict, rawLen);
+        } catch (RuntimeException e) {
+            // zstd-jni reports a corrupt/truncated frame as ZstdException; normalize it to
+            // the same IllegalStateException the DEFLATE path throws for corrupt records so
+            // every codec fails uniformly (mirror of zstdInflate above). Matched by class
+            // name: zstd-jni is an optional runtime dependency, never a compile-time one
+            // (ZstdNative is a reflection bridge). Anything else - e.g. the
+            // IllegalStateException thrown when the dict API is unavailable - propagates
+            // unchanged.
+            if (isZstdException(e)) {
+                throw new IllegalStateException("Corrupt compressed record", e);
+            }
+            throw e;
+        }
+        return out;
     }
 
     private static byte[] deflate(byte[] raw, int level) {
@@ -200,8 +216,8 @@ public final class Compressors {
             // the same IllegalStateException the DEFLATE path throws for corrupt records so
             // every codec fails uniformly. Matched by class name: zstd-jni is an optional
             // runtime dependency, never a compile-time one (ZstdNative is a reflection
-            // bridge). Anything else - e.g. the UnsupportedOperationException thrown when
-            // zstd-jni is absent - propagates unchanged.
+            // bridge). Anything else - e.g. the IllegalStateException thrown when zstd-jni
+            // is absent - propagates unchanged.
             if (isZstdException(e)) {
                 throw new IllegalStateException("Corrupt compressed record", e);
             }

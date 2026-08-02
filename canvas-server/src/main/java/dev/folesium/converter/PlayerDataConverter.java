@@ -18,15 +18,19 @@
 
 package dev.folesium.converter;
 
+import dev.folesium.anvil.AnvilRegionFile;
 import dev.folesium.core.FolesiumConfig;
 import dev.folesium.core.FolesiumDatabase;
 import dev.folesium.core.Keyspace;
 import dev.folesium.core.util.UuidKeys;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
@@ -75,6 +79,15 @@ public final class PlayerDataConverter {
     public static final String DIR_PLAYERS_26 = "players";
     /** 26.x replacement for {@link #DIR_PLAYERDATA}, nested under {@code players/}. */
     public static final String DIR_DATA_26 = "data";
+
+    /**
+     * Upper bound for a single player file imported from vanilla. Vanilla player data is
+     * tiny (tens of KiB at most), so 32 MiB -- the same bound the dimension side applies
+     * to a chunk payload ({@link AnvilRegionFile#MAX_CHUNK_PAYLOAD_BYTES}) -- is far above
+     * any legitimate file while stopping a corrupt or hostile file from OOMing the
+     * converter when it is read into memory whole.
+     */
+    private static final long MAX_PLAYER_FILE_BYTES = AnvilRegionFile.MAX_CHUNK_PAYLOAD_BYTES;
 
     /**
      * Vanilla dir -> (Folesium keyspace, file extension, location). {@code base}
@@ -390,7 +403,42 @@ public final class PlayerDataConverter {
                         if (id == null) {
                             continue;
                         }
-                        byte[] payload = Files.readAllBytes(file);
+                        // Pre-check the size before reading the file into memory: a corrupt
+                        // or hostile player file must not OOM the converter. Mirrors the
+                        // dimension side's chunk payload bound
+                        // (AnvilRegionFile.MAX_CHUNK_PAYLOAD_BYTES); anything larger is
+                        // skipped with a warning instead of being imported.
+                        byte[] payload;
+                        try {
+                            long size = Files.size(file);
+                            if (size > MAX_PLAYER_FILE_BYTES) {
+                                System.err.println("Folesium: skipping player file " + file.getFileName()
+                                        + ": " + size + " bytes exceeds the " + MAX_PLAYER_FILE_BYTES
+                                        + " byte limit");
+                                continue;
+                            }
+                            // The bound is enforced again on the bytes actually read (a
+                            // limit + 1 probe) instead of being trusted from the size()
+                            // check above: a concurrent grow between the two would
+                            // otherwise smuggle an over-limit file into memory whole
+                            // (TOCTOU).
+                            payload = readPlayerFileBounded(file, size);
+                        } catch (NoSuchFileException e) {
+                            // A file that vanished between listing and read (concurrent
+                            // cleanup, server pruning) is skipped per file; it must not
+                            // abort the whole import.
+                            System.err.println("Folesium: skipping player file " + file.getFileName()
+                                    + ": it disappeared while importing");
+                            continue;
+                        }
+                        if (payload == null) {
+                            // Reached only when the file grew past the bound after the
+                            // size() pre-check above.
+                            System.err.println("Folesium: skipping player file " + file.getFileName()
+                                    + ": it grew past the " + MAX_PLAYER_FILE_BYTES
+                                    + " byte limit while reading");
+                            continue;
+                        }
                         if (ks.putIfAbsent(id, payload)) {
                             entries++;
                             bytes += payload.length;
@@ -831,6 +879,48 @@ public final class PlayerDataConverter {
     }
 
     // ------------------------------------------------------------------ helpers
+
+    /**
+     * Reads a player file under the {@link #MAX_PLAYER_FILE_BYTES} bound with a bounded
+     * {@link FileChannel} loop: read up to the bound in bounded chunks, then probe one
+     * further byte so an over-limit file is rejected by its cumulative count (limit + 1)
+     * instead of by a size() check that could race a concurrent grow (TOCTOU). The
+     * caller's size pre-check is only a fast path; the bound is enforced on the bytes
+     * actually read, so a file that grows between the two reads is still caught.
+     *
+     * @param sizeHint the file size observed by the caller's pre-check, used only as the
+     *                 initial buffer capacity
+     * @return the file bytes, or {@code null} when the file exceeds the bound
+     */
+    private static byte[] readPlayerFileBounded(Path file, long sizeHint) throws IOException {
+        ByteArrayOutputStream collected = new ByteArrayOutputStream(
+                (int) Math.min(Math.max(sizeHint, 0L), MAX_PLAYER_FILE_BYTES));
+        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
+            ByteBuffer tmp = ByteBuffer.allocate(8192);
+            long total = 0;
+            while (total < MAX_PLAYER_FILE_BYTES) {
+                tmp.clear();
+                tmp.limit((int) Math.min(tmp.capacity(), MAX_PLAYER_FILE_BYTES - total));
+                int n = channel.read(tmp);
+                if (n < 0) {
+                    break;
+                }
+                total += n;
+                collected.write(tmp.array(), 0, n);
+            }
+            if (total == MAX_PLAYER_FILE_BYTES) {
+                tmp.clear();
+                tmp.limit(1);
+                if (channel.read(tmp) > 0) {
+                    total++;
+                }
+            }
+            if (total > MAX_PLAYER_FILE_BYTES) {
+                return null;
+            }
+        }
+        return collected.toByteArray();
+    }
 
     private static List<Path> listPlayerFiles(Path dir, String extension) throws IOException {
         try (var s = Files.list(dir)) {

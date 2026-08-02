@@ -21,6 +21,8 @@ package dev.folesium.core;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.io.Writer;
+import java.nio.channels.ClosedByInterruptException;
+import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
@@ -982,12 +984,9 @@ public final class FolesiumDatabase implements AutoCloseable {
     }
 
     /**
-     * Sleeps for {@code millis} as a compaction rate-limiter, clearing any interrupt so the
-     * throttled pass can unwind with a clean status. An interrupt during this sleep must
-     * not be restored as a pending flag: the pass continues with channel I/O (the next
-     * {@code ShardFile.compact()}), and a set interrupt status would close an interruptible
-     * channel on that operation ({@link java.nio.channels.ClosedByInterruptException}),
-     * breaking every subsequent write to the shard.
+     * Sleeps for {@code millis} as a compaction rate-limiter. An interrupt during the sleep
+     * is restored as a pending flag via {@link Thread#interrupt()} so the caller's
+     * interrupted status is not silently dropped, and is reported to the caller.
      *
      * @return {@code true} when the sleep ran to completion, {@code false} when it was
      *         interrupted - the caller treats an interrupted sleep like the closed/retired
@@ -999,7 +998,7 @@ public final class FolesiumDatabase implements AutoCloseable {
             Thread.sleep(millis);
             return true;
         } catch (InterruptedException e) {
-            Thread.interrupted();
+            Thread.currentThread().interrupt();
             return false;
         }
     }
@@ -1146,6 +1145,43 @@ public final class FolesiumDatabase implements AutoCloseable {
         }
     }
 
+    /**
+     * Whether {@code t} or any of its causes is an exception that left a shard channel
+     * closed: {@link ClosedByInterruptException} - the signature of an interrupt landing
+     * on a blocking {@code FileChannel} operation (flush {@code ->} force), which closes
+     * the channel permanently - or {@link ClosedChannelException}, the same end state
+     * when the channel was closed some other way. Either means the affected shard can
+     * never be flushed (or written) again until its channel is reopened.
+     */
+    private static boolean isChannelClosedFailure(Throwable t) {
+        for (Throwable cause = t; cause != null; cause = cause.getCause()) {
+            if (cause instanceof ClosedByInterruptException || cause instanceof ClosedChannelException) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Reopens every shard channel that a channel-closing flush failure left unusable (see
+     * {@link #isChannelClosedFailure} and {@code ShardFile.reopenIfClosed}). Only the
+     * interrupted group-commit thread's in-flight {@code force} could have closed a
+     * channel, so at most one shard actually reopens; iterating all shards is simply the
+     * most robust way to reach it without parsing exception messages, and healthy shards
+     * make it a no-op. Skipped while the store is closing: {@code close()} is tearing the
+     * shards down anyway and reopening would only fight it. Shards whose channel is
+     * {@code null} (a failed compaction restore) are deliberately left alone - see
+     * {@code ShardFile.reopenIfClosed}.
+     */
+    private void reopenInterruptClosedShards() {
+        if (closed.get()) {
+            return;
+        }
+        for (Keyspace ks : keyspaces.values()) {
+            ks.reopenClosedShards();
+        }
+    }
+
     private void flushLoop() {
         // Whether this thread is the group-commit flusher - captured ONCE at loop start
         // instead of being sampled at each compaction pass start. The thread's identity is
@@ -1221,14 +1257,26 @@ public final class FolesiumDatabase implements AutoCloseable {
                     // Error is caught too: compactIfNeededThrottled() rethrows Error (e.g. a
                     // native zstd failure) after recording the failure slot, and an uncaught
                     // Error would kill this thread silently - BATCH group commit would stop
-                    // with nothing logged. Log it and EXIT: a persistent failure (e.g. an
-                    // unwritable shard) would otherwise be retried on every batch interval
-                    // and spam the error log forever. The finally below clears `flusher`, so
-                    // the next driver starts a fresh thread instead of degrading to no
-                    // flusher - the failure is retried at most once per driver rather than
-                    // once per interval.
+                    // with nothing logged. Log it and EXIT the loop; the restart below
+                    // (after the finally clears this thread's registration) starts a fresh
+                    // group-commit thread immediately, so a persistent failure (e.g. an
+                    // unwritable shard) is retried at most once per batch interval - the
+                    // fresh thread's first flush still happens after a full batchFlushMillis
+                    // wait - instead of silently degrading to no flusher or spamming the
+                    // error log in a tight loop.
+                    if (isChannelClosedFailure(e)) {
+                        // awaitFlusherExit's last-resort interrupt landed on a blocking
+                        // FileChannel operation inside flush() (e.g. channel.force):
+                        // ClosedByInterruptException closes the shard channel permanently,
+                        // so every later write/read of that shard would fail - the
+                        // interrupt was only meant as a retirement wakeup, not as a reason
+                        // to kill the shard. Reopen the affected shard's channel so the
+                        // store keeps serving; the fresh group-commit thread started below
+                        // resumes flushing on it.
+                        reopenInterruptClosedShards();
+                    }
                     LOGGER.log(System.Logger.Level.ERROR, "Folesium group-commit failed for " + dir, e);
-                    return;
+                    break;
                 }
             }
         } finally {
@@ -1238,6 +1286,17 @@ public final class FolesiumDatabase implements AutoCloseable {
                 }
             }
         }
+        // The ERROR catch above returned with this thread still registered as `flusher`;
+        // the finally just cleared the registration, so BATCH group commit would silently
+        // stop until the next driver (flushAll, reload) woke it again. Restart a fresh
+        // group-commit thread now instead of degrading to no flusher. The guards inside
+        // startFlusherIfNeeded() - closed, an existing flusher, durability != BATCH - make
+        // this a no-op for every non-failure exit (store close, retirement, durability
+        // switched away): only a genuine ERROR exit leaves BATCH + not closed + flusher ==
+        // null. The fresh thread's first flush still happens after a full batchFlushMillis
+        // wait (see the top of the loop), so a persistent failure is retried at most once
+        // per interval - never in a tight restart loop.
+        startFlusherIfNeeded();
     }
 
     @Override

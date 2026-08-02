@@ -310,10 +310,16 @@ public final class DictionaryStore {
         }
         byte[] trained = ZstdNative.trainDict(samples.toArray(new byte[0][]), DICT_SIZE);
         // Symmetric with load(): never persist a dictionary that load() would reject, or
-        // every existing codec-3 record of this keyspace would become undecodable.
-        if (trained.length < MIN_DICT_BYTES || !hasDictionaryMagic(trained)) {
+        // every existing codec-3 record of this keyspace would become undecodable. The size
+        // checks mirror load()'s floor and ceiling (load rejects anything under
+        // MIN_DICT_BYTES or over MAX_DICT_BYTES before it even looks at the magic), so a
+        // buggy trainer can never mint a dict.bin the loader would refuse.
+        if (trained.length < MIN_DICT_BYTES || trained.length > MAX_DICT_BYTES || !hasDictionaryMagic(trained)) {
+            String why = trained.length < MIN_DICT_BYTES || trained.length > MAX_DICT_BYTES
+                    ? trained.length + " bytes, outside the valid " + MIN_DICT_BYTES + ".." + MAX_DICT_BYTES + " range"
+                    : "missing or wrong magic header";
             throw new FolesiumException("Dictionary training for " + dictFile + " produced an invalid dictionary ("
-                    + trained.length + " bytes, missing or wrong magic header); refusing to write it.");
+                    + why + "); refusing to write it.");
         }
         Path parent = dictFile.getParent();
         if (parent != null) {

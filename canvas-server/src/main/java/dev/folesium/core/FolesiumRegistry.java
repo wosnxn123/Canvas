@@ -640,9 +640,12 @@ public final class FolesiumRegistry {
             // our own machinery recreated (the previous file was deleted and fileProperties()
             // regenerated the auto-tuned default) is not an operator edit. Applying the
             // defaults would silently override the running server's current configuration,
-            // so skip it exactly like the watcher does. The generated content is
-            // deterministic per machine, so this comparison is exact.
-            if (content.equals(defaultConfigContent())) {
+            // so skip it exactly like the watcher does - UNLESS the operator explicitly
+            // drives this reload through -Dfolesium.* system properties (the documented
+            // programmatic-reload contract): then the file is only one input and the
+            // properties must still be applied. The generated content is deterministic per
+            // machine, so this comparison is exact.
+            if (content.equals(defaultConfigContent()) && !hasSystemPropertyOverrides()) {
                 LOGGER.log(System.Logger.Level.INFO,
                         "Folesium: {0} is the auto-generated default (previously deleted?);"
                                 + " keeping the running configuration",
@@ -675,7 +678,14 @@ public final class FolesiumRegistry {
         boolean enabledBefore;
         try {
             synchronized (FolesiumRegistry.class) {
-                enabledBefore = isEnabled();
+                // Capture the previous effective value from the cache BEFORE isEnabled()
+                // re-reads the (already edited) file: isEnabled() refreshes the cache when
+                // the file changed, so calling it here first would make both sides of the
+                // comparison below read the new value and the warning dead code. The cache
+                // holds the value running worlds actually bound; null means no world has
+                // loaded since the last cache clear (nothing to warn about), so fall back
+                // to isEnabled() to keep the comparison harmless.
+                enabledBefore = enabledCache != null ? enabledCache : isEnabled();
                 fileProperties = null;
                 enabledCache = null;
                 cfg = configFromProperties();
@@ -738,10 +748,20 @@ public final class FolesiumRegistry {
      * its own once the last store is closed.</p>
      */
     private static void ensureConfigWatcher() {
-        if (configWatcher != null || !boolProperty("autoReload", true)) {
+        if (configWatcher != null) {
             return;
         }
-        configFileStamp = configFileTimestamp();
+        // Baseline the watcher BEFORE the autoReload probe: boolProperty(...) ->
+        // fileProperties() re-reads the file when its mtime changed and commits that read
+        // into filePropertiesStamp, so a probe-first order would baseline the watcher at
+        // the post-edit stamp and the very edit that started it would never be detected
+        // or applied to the running stores. Capturing the stamp first keeps the pre-edit
+        // baseline, so the first poll sees the absorbed edit as a change and applies it.
+        long stamp = configFileTimestamp();
+        if (!boolProperty("autoReload", true)) {
+            return;
+        }
+        configFileStamp = stamp;
         Thread t = Thread.ofPlatform().daemon().name("folesium-config-watch")
                 .unstarted(FolesiumRegistry::watchConfigFile);
         configWatcher = t;
@@ -1135,8 +1155,8 @@ public final class FolesiumRegistry {
      * property-reading forms pass {@code null} and resolve it here, degrading to disabled
      * ({@code null}) when the config file exists but cannot be read; the explicit-config
      * forms pass a ready config, and only the watcher's {@code autoReload} read can still
-     * fail, which degrades to disabled the same way (opt-in: a config read failure never
-     * crashes the world load path).</p>
+     * fail, which logs a warning and leaves the watcher off without disabling the store
+     * (opt-in: a config read failure never crashes the world load path).</p>
      */
     public static synchronized FolesiumDatabase acquire(Path dir, FolesiumConfig config, FolesiumDatabase.StoreRole role) {
         ensureShutdownHook();
@@ -1175,17 +1195,15 @@ public final class FolesiumRegistry {
         } catch (UncheckedIOException e) {
             // ensureConfigWatcher() -> boolProperty("autoReload", ...) -> property() ->
             // fileProperties() re-reads the config file, which throws UncheckedIOException
-            // when the file exists but cannot be read. The property-reading acquire()
-            // forms never reach this point with an unreadable file (configuredOrDefault()
-            // already degraded to null), but this explicit-config form has no such guard:
-            // treat the read failure as disabled (Folesium is opt-in - a config read
-            // failure must never crash the world load path), with a WARNING, exactly like
-            // configuredOrDefault().
+            // when the file exists but cannot be read. The explicit-config forms already
+            // hold a ready config, so only the watcher's autoReload probe can fail here;
+            // that must not disable the store: log and continue exactly like the join
+            // path above (the watcher stays off and retries on its own polling - a config
+            // read failure never crashes the world load path).
             LOGGER.log(System.Logger.Level.WARNING,
-                    "Folesium: cannot read {0} ({1}); treating Folesium as disabled (opt-in:"
-                            + " a config read failure must not crash the server)",
+                    "Folesium: cannot read {0} ({1}); the config watcher will not be"
+                            + " started now",
                     configFilePath().toAbsolutePath(), e.toString());
-            return null;
         }
         entry = new Entry(FolesiumDatabase.open(key, config, role));
         OPEN.put(key, entry);

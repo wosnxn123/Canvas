@@ -659,33 +659,38 @@ public final class PageIndex implements AutoCloseable {
         if (!Files.isDirectory(idxDir)) {
             return;
         }
-        try (var stream = Files.list(idxDir)) {
-            java.util.List<Path> files = stream.toList();
-            files.stream().filter(p -> p.getFileName().toString().endsWith(PAGE_SUFFIX)).forEach(p -> {
-                try {
-                    Files.deleteIfExists(p);
-                } catch (IOException e) {
-                    LOGGER.log(System.Logger.Level.WARNING,
-                            "Folesium: failed to delete region page {0}: {1}", p, e.toString());
-                }
-            });
-            // Also sweep stale '<page>.idx.tmp-<uuid>' region-page staging files left by a crash between
-            // RegionPage.write's staging write and its atomic rename (page staging only - never
-            // touch WatermarkFile's '<shard>.wmk.tmp-<uuid>' staging, which may be live).
-            // RegionPage.write's staging write and its atomic rename. They are inert (never
-            // read by any load path) but accumulate across crashes; this full-delete pass is
-            // the natural place to collect them.
-            files.stream().filter(p -> p.getFileName().toString().endsWith(PAGE_SUFFIX + ".tmp-") || p.getFileName().toString().matches(".*\\.idx\\.tmp-[0-9a-fA-F-]+$")).forEach(p -> {
-                try {
-                    Files.deleteIfExists(p);
-                } catch (IOException e) {
-                    LOGGER.log(System.Logger.Level.WARNING,
-                            "Folesium: failed to delete stale page staging file {0}: {1}", p, e.toString());
-                }
-            });
-        } catch (IOException e) {
-            LOGGER.log(System.Logger.Level.WARNING,
-                    "Folesium: failed to list page files for cleanup in {0}: {1}", idxDir, e.toString());
+        // Hold every segment lock for the sweep: flushPages() writes pages while holding the
+        // owning segment lock, and RegionPage.write stages '<page>.idx.tmp-<uuid>' files, so
+        // acquiring all segment locks first guarantees no page file or staging file is live
+        // while it is deleted. The directory is small, so the hold is brief.
+        for (Segment seg : segments) {
+            seg.lock.lock();
+        }
+        try {
+            try (var stream = Files.list(idxDir)) {
+                java.util.List<Path> files = stream.toList();
+                files.stream().filter(p -> p.getFileName().toString().endsWith(PAGE_SUFFIX)).forEach(p -> {
+                    try {
+                        Files.deleteIfExists(p);
+                    } catch (IOException e) {
+                        LOGGER.log(System.Logger.Level.WARNING,
+                                "Folesium: failed to delete region page {0}: {1}", p, e.toString());
+                    }
+                });
+            } catch (IOException e) {
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Folesium: failed to list page files for cleanup in {0}: {1}", idxDir, e.toString());
+            }
+            // Also sweep stale '<page>.idx.tmp-<uuid>' region-page staging files left by a
+            // crash between RegionPage.write's staging write and its atomic rename (page
+            // staging only - never touch WatermarkFile's '<shard>.wmk.tmp-<uuid>' staging,
+            // which may be live). They are inert (never read by any load path) but accumulate
+            // across crashes; this full-delete pass is the natural place to collect them.
+            sweepStaleTmpFiles();
+        } finally {
+            for (int i = segments.length - 1; i >= 0; i--) {
+                segments[i].lock.unlock();
+            }
         }
     }
 
@@ -729,8 +734,21 @@ public final class PageIndex implements AutoCloseable {
     private void writeHint() {
         // Collect stale '<page>.tmp-<uuid>' staging files first: close() is the last
         // chance for a keyspace that never compacted, whose deleteAllPageFiles() sweep
-        // never ran.
-        sweepStaleTmpFiles();
+        // never ran. Hold every segment lock for the sweep, exactly like
+        // deleteAllPageFiles(): RegionPage.write stages '<page>.idx.tmp-<uuid>' files
+        // while its caller holds the owning segment lock, so a sweep outside the locks
+        // could delete a staging file that is actively being written (e.g. by a
+        // concurrent flushPages). The directory is small, so the hold is brief.
+        for (Segment seg : segments) {
+            seg.lock.lock();
+        }
+        try {
+            sweepStaleTmpFiles();
+        } finally {
+            for (int i = segments.length - 1; i >= 0; i--) {
+                segments[i].lock.unlock();
+            }
+        }
         List<int[]> pages = new ArrayList<>();
         if (Files.isDirectory(idxDir)) {
             try (var stream = Files.list(idxDir)) {

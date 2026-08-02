@@ -437,12 +437,24 @@ public final class AnvilRegionFile implements Closeable {
                     backup = temporarySibling(externalPath);
                     java.nio.file.Files.move(externalPath, backup,
                             java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+                    // Make the old-file rename durable BEFORE the staged publish: with
+                    // both renames in flight and a crash between them, journal replay
+                    // could drop the first rename while keeping the second, leaving the
+                    // canonical .mcc path gone (the old payload survives only under the
+                    // temporary backup name). Forcing the directory after the first
+                    // rename keeps the rename order deterministic and the canonical name
+                    // present on every crash boundary.
+                    forceParentDirectory(externalPath);
                 }
                 java.nio.file.Files.move(staged, externalPath,
                         java.nio.file.StandardCopyOption.ATOMIC_MOVE,
                         java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                 staged = null;
                 externalPublished = true;
+                // Force the directory again so the publish itself is durable (crash
+                // persistence): an unforced rename can be replayed as if it never
+                // happened, reverting the canonical .mcc to its pre-publish state while
+                // the region header already points at the new payload.
                 forceParentDirectory(externalPath);
             }
             channel.force(false);
