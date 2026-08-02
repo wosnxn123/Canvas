@@ -139,6 +139,14 @@ public final class Compressors {
     }
 
     private static byte[] zstdInflate(byte[] stored, int rawLen) {
-        return ZstdNative.decompress(stored, rawLen);
+        byte[] out = ZstdNative.decompress(stored, rawLen);
+        if (out.length != rawLen) {
+            // zstd-jni's decompress(byte[], int) treats rawLen as the *maximum* output
+            // size and trims the result when the frame is actually smaller, so an
+            // over-declared header would otherwise silently return a short array.
+            // Same hardening as inflate() above: fail loudly instead.
+            throw new IllegalStateException("Decompressed size mismatch: " + out.length + " != " + rawLen);
+        }
+        return out;
     }
 }

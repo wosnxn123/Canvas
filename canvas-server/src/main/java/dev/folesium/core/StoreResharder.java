@@ -456,6 +456,16 @@ final class StoreResharder {
     /** Ensures the staged files represent exactly the count named by COMMIT. */
     private static boolean validStagedLayout(Path staging, int count) {
         try {
+            // An empty staging directory is never a valid staged layout: the checks below
+            // all pass vacuously when it holds no shard files, and recover() would then
+            // treat the staged set as complete - finishSwap would move the old set aside
+            // and delete it, destroying the only surviving copy of the records. At least
+            // one staged .flog must be present for the layout to be real.
+            try (Stream<Path> files = Files.list(staging)) {
+                if (files.noneMatch(p -> p.getFileName().toString().endsWith(".flog"))) {
+                    return false;
+                }
+            }
             for (String name : discoverKeyspaces(staging)) {
                 for (int i = 0; i < count; i++) {
                     if (!Files.isRegularFile(staging.resolve(String.format("%s-%04d.flog", name, i)))) {
@@ -548,11 +558,14 @@ final class StoreResharder {
         for (Path p : listShardFiles(dir)) {
             Files.deleteIfExists(p);
         }
-        // 2. Move every old shard file back from the backup (markers stay behind; the
-        //    whole backup tree is dropped below).
+        // 2. Move every old shard file back from the backup. The MOVED marker stays
+        //    behind - it is not a shard file and must not be moved into the store root;
+        //    the whole backup tree is dropped below, taking the marker with it.
         if (Files.isDirectory(backup)) {
             try (Stream<Path> files = Files.list(backup)) {
-                List<Path> olds = files.filter(Files::isRegularFile).toList();
+                List<Path> olds = files.filter(Files::isRegularFile)
+                        .filter(p -> !MOVED_MARKER.equals(p.getFileName().toString()))
+                        .toList();
                 for (Path p : olds) {
                     Files.move(p, dir.resolve(p.getFileName().toString()),
                             StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);

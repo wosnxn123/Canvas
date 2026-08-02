@@ -117,7 +117,7 @@ public final class PageIndex implements AutoCloseable {
             this.maxPages = maxPages;
             this.map = new LinkedHashMap<>(Math.max(16, Math.min(maxPages, 4096)), 0.75f, true) {
                 @Override
-                protected boolean removeEldestEntry(Map.Entry<Long, Entry> eldest) {
+                protected boolean removeEldestEntry(Map.Entry<Long, PageIndex.Entry> eldest) {
                     // Evict only clean pages: dirty pages are pinned until the checkpoint
                     // flush, so eviction never does I/O and never drops unflushed updates.
                     return size() > maxPages && !eldest.getValue().dirty;
@@ -435,26 +435,42 @@ public final class PageIndex implements AutoCloseable {
             throw new FolesiumException("Failed to create page index directory " + idxDir, e);
         }
         for (Entry e : dirty) {
-            // Write under the page monitor only - never take a segment lock while holding
-            // it (the lock order everywhere is segment lock -> page monitor). The dirty
-            // count is decremented atomically with a non-negative clamp instead: a
-            // concurrent rebuildPageFrom()/invalidateAll() may already have decremented or
-            // reset it for this entry, and the counter only backs dirtyPages() reporting
-            // (flush always re-scans the segment maps), so a spurious decrement is
-            // harmless as long as it never drives the counter negative.
-            synchronized (e) {
-                if (!e.dirty || invalidated) {
-                    continue;
+            long key = pack(e.page.regionX(), e.page.regionZ());
+            Segment seg = segments[segmentIndex(key)];
+            // Re-verify residency under the owning segment lock and write while still
+            // holding it: a concurrent rebuildPageFrom() may have removed this entry (and
+            // deleted its corrupt backing file) after the collection above, in which case
+            // writing the cached page back would resurrect the damaged page file. Holding
+            // the segment lock across the check and the write closes the race, and the
+            // page monitor is taken inside in the documented order (segment lock -> page
+            // monitor, exactly like updateSlot - no code path acquires a segment lock
+            // while holding the page monitor). The dirty count is decremented atomically
+            // with a non-negative clamp instead of a segment-locked one: a concurrent
+            // rebuildPageFrom()/invalidateAll() may already have decremented or reset it
+            // for this entry, and the counter only backs dirtyPages() reporting (flush
+            // always re-scans the segment maps), so a spurious decrement is harmless as
+            // long as it never drives the counter negative.
+            seg.lock.lock();
+            try {
+                if (seg.map.get(key) != e) {
+                    continue; // removed by rebuildPageFrom: the region starts fresh, nothing to flush
                 }
-                try {
-                    e.page.write(pagePath(e.page.regionX(), e.page.regionZ()));
-                    e.dirty = false;
-                    e.persisted = true;
-                    dirtyCount.updateAndGet(v -> Math.max(0, v - 1));
-                } catch (IOException ex) {
-                    throw new FolesiumException("Failed to write region page "
-                            + pagePath(e.page.regionX(), e.page.regionZ()), ex);
+                synchronized (e) {
+                    if (!e.dirty || invalidated) {
+                        continue;
+                    }
+                    try {
+                        e.page.write(pagePath(e.page.regionX(), e.page.regionZ()));
+                        e.dirty = false;
+                        e.persisted = true;
+                        dirtyCount.updateAndGet(v -> Math.max(0, v - 1));
+                    } catch (IOException ex) {
+                        throw new FolesiumException("Failed to write region page "
+                                + pagePath(e.page.regionX(), e.page.regionZ()), ex);
+                    }
                 }
+            } finally {
+                seg.lock.unlock();
             }
         }
     }
@@ -493,9 +509,13 @@ public final class PageIndex implements AutoCloseable {
      * open - and again on {@link #close()} as a safety net. Best-effort: failures are
      * logged, never thrown. Callers must have invalidated the index first (e.g. via
      * {@link #invalidateAll()}) so no in-memory page can be flushed back over the
-     * deletion.
+     * deletion. No-op in read-only mode, like {@link #flushWatermarks()} and
+     * {@link #setCompactionWatermark()}: a read-only open must never delete page files.
      */
     public void deleteAllPageFiles() {
+        if (readOnly) {
+            return;
+        }
         if (!Files.isDirectory(idxDir)) {
             return;
         }

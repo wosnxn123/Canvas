@@ -486,8 +486,11 @@ public final class ShardFile implements AutoCloseable {
         // so a crash between the two leaves stale pages on disk. Discard them so the
         // replay below rebuilds every page from the (post-compaction) log instead of
         // merging into stale slots. Without a .cwmk the pages on disk were written by
-        // ordinary checkpoints and stay valid.
-        if (pageIndex.compactionWatermarkExists(shardName)) {
+        // ordinary checkpoints and stay valid. Read-only opens skip the deletion (their
+        // page files must never be touched): the replay below still rebuilds every page
+        // in memory, and the stale files keep their place until a read-write open
+        // discards them.
+        if (!readOnly && pageIndex.compactionWatermarkExists(shardName)) {
             pageIndex.deleteAllPageFiles();
         }
         long eof = channel.size();
@@ -1209,14 +1212,18 @@ public final class ShardFile implements AutoCloseable {
     /**
      * Best-effort rollback when the compacted file was moved into place but could not be
      * reopened: copies the pre-compaction data - still reachable through the old channel -
-     * back over {@code path} so the shard keeps serving its old state with the old channel.
-     * Throws when the restore itself fails, in which case the compaction failure propagates
-     * with both errors attached.
+     * back over {@code path} so the shard keeps serving its old state. The field
+     * {@code channel} is rebound to the restored file: the swap unlinked the pre-compaction
+     * inode the field still referred to, so without a rebind every later write would land on
+     * that orphaned inode and be invisible to the next open (silent data loss). Throws when
+     * the restore itself fails, in which case the compaction failure propagates with both
+     * errors attached.
      */
     private void restoreOldShardAfterFailedReopen(IOException reopenFailure) throws IOException {
         IOException restoreFailure = null;
+        long oldSize = 0;
         try {
-            long oldSize = channel.size();
+            oldSize = channel.size();
             try (FileChannel restore = FileChannel.open(path,
                     StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
                 long written = 0;
@@ -1229,6 +1236,24 @@ public final class ShardFile implements AutoCloseable {
                 }
                 restore.force(false);
             }
+            // The field channel still refers to the pre-compaction inode, which
+            // moveReplacing() unlinked when the compacted file was swapped in; the copy
+            // above restored the old data into the new inode on `path`. Rebind the field
+            // to the restored file so subsequent writes address the file the next open
+            // will read. The index map was never swapped and writePos still describes the
+            // pre-compaction state; the restored file is exactly that state (length
+            // oldSize), so appends continue where the compaction was interrupted.
+            FileChannel restored = FileChannel.open(path,
+                    StandardOpenOption.READ, StandardOpenOption.WRITE);
+            try {
+                channel.close();
+            } catch (IOException closeFailure) {
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Folesium: failed to close the pre-compaction channel of {0}: {1}",
+                        path, closeFailure.toString());
+            }
+            channel = restored;
+            writePos = oldSize;
         } catch (IOException e) {
             restoreFailure = e;
         }

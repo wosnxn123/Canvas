@@ -127,6 +127,12 @@ public final class DictionaryStore {
                     + " samples; zstd requires at least " + MIN_SAMPLES);
         }
         byte[] trained = ZstdNative.trainDict(samples.toArray(new byte[0][]), DICT_SIZE);
+        // Symmetric with load(): never persist a dictionary that load() would reject, or
+        // every existing codec-3 record of this keyspace would become undecodable.
+        if (trained.length < MIN_DICT_BYTES || !hasDictionaryMagic(trained)) {
+            throw new FolesiumException("Dictionary training for " + dictFile + " produced an invalid dictionary ("
+                    + trained.length + " bytes, missing or wrong magic header); refusing to write it.");
+        }
         Path parent = dictFile.getParent();
         if (parent != null) {
             Files.createDirectories(parent);

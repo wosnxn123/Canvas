@@ -34,6 +34,7 @@ import java.util.Arrays;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.function.BiConsumer;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 /**
@@ -167,7 +168,16 @@ public final class Keyspace implements AutoCloseable {
                     .filter(fn -> fn.startsWith(prefix) && fn.endsWith(".flog"))
                     .map(fn -> fn.substring(prefix.length(), fn.length() - ".flog".length()))
                     .filter(Keyspace::isDecimalIndex)
-                    .mapToInt(Integer::parseInt)
+                    // isDecimalIndex() only checks that the suffix is all digits, without any
+                    // length limit: a suffix too long for int overflows Integer.parseInt, so skip
+                    // such files instead of failing the whole keyspace open.
+                    .flatMapToInt(s -> {
+                        try {
+                            return IntStream.of(Integer.parseInt(s));
+                        } catch (NumberFormatException e) {
+                            return IntStream.empty();
+                        }
+                    })
                     .sorted()
                     .toArray();
         } catch (IOException e) {
@@ -585,26 +595,44 @@ public final class Keyspace implements AutoCloseable {
             }
         }
         if (pageIndex != null) {
+            // After the shards: page flush must never outrun the log force in close().
+            // Order within the index: dirty pages first, then the watermarks (a watermark must
+            // never claim log offsets that the pages on disk do not yet cover), then close()
+            // writes the hint manifest and releases the files. Each phase is guarded separately
+            // so a failed flush()/flushWatermarks() can never skip pageIndex.close(): skipping
+            // it would leak file handles and leave a stale hint manifest on disk.
             try {
-                // After the shards: page flush must never outrun the log force in close().
-                // Order within the index: dirty pages first, then the watermarks (a watermark
-                // must never claim log offsets that the pages on disk do not yet cover), then
-                // close() writes the hint manifest and releases the files.
                 pageIndex.flush();
+            } catch (RuntimeException e) {
+                first = recordPageIndexFailure(first, "flush dirty pages", e);
+            }
+            try {
                 pageIndex.flushWatermarks();
-                pageIndex.close();
             } catch (IOException | RuntimeException e) {
-                FolesiumException failure = e instanceof FolesiumException fe
-                        ? fe : new FolesiumException("Cannot close the page index of keyspace '" + name + "'", e);
-                if (first == null) {
-                    first = failure;
-                } else {
-                    first.addSuppressed(failure);
-                }
+                first = recordPageIndexFailure(first, "flush shard watermarks", e);
+            }
+            try {
+                pageIndex.close();
+            } catch (RuntimeException e) {
+                first = recordPageIndexFailure(first, "close the page index", e);
             }
         }
         if (first != null) {
             throw first;
         }
+    }
+
+    /**
+     * Records a page-index phase failure from {@link #close()} and returns the (possibly new)
+     * first failure, so every phase failure surfaces instead of being lost to the last one.
+     */
+    private FolesiumException recordPageIndexFailure(FolesiumException first, String phase, Exception e) {
+        FolesiumException failure = e instanceof FolesiumException fe
+                ? fe : new FolesiumException("Cannot " + phase + " of keyspace '" + name + "'", e);
+        if (first == null) {
+            return failure;
+        }
+        first.addSuppressed(failure);
+        return first;
     }
 }

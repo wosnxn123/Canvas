@@ -248,10 +248,17 @@ public final class FolesiumDatabase implements AutoCloseable {
     }
 
     private void requireCompressionUsable(FolesiumConfig.Compression compression) {
-        if (compression == FolesiumConfig.Compression.ZSTD && !ZstdNative.available()) {
-            throw new FolesiumException("Folesium store at " + dir
-                    + " is configured for ZSTD compression, but zstd-jni is not available on the classpath. "
-                    + "Run on a Folia/Canvas server (which ships zstd-jni) or add com.github.luben:zstd-jni.");
+        // ZSTD_DICT additionally needs the zstd-jni dictionary API (ZstdNative.dictAvailable()),
+        // but that is only probed once the library itself is present, so a single !available()
+        // check covers both codecs.
+        if ((compression == FolesiumConfig.Compression.ZSTD
+                || compression == FolesiumConfig.Compression.ZSTD_DICT) && !ZstdNative.available()) {
+            throw new FolesiumException("Folesium store at " + dir + " is configured for "
+                    + compression + " compression, but zstd-jni is not available on the classpath"
+                    + (compression == FolesiumConfig.Compression.ZSTD_DICT
+                            ? " (ZSTD_DICT also needs the zstd-jni dictionary API, which ships with the same library)"
+                            : "")
+                    + ". Run on a Folia/Canvas server (which ships zstd-jni) or add com.github.luben:zstd-jni.");
         }
     }
 

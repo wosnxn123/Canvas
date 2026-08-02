@@ -103,7 +103,17 @@ public final class FolesiumCli {
 
     private static Path resolveWorldDir(OptionSet options) {
         if (options.has("folesiumWorldDir")) {
-            return ((File) options.valueOf("folesiumWorldDir")).toPath();
+            // Same File-typed guard as -W/--world-dir below: both options are declared
+            // File-typed by CraftBukkit/Folia/Canvas today, but if upstream ever
+            // re-declares this one as String, a ClassCastException here would escape the
+            // caller's try/catch and abort startup with a confusing stack trace instead
+            // of a clean conversion error.
+            File folesium = fileOrNull(options.valueOf("folesiumWorldDir"));
+            if (folesium == null) {
+                LOGGER.severe("Folesium: --folesiumWorldDir did not resolve to a File value");
+                System.exit(2);
+            }
+            return folesium.toPath();
         }
         // Mirror what DedicatedServer uses: <world-container>/<world-name>
         // We replicate the resolution here instead of pulling in MC internals so

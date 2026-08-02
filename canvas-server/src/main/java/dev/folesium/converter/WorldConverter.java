@@ -261,6 +261,22 @@ public final class WorldConverter {
      * tree.</p>
      */
     public Stats folesiumToAnvil(Path folesiumDir, Path dimensionDir, FolesiumConfig config) throws IOException {
+        return folesiumToAnvil(folesiumDir, dimensionDir, config, FolesiumDatabase.StoreRole.DIMENSION);
+    }
+
+    /**
+     * Same as {@link #folesiumToAnvil(Path, Path, FolesiumConfig)}, but opens the source
+     * store with the given {@code role} instead of assuming
+     * {@link FolesiumDatabase.StoreRole#DIMENSION}. Pass the role recorded in the store's
+     * metadata ({@link FolesiumDatabase#readRole(Path)}): a PLAYERS store opened as
+     * DIMENSION would fail ("Refusing to mix player data and chunk data in one store"),
+     * and a store without a recorded role would otherwise be converted as if it were an
+     * empty dimension store.
+     *
+     * @param role the store role to open {@code folesiumDir} as
+     */
+    public Stats folesiumToAnvil(Path folesiumDir, Path dimensionDir, FolesiumConfig config,
+                                 FolesiumDatabase.StoreRole role) throws IOException {
         long start = System.nanoTime();
         AtomicLong chunkCount = new AtomicLong();
         AtomicLong byteCount = new AtomicLong();
@@ -272,7 +288,7 @@ public final class WorldConverter {
         // Export only: read the store's existing layout without rewriting it first.
         try (FolesiumDatabase db = FolesiumDatabase.open(folesiumDir,
                 FolesiumConfig.defaults().withDurability(FolesiumConfig.DurabilityMode.EXPLICIT),
-                FolesiumDatabase.StoreRole.DIMENSION, false)) {
+                role, false)) {
             for (Map.Entry<String, String> e : DIR_TO_KEYSPACE.entrySet()) {
                 Path out = dimensionDir.resolve(e.getKey());
                 Keyspace ks = db.keyspace(e.getValue());
