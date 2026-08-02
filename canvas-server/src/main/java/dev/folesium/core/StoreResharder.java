@@ -529,8 +529,7 @@ final class StoreResharder {
                 }
                 try (Stream<Path> files = Files.list(staging)) {
                     long actual = files.filter(Files::isRegularFile)
-                            .filter(p -> p.getFileName().toString().startsWith(name + "-")
-                                    && p.getFileName().toString().endsWith(".flog"))
+                            .filter(p -> isShardFileOf(p, name))
                             .count();
                     if (actual != count) {
                         return false;
@@ -563,6 +562,15 @@ final class StoreResharder {
      * legitimate output of a finished growth reshard), proves it. Judging that state
      * complete is what stops a crash in the cleanup window (between emptying and deleting
      * staging) from rolling a finished swap back.
+     *
+     * <p>A third rule applies to both branches: every file that counts toward completeness
+     * must carry the committed {@code count} in its header (see {@link #recordedShardCount}) -
+     * a file stamped with any other shard count is a leftover of a different layout, so the
+     * set is mixed (e.g. a crash after the {@code MOVED} marker but before every old file was
+     * moved aside leaves old-layout shards beside new-layout ones). Finishing the swap over
+     * a mixed set would strand or delete records, so a header mismatch judges the layout
+     * incomplete and {@link #recover} rolls it back via {@link #restoreOldLayout}, which
+     * converges on the consistent old layout.</p>
      */
     private static boolean completeNewLayout(Path dir, Path staging, int count) {
         try {
@@ -576,7 +584,13 @@ final class StoreResharder {
                     // Header-only files count here - they are the moved-in output of the
                     // finished swap, not eagerly recreated empties (see the method javadoc).
                     for (int i = 0; i < count; i++) {
-                        if (!Files.isRegularFile(dir.resolve(String.format("%s-%04d.flog", name, i)))) {
+                        Path shard = dir.resolve(String.format("%s-%04d.flog", name, i));
+                        // Every file that counts toward completeness must name the new
+                        // layout in its header: a file stamped with any other shard count
+                        // is a leftover of a different layout, so the set is mixed and the
+                        // swap must not be finished over it (recover() rolls the layout
+                        // back via restoreOldLayout instead).
+                        if (!Files.isRegularFile(shard) || recordedShardCount(shard) != count) {
                             return false;
                         }
                     }
@@ -593,7 +607,22 @@ final class StoreResharder {
                     // shard after a crash mid-swap, which must not make a partial new layout
                     // look complete (that would let the backup - the only surviving copy of
                     // the records the missing shards should have held - be deleted).
-                    if (!isPopulatedShard(dirShard) && !Files.isRegularFile(stagingShard)) {
+                    if (isPopulatedShard(dirShard)) {
+                        // The dir file counts: it must name the new layout in its header,
+                        // or the set is mixed with leftovers of another layout and the swap
+                        // is not finishable over it.
+                        if (recordedShardCount(dirShard) != count) {
+                            return false;
+                        }
+                    } else if (Files.isRegularFile(stagingShard)) {
+                        // The staging file counts: it is copyKeyspace's output, so its
+                        // header must name the committed count - a mismatch means the
+                        // committed count does not describe these files (finishing the swap
+                        // would strand or delete records), so the layout is incomplete.
+                        if (recordedShardCount(stagingShard) != count) {
+                            return false;
+                        }
+                    } else {
                         return false;
                     }
                 }
@@ -819,26 +848,35 @@ final class StoreResharder {
         return count;
     }
 
-    /** Number of populated {@code .flog} shard files of one keyspace directly inside {@code dir}. */
+    /**
+     * Whether {@code p} is a shard log of exactly {@code keyspace}. Matching on the
+     * {@link #SHARD_FILE} name's captured group - never on a {@code keyspace + "-"} prefix -
+     * keeps keyspaces like {@code a} and {@code a-b} from miscounting each other's files:
+     * {@code 'a'} must not count {@code a-b-0000.flog}.
+     */
+    private static boolean isShardFileOf(Path p, String keyspace) {
+        Matcher m = SHARD_FILE.matcher(p.getFileName().toString());
+        return m.matches() && m.group(1).equals(keyspace);
+    }
+
+    /** Number of populated shard logs of exactly one keyspace, directly inside {@code dir}. */
     private static long countShardFiles(Path dir, String keyspace) throws IOException {
         try (Stream<Path> files = Files.list(dir)) {
             return files.filter(StoreResharder::isPopulatedShard)
-                    .filter(p -> p.getFileName().toString().startsWith(keyspace + "-")
-                            && p.getFileName().toString().endsWith(".flog"))
+                    .filter(p -> isShardFileOf(p, keyspace))
                     .count();
         }
     }
 
     /**
-     * Number of shard files of one keyspace inside the staging tree by mere presence:
+     * Number of shard logs of exactly one keyspace inside the staging tree by mere presence:
      * copyKeyspace writes even header-only files for the empty shards of the new layout,
      * so they are legitimate evidence the swap reached them (see {@link #completeNewLayout}).
      */
     private static long countStagedShardFiles(Path dir, String keyspace) throws IOException {
         try (Stream<Path> files = Files.list(dir)) {
             return files.filter(Files::isRegularFile)
-                    .filter(p -> p.getFileName().toString().startsWith(keyspace + "-")
-                            && p.getFileName().toString().endsWith(".flog"))
+                    .filter(p -> isShardFileOf(p, keyspace))
                     .count();
         }
     }

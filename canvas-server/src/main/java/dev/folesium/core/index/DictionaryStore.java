@@ -35,7 +35,9 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 
 /**
@@ -99,6 +101,8 @@ public final class DictionaryStore {
      * deleted and recreated underneath it. The retry only triggers on the delete race (the
      * previous holder deleting the lock file mid-acquisition), which resolves within
      * microseconds; a bounded loop keeps a pathological race from spinning forever.
+     * Exhaustion is reported as an {@link IOException} rather than silently conflated with
+     * contention (see {@link #acquireTrainLock}).
      */
     private static final int LOCK_ACQUIRE_ATTEMPTS = 3;
 
@@ -226,8 +230,11 @@ public final class DictionaryStore {
      *
      * <p>Like {@link #train}, the check-train-move sequence runs under the cross-process
      * training lock, but contention is not an error here: a peer training the same keyspace
-     * produces the same outcome as an already-present dictionary, so a failed lock
-     * acquisition is reported as {@code null}.</p>
+     * produces the same outcome as an already-present dictionary, so a <em>contended</em>
+     * lock acquisition (another process holds it) is reported as {@code null}. An acquisition
+     * that fails outright - an I/O error, or {@link #acquireTrainLock}'s delete-race retries
+     * exhausting - still throws {@link IOException}, which callers treat as a failure to
+     * degrade from (the dictionary is simply not trained).</p>
      *
      * @return the trained bytes when a new dictionary was written, or {@code null} when
      *         {@code dictFile} already exists or another process is currently training it
@@ -366,15 +373,29 @@ public final class DictionaryStore {
      *
      * <p>Because the lock file is deleted on release (see {@link #releaseTrainLock}), an acquirer
      * can end up locking an inode the path no longer names. The probe below makes that harmless:
-     * after {@code tryLock} succeeds the path is re-opened and locked again; a second successful
-     * lock proves our first lock is on an orphaned inode (the path now names a different,
-     * unlocked file), a {@code null} proves another process holds the current file (contention),
-     * and {@link OverlappingFileLockException} proves path and lock agree (the common case).
-     * Orphaned acquisitions are released and retried, bounded by {@link #LOCK_ACQUIRE_ATTEMPTS}.</p>
+     * after {@code tryLock} succeeds the path is re-opened, and the identity of the file the path
+     * named at open time (its file key, captured before the channel open) is compared with the
+     * file the path names at probe time. A mismatch proves our first lock is on an orphaned inode
+     * (the path now names a different file) and the acquisition is released and retried. The
+     * probe lock result is only auxiliary: a {@code null} probe lock means another process holds
+     * the current file (contention), a second successful lock means the current file is unlocked
+     * (orphaned inode - retry), and an {@link OverlappingFileLockException} is treated as
+     * consistent only when the file identities match - the exception is JVM-wide rather than
+     * inode-scoped, so in the same JVM it also fires when a peer thread holds a live lock on a
+     * recreated file while we hold the orphaned inode, which must retry instead of being misread
+     * as our own lock. Orphaned acquisitions are released and retried, bounded by
+     * {@link #LOCK_ACQUIRE_ATTEMPTS}.
+     * Retries that exhaust without resolving are reported as an {@link IOException}: after three
+     * attempts the delete churn is indistinguishable from a real race, and reporting it as
+     * contention would make {@link #trainIfMissing} silently claim the dictionary exists when it
+     * was never trained.</p>
      *
      * @return the channel holding the lock, or {@code null} when another process (or this JVM)
      *         already holds it
-     * @throws IOException if the lock file cannot be opened or locked
+     * @throws IOException if the lock file cannot be opened or locked, or the delete-race
+     *                     retries are exhausted (after {@link #LOCK_ACQUIRE_ATTEMPTS} attempts
+     *                     the churn is indistinguishable from a real race, so it fails loudly
+     *                     instead of being silently conflated with contention)
      */
     private static FileChannel acquireTrainLock(Path dictFile) throws IOException {
         Path parent = dictFile.getParent();
@@ -384,6 +405,20 @@ public final class DictionaryStore {
         Path lockFile = lockFileOf(dictFile);
         IOException lastFailure = null;
         for (int attempt = 0; attempt < LOCK_ACQUIRE_ATTEMPTS; attempt++) {
+            // Ensure the lock file exists before anchoring its identity: the previous holder
+            // deletes it on release (see {@link #releaseTrainLock}), and the anchor below must
+            // name a real inode to be comparable (a missing file would otherwise force a wasted
+            // retry on the common first acquisition after a release).
+            try (var seed = FileChannel.open(lockFile,
+                    StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
+                // Creates the file if missing; nothing else to do.
+            }
+            // Anchor: the identity of the file the path names when the lock channel is opened.
+            // FileChannel exposes no file key, so the anchor is captured from the path BEFORE
+            // the open - a replacement after the capture then always surfaces as an anchor
+            // mismatch in the probe below, which is the safe direction (release and retry)
+            // instead of a false "same inode".
+            Object openedFileKey = fileKeyOf(lockFile);
             FileChannel channel = FileChannel.open(lockFile,
                     StandardOpenOption.CREATE, StandardOpenOption.WRITE);
             try {
@@ -411,8 +446,19 @@ public final class DictionaryStore {
                     // retry against a freshly created lock file.
                     channel.close();
                 } catch (OverlappingFileLockException e) {
-                    // The probe resolved to the same inode we already locked: consistent.
-                    return channel;
+                    // This JVM holds a lock on the file the path currently names. Only when
+                    // that file is the SAME inode we locked is it our own lock (consistent).
+                    // OverlappingFileLockException is JVM-wide rather than inode-scoped, so in
+                    // the same JVM it also fires when a peer thread holds a live lock on a
+                    // recreated file while we hold the orphaned inode - mistaking that for
+                    // consistent would let both threads train and silently overwrite each
+                    // other's dictionary. Judge by file identity: same inode -> our lock,
+                    // hold it; different (or unknown) -> orphaned, release and retry against
+                    // the current file.
+                    if (openedFileKey != null && openedFileKey.equals(fileKeyOf(lockFile))) {
+                        return channel;
+                    }
+                    channel.close();
                 }
             } catch (OverlappingFileLockException e) {
                 // This JVM already holds the lock on this keyspace: contention.
@@ -426,9 +472,27 @@ public final class DictionaryStore {
         if (lastFailure != null) {
             throw lastFailure;
         }
-        // Retries exhausted on transient delete races: report contention; the caller's next
-        // attempt starts a fresh acquisition.
-        return null;
+        // Retries exhausted on transient delete races: every attempt's lock landed on an inode
+        // the path no longer named, and no IOException ever fired. This is NOT the contention
+        // null - no other process holds the current lock file - so report it as the failure it
+        // is: as contention, trainIfMissing would silently report 'already handled' for a
+        // dictionary that was never trained (the caller degrades an IOException instead).
+        throw new IOException("could not acquire the dictionary training lock after "
+                + LOCK_ACQUIRE_ATTEMPTS + " attempts");
+    }
+
+    /**
+     * The file key of {@code p} - the identity of the file the path currently names - or
+     * {@code null} when the file does not exist or its key cannot be read. Used by
+     * {@link #acquireTrainLock} to tell an orphaned inode (the file we locked is no longer the
+     * one the path names) from a consistent acquisition.
+     */
+    private static Object fileKeyOf(Path p) {
+        try {
+            return Files.readAttributes(p, BasicFileAttributes.class).fileKey();
+        } catch (IOException e) {
+            return null;
+        }
     }
 
     /**

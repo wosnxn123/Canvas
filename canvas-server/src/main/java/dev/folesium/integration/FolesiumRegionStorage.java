@@ -92,6 +92,11 @@ public final class FolesiumRegionStorage implements AutoCloseable {
         Path storeDir = storeDirectoryFor(folder);
         String keyspaceName = keyspaceFor(folder);
         FolesiumDatabase db = FolesiumRegistry.acquire(storeDir);
+        if (db == null) {
+            // acquire() degrades to disabled (returns null) when the config file exists but
+            // cannot be read; fall through to vanilla behaviour like isEnabled() == false.
+            return null;
+        }
         LOGGER.log(System.Logger.Level.INFO, "Folesium: {0} -> {1}#{2}", folder, storeDir, keyspaceName);
         return new FolesiumRegionStorage(storeDir, keyspaceName, db);
     }

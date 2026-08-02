@@ -386,10 +386,25 @@ public final class FolesiumRegistry {
     /**
      * Whether the server integration should route chunk I/O through Folesium.
      * Defaults to {@code false}: an unconfigured server keeps vanilla Anvil behaviour.
+     * A config file that exists but cannot be read is treated as disabled (with a WARNING):
+     * Folesium is opt-in, so a config read failure never crashes the world load path.
      */
     public static synchronized boolean isEnabled() {
         if (enabledCache == null) {
-            enabledCache = boolProperty("enabled", false);
+            try {
+                enabledCache = boolProperty("enabled", false);
+            } catch (UncheckedIOException e) {
+                // A config file that exists but cannot be read (fileProperties() throws
+                // UncheckedIOException) must not crash the world load path: Folesium is
+                // opt-in, so degrade to disabled. The outcome is cached like every other
+                // isEnabled() result; reload()/the config watcher re-read the file and
+                // clear the cache when it becomes readable again.
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Folesium: cannot read {0} ({1}); treating Folesium as disabled (opt-in:"
+                                + " a config read failure must not crash the server)",
+                        configFilePath().toAbsolutePath(), e.toString());
+                enabledCache = false;
+            }
         }
         return enabledCache;
     }
@@ -521,6 +536,25 @@ public final class FolesiumRegistry {
                 workloadCompaction,
                 compactIoLimit
         );
+    }
+
+    /**
+     * The effective configuration for the property-reading {@link #acquire(Path)} entry
+     * points, or {@code null} when the config file exists but cannot be read
+     * ({@code fileProperties()} throws {@link UncheckedIOException}): like
+     * {@link #isEnabled()}, a read failure degrades to disabled instead of crashing the
+     * world load path (opt-in contract), with a WARNING logged.
+     */
+    private static FolesiumConfig configuredOrDefault() {
+        try {
+            return configFromProperties();
+        } catch (UncheckedIOException e) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: cannot read {0} ({1}); treating Folesium as disabled (opt-in:"
+                            + " a config read failure must not crash the server)",
+                    configFilePath().toAbsolutePath(), e.toString());
+            return null;
+        }
     }
 
     /**
@@ -953,18 +987,31 @@ public final class FolesiumRegistry {
         }
     }
 
-    /** Opens (or joins) the dimension store in {@code dir} and increments its reference count. */
+    /**
+     * Opens (or joins) the dimension store in {@code dir} and increments its reference count.
+     *
+     * @return the store, or {@code null} when the config file exists but cannot be read - a
+     *         read failure degrades to disabled (Folesium is opt-in: a config read failure
+     *         never crashes the world load path) and is logged as a WARNING
+     */
     public static synchronized FolesiumDatabase acquire(Path dir) {
-        return acquire(dir, configFromProperties(), FolesiumDatabase.StoreRole.DIMENSION);
+        FolesiumConfig config = configuredOrDefault();
+        return config == null ? null : acquire(dir, config, FolesiumDatabase.StoreRole.DIMENSION);
     }
 
     public static synchronized FolesiumDatabase acquire(Path dir, FolesiumConfig config) {
         return acquire(dir, config, FolesiumDatabase.StoreRole.DIMENSION);
     }
 
-    /** Opens (or joins) the store in {@code dir} with the given role, using configured defaults. */
+    /**
+     * Opens (or joins) the store in {@code dir} with the given role, using configured defaults.
+     *
+     * @return the store, or {@code null} when the config file exists but cannot be read - a
+     *         read failure degrades to disabled (see {@link #acquire(Path)})
+     */
     public static synchronized FolesiumDatabase acquire(Path dir, FolesiumDatabase.StoreRole role) {
-        return acquire(dir, configFromProperties(), role);
+        FolesiumConfig config = configuredOrDefault();
+        return config == null ? null : acquire(dir, config, role);
     }
 
     public static synchronized FolesiumDatabase acquire(Path dir, FolesiumConfig config, FolesiumDatabase.StoreRole role) {

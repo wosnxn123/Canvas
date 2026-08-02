@@ -118,4 +118,5 @@ public final class WatermarkFile {
             Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
         }
     }
+
 }

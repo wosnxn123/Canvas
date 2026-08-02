@@ -456,6 +456,14 @@ public final class PlayerDataConverter {
         Path exportRoot = playerRootFor(worldRoot);
         boolean modern = !exportRoot.equals(worldRoot);
         List<Mapping> mappings = modern ? MODERN_MAPPINGS : LEGACY_MAPPINGS;
+        // Sweep writeAtomically crash leftovers ({@code <uuid>.<ext>.tmp-<uuid>} sibling
+        // files) from the target directories before any new write, mirroring the
+        // staging sweep: an interrupted export leaves them behind, they match neither
+        // the UUID filename pattern nor any other consumer, and they would accumulate
+        // in the player directories forever otherwise.
+        for (Mapping m : mappings) {
+            cleanTmpLeftovers(exportRoot.resolve(m.dir()));
+        }
         try (FolesiumDatabase db = FolesiumDatabase.open(storeDir,
                 FolesiumConfig.defaults().withDurability(FolesiumConfig.DurabilityMode.EXPLICIT),
                 FolesiumDatabase.StoreRole.PLAYERS, false)) {
@@ -515,6 +523,30 @@ public final class PlayerDataConverter {
     }
 
     /**
+     * Best-effort removal of {@code .tmp-*} files in {@code out} left behind by an
+     * interrupted {@link #writeAtomically} (a crash between writing the temporary
+     * file and publishing it). Only regular files whose name contains the
+     * {@code .tmp-} marker are touched, so real player files are never deleted;
+     * failures are ignored (the leftovers are inert). Mirrors
+     * {@link #cleanStagingSiblings}.
+     */
+    private static void cleanTmpLeftovers(Path out) {
+        try (Stream<Path> files = Files.list(out)) {
+            files.filter(Files::isRegularFile)
+                    .filter(p -> p.getFileName().toString().contains(".tmp-"))
+                    .forEach(p -> {
+                        try {
+                            Files.deleteIfExists(p);
+                        } catch (IOException ignored) {
+                            // best-effort only
+                        }
+                    });
+        } catch (IOException ignored) {
+            // best-effort only; a missing directory means nothing to sweep
+        }
+    }
+
+    /**
      * Best-effort removal of {@code .folesium-staging-*} siblings of {@code out} left
      * behind by an interrupted backup-mode conversion (a crash between creating the
      * staging tree and swapping it in). Only directories whose name starts with
@@ -571,7 +603,18 @@ public final class PlayerDataConverter {
         for (Path file : files) {
             UUID id = uuidOf(file);
             if (id != null && !stored.contains(id)) {
-                Files.deleteIfExists(file);
+                try {
+                    Files.deleteIfExists(file);
+                } catch (IOException ex) {
+                    // A single player file that cannot be deleted (Windows file lock,
+                    // permissions, ...) must not abort the whole export: skip it and
+                    // warn, mirroring the dimension-side prune. The file stays on
+                    // disk, so a later export may resurrect it; the operator can
+                    // delete it by hand.
+                    System.err.println("Folesium: skipping " + file.getFileName()
+                            + ": cannot delete it, the player may be resurrected by a later export ("
+                            + ex.getMessage() + ")");
+                }
             }
         }
     }

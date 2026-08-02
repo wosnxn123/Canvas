@@ -887,15 +887,32 @@ public final class FolesiumDatabase implements AutoCloseable {
         long bytesSinceSleep = 0;
         // Whether THIS caller started the pass as the group-commit thread. The snapshot
         // only classifies the caller - a flusher-class caller is one whose retirement
-        // must stop the pass - while each post-sleep checkpoint below re-reads the
-        // volatile flusher field, so the "still the flusher" decision is always made
-        // against the latest state. A non-flusher caller (the server save thread via
-        // {@link FolesiumRegistry#flushAll()}, which also drives
+        // must stop the pass - while each per-iteration checkpoint in the loop below
+        // re-reads the volatile flusher field, so the "still the flusher" decision is
+        // always made against the latest state. A non-flusher caller (the server save
+        // thread via {@link FolesiumRegistry#flushAll()}, which also drives
         // {@link #compactIfNeededThrottled()}) legitimately runs this pass on its own
         // thread and is never the flusher, so the identity comparison stays false for it
-        // and never aborts the pass after a rate-limit sleep.
+        // and never aborts the pass.
         boolean callerIsFlusher = Thread.currentThread() == flusher;
         for (ShardFile s : candidates) {
+            // Retirement/closed checkpoint on every iteration, BEFORE the next compact(): a
+            // store that was closed (close() is tearing shards down) must not keep compacting,
+            // and a group-commit thread that was retired/replaced in the meantime (durability
+            // switched away from BATCH, or a new flusher owns the loop now) must stop too - but
+            // only when the caller IS the flusher: `flusher != Thread.currentThread()` is always
+            // true for a non-flusher caller, so the identity comparison is skipped for them.
+            // The check sits OUTSIDE the rate-limit block so it runs on every iteration even
+            // when compactIoLimit is 0 (unlimited - the default): the old placement inside the
+            // `sleepMillis > 0` branch was unreachable with the default configuration, so a
+            // store closed during an unlimited pass kept compacting into channels close() was
+            // closing. The flusher field is volatile (all writes are under flusherLock), so this
+            // re-read at every iteration - not the pass-start snapshot alone - always sees the
+            // latest retirement decision. Abort the pass here - before compact(), whose channel
+            // I/O may hit channels close() is closing.
+            if (closed.get() || (callerIsFlusher && flusher != Thread.currentThread())) {
+                break;
+            }
             s.compact();
             // compactIoLimit: cap compaction I/O near `limit` bytes/second. Simple
             // version - accumulate the post-compaction size of every shard rewritten in
@@ -906,22 +923,6 @@ public final class FolesiumDatabase implements AutoCloseable {
                 long sleepMillis = bytesSinceSleep * 1000 / ioLimit;
                 if (sleepMillis > 0) {
                     sleepQuietly(sleepMillis);
-                    // Retirement check after the rate-limit sleep: a store that was closed
-                    // while the pass slept (close() is tearing shards down) must not keep
-                    // compacting, and a group-commit thread that was retired/replaced in
-                    // the meantime (durability switched away from BATCH, or a new flusher
-                    // owns the loop now) must stop too - but only when the caller IS the
-                    // flusher: `flusher != Thread.currentThread()` is always true for a
-                    // non-flusher caller, so the identity comparison is skipped for them.
-                    // The flusher field is volatile (all writes are under flusherLock), so
-                    // this re-read at every checkpoint - not the pass-start snapshot alone
-                    // - always sees the latest retirement decision. Abort the pass - do
-                    // not clear the interrupt again (sleepQuietly already did) and do not
-                    // continue with the next shard, whose compact() may hit channels
-                    // close() is closing.
-                    if (closed.get() || (callerIsFlusher && flusher != Thread.currentThread())) {
-                        break;
-                    }
                     bytesSinceSleep = 0;
                 }
             }

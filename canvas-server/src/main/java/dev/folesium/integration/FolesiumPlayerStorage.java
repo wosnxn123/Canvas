@@ -123,6 +123,11 @@ public final class FolesiumPlayerStorage implements AutoCloseable {
         }
         Path storeDir = storeDirectoryFor(worldRoot);
         FolesiumDatabase db = FolesiumRegistry.acquire(storeDir, FolesiumDatabase.StoreRole.PLAYERS);
+        if (db == null) {
+            // acquire() degrades to disabled (returns null) when the config file exists but
+            // cannot be read; fall through to vanilla behaviour like isEnabled() == false.
+            return null;
+        }
         FolesiumPlayerStorage storage = new FolesiumPlayerStorage(worldRoot, storeDir, db);
         active = storage;
         // The server has no single "player storage close" call to hook, so guarantee a

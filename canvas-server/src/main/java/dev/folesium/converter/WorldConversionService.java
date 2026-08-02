@@ -113,7 +113,6 @@ public final class WorldConversionService {
         List<Path> movedStores = new ArrayList<>();
         long players = convertPlayerData(worldRoot, dir, config, movedStores);
 
-        List<Path> dimensionDirs = discoverDimensions(worldRoot);
         WorldConverter converter = new WorldConverter(threads);
         long chunks = 0;
         long bytes = 0;
@@ -129,68 +128,77 @@ public final class WorldConversionService {
                 keptStores.add(playerStore);
             }
         }
-        for (Path dim : dimensionDirs) {
-            Path folesiumStore = dim.resolve(FolesiumDatabase.STORE_DIR_NAME);
-            boolean hasAnvil = hasAnvilData(dim);
-            boolean hasFolesium = isDimensionStore(folesiumStore);
-            WorldConverter.Stats stats;
-            switch (dir) {
-                case TO_FOLESIUM -> {
-                    if (!hasAnvil) continue;
-                    // A pre-1.21 world root is both a dimension (it holds region/ etc.)
-                    // and the host of the legacy player store: the dimension store the
-                    // converter would open here is the very same directory as the player
-                    // store, and opening it as a DIMENSION store would throw ("Refusing to
-                    // mix player data and chunk data in one store"). Skip the root
-                    // dimension and say why; its Anvil data stays on disk unconverted.
-                    if (FolesiumDatabase.readRole(folesiumStore) == FolesiumDatabase.StoreRole.PLAYERS) {
-                        System.out.println("Folesium: skipped dimension " + dim + ": " + folesiumStore
-                                + " already holds the player store (role=PLAYERS). On a pre-1.21 world");
-                        System.out.println("Folesium: the root dimension cannot get its own store (path collision with");
-                        System.out.println("Folesium: the player store), so its Anvil data (region/, entities/, poi/) is left unconverted.");
-                        continue;
+        try {
+            List<Path> dimensionDirs = discoverDimensions(worldRoot);
+            for (Path dim : dimensionDirs) {
+                Path folesiumStore = dim.resolve(FolesiumDatabase.STORE_DIR_NAME);
+                boolean hasAnvil = hasAnvilData(dim);
+                boolean hasFolesium = isDimensionStore(folesiumStore);
+                WorldConverter.Stats stats;
+                switch (dir) {
+                    case TO_FOLESIUM -> {
+                        if (!hasAnvil) continue;
+                        // A pre-1.21 world root is both a dimension (it holds region/ etc.)
+                        // and the host of the legacy player store: the dimension store the
+                        // converter would open here is the very same directory as the player
+                        // store, and opening it as a DIMENSION store would throw ("Refusing to
+                        // mix player data and chunk data in one store"). Skip the root
+                        // dimension and say why; its Anvil data stays on disk unconverted.
+                        if (FolesiumDatabase.readRole(folesiumStore) == FolesiumDatabase.StoreRole.PLAYERS) {
+                            System.out.println("Folesium: skipped dimension " + dim + ": " + folesiumStore
+                                    + " already holds the player store (role=PLAYERS). On a pre-1.21 world");
+                            System.out.println("Folesium: the root dimension cannot get its own store (path collision with");
+                            System.out.println("Folesium: the player store), so its Anvil data (region/, entities/, poi/) is left unconverted.");
+                            continue;
+                        }
+                        // Same collision while the reserved path is still free: on a pre-1.21
+                        // world without player data, convertPlayerData above creates nothing, so
+                        // the root's folesium/ dir is the reserved legacy player-store location
+                        // (storeDirectoryFor == worldRoot/folesium) even though no store is
+                        // there yet. Converting the root as a dimension would create a DIMENSION
+                        // store on that reserved path and block the player store (role conflict)
+                        // once player data appears. Skip the root dimension and say why; its
+                        // Anvil data stays on disk unconverted. The skip applies only while the
+                        // reserved path holds no DIMENSION store: a store already recorded as
+                        // DIMENSION there means the root was converted as a dimension on purpose,
+                        // and merging into it is allowed (the read-role check replaces an
+                        // unconditional skip).
+                        if (dim.equals(worldRoot)
+                                && folesiumStore.equals(PlayerDataConverter.storeDirectoryFor(worldRoot))
+                                && !isDimensionStore(folesiumStore)) {
+                            System.out.println("Folesium: skipped dimension " + dim + ": " + folesiumStore
+                                    + " is the reserved location of the legacy player store, so on a pre-1.21 world");
+                            System.out.println("Folesium: the root dimension cannot get a store of its own (path collision with");
+                            System.out.println("Folesium: the player store), even when no player data exists yet. Its Anvil data");
+                            System.out.println("Folesium: (region/, entities/, poi/) is left unconverted; to convert the root");
+                            System.out.println("Folesium: dimension, handle it separately (e.g. --folesiumWorldDir on a world");
+                            System.out.println("Folesium: whose root is a pure dimension, not the legacy player-store host).");
+                            continue;
+                        }
+                        stats = converter.anvilToFolesium(dim, folesiumStore, config, movedStores::add);
                     }
-                    // Same collision while the reserved path is still free: on a pre-1.21
-                    // world without player data, convertPlayerData above creates nothing, so
-                    // the root's folesium/ dir is the reserved legacy player-store location
-                    // (storeDirectoryFor == worldRoot/folesium) even though no store is
-                    // there yet. Converting the root as a dimension would create a DIMENSION
-                    // store on that reserved path and block the player store (role conflict)
-                    // once player data appears. Skip the root dimension and say why; its
-                    // Anvil data stays on disk unconverted. The skip applies only while the
-                    // reserved path holds no DIMENSION store: a store already recorded as
-                    // DIMENSION there means the root was converted as a dimension on purpose,
-                    // and merging into it is allowed (the read-role check replaces an
-                    // unconditional skip).
-                    if (dim.equals(worldRoot)
-                            && folesiumStore.equals(PlayerDataConverter.storeDirectoryFor(worldRoot))
-                            && !isDimensionStore(folesiumStore)) {
-                        System.out.println("Folesium: skipped dimension " + dim + ": " + folesiumStore
-                                + " is the reserved location of the legacy player store, so on a pre-1.21 world");
-                        System.out.println("Folesium: the root dimension cannot get a store of its own (path collision with");
-                        System.out.println("Folesium: the player store), even when no player data exists yet. Its Anvil data");
-                        System.out.println("Folesium: (region/, entities/, poi/) is left unconverted; to convert the root");
-                        System.out.println("Folesium: dimension, handle it separately (e.g. --folesiumWorldDir on a world");
-                        System.out.println("Folesium: whose root is a pure dimension, not the legacy player-store host).");
-                        continue;
+                    case TO_ANVIL -> {
+                        if (!hasFolesium) continue;
+                        stats = converter.folesiumToAnvil(folesiumStore, dim, config);
+                        keptStores.add(folesiumStore);
                     }
-                    stats = converter.anvilToFolesium(dim, folesiumStore, config, movedStores::add);
+                    default -> throw new IllegalStateException();
                 }
-                case TO_ANVIL -> {
-                    if (!hasFolesium) continue;
-                    stats = converter.folesiumToAnvil(folesiumStore, dim, config);
-                    keptStores.add(folesiumStore);
-                }
-                default -> throw new IllegalStateException();
+                System.out.printf("  %-32s  %d chunks (%.1f MiB)%n",
+                        worldRoot.relativize(dim).toString(),
+                        stats.chunks(), stats.bytes() / 1048576.0);
+                chunks += stats.chunks();
+                bytes += stats.bytes();
+                converted++;
             }
-            System.out.printf("  %-32s  %d chunks (%.1f MiB)%n",
-                    worldRoot.relativize(dim).toString(),
-                    stats.chunks(), stats.bytes() / 1048576.0);
-            chunks += stats.chunks();
-            bytes += stats.bytes();
-            converted++;
+            printRetentionNote(worldRoot, dir, converted, players, keptStores, config.backupOnConvert());
+        } finally {
+            // A dimension failing mid-way must not leave the operator without the locations
+            // of the stores backupOnConvert already moved aside and rebuilt during this run:
+            // report them on both paths (the success path prints them right after the
+            // retention note).
+            printMovedStores(movedStores, config.backupOnConvert());
         }
-        printRetentionNote(worldRoot, dir, converted, players, keptStores, movedStores, config.backupOnConvert());
         long millis = (System.nanoTime() - t0) / 1_000_000L;
         return new Report(converted, chunks, bytes, players, millis);
     }
@@ -199,27 +207,38 @@ public final class WorldConversionService {
      * cesium-fabric parity: the converter never deletes the <em>source</em> data, it
      * only tells the operator what is now redundant and safe to remove by hand.
      * With {@code backupOnConvert} it also keeps the previous target trees under
-     * {@code .folesium-backup-*} names and says so.
+     * {@code .folesium-backup-*} names and says so (see {@link #printMovedStores}, which
+     * runs in a {@code finally} and therefore also reports on a failed conversion).
      */
     private static void printRetentionNote(Path worldRoot, Direction dir,
                                            int dimensions, long players, Set<Path> keptStores,
-                                           List<Path> movedStores, boolean backupOnConvert) {
+                                           boolean backupOnConvert) {
         if (dir == Direction.TO_ANVIL) {
             printRetainedStores(keptStores, backupOnConvert);
-        } else if (dimensions > 0 || players > 0 || !movedStores.isEmpty()) {
+        } else if (dimensions > 0 || players > 0) {
             System.out.println("Folesium: no files were deleted. The vanilla files (region/, entities/, poi/ and the");
             System.out.println("Folesium: per-player files) were kept as a backup; the server ignores them while Folesium");
             System.out.println("Folesium: is enabled. Delete them manually once the converted world is verified.");
-            if (backupOnConvert && !movedStores.isEmpty()) {
-                // backupOnConvert moved the pre-existing stores aside before rebuilding them;
-                // the operator must remove those backups by hand once the world is verified.
-                System.out.println("Folesium: the pre-existing stores were moved aside and kept as backups:");
-                for (Path p : movedStores) {
-                    System.out.println("    " + p.toAbsolutePath().normalize());
-                }
-                System.out.println("Folesium: backups from earlier conversions are pruned, so they do not accumulate.");
-            }
         }
+    }
+
+    /**
+     * Prints the {@code .folesium-backup-*} stores {@code backupOnConvert} moved aside
+     * and rebuilt during this run. Invoked from a {@code finally} of
+     * {@link #convertWorld}, so a dimension failing mid-way still reports the stores
+     * that were already moved -- otherwise their backups would be silently pruned by
+     * a later successful run and the operator could lose the pre-conversion copies
+     * without ever knowing where they were kept.
+     */
+    private static void printMovedStores(List<Path> movedStores, boolean backupOnConvert) {
+        if (!backupOnConvert || movedStores.isEmpty()) {
+            return;
+        }
+        System.out.println("Folesium: the pre-existing stores were moved aside and kept as backups:");
+        for (Path p : movedStores) {
+            System.out.println("    " + p.toAbsolutePath().normalize());
+        }
+        System.out.println("Folesium: backups from earlier conversions are pruned, so they do not accumulate.");
     }
 
     /**

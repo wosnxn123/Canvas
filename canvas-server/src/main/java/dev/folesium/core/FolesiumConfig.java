@@ -238,7 +238,8 @@ public record FolesiumConfig(
      * <p>Switching <em>away</em> from ZSTD_DICT leaves the flag untouched: an on flag may
      * be the automatic side effect of the earlier switch to ZSTD_DICT rather than an
      * explicit user choice, and the two are indistinguishable, so the caller decides
-     * (turn it off explicitly with {@link #withDictionaryCompression(boolean)}). The
+     * (turn it off explicitly with {@link #withDictionaryCompression(boolean)}, which on a
+     * codec-3 config also downgrades the codec to plain ZSTD - see its javadoc). The
      * runtime degradation path in {@code FolesiumDatabase.applyRuntimeConfig} relies on
      * this: after degrading a ZSTD_DICT request to ZSTD, the flag stays on so
      * dictionary-backed keyspaces keep writing codec 3.</p>
@@ -281,7 +282,28 @@ public record FolesiumConfig(
         return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, compressionLevel, compactRatio, compactMinBytes, verifyChecksums, backupOnConvert, indexCacheBytes, m, dictionaryCompression, workloadCompaction, compactIoLimit);
     }
 
+    /**
+     * Turns per-keyspace dictionary compression on or off. Turning it off is the documented
+     * way to undo the automatic flag-on of {@link #withCompression(Compression.ZSTD_DICT)}
+     * (see that method's javadoc). A codec-3 ({@link Compression#ZSTD_DICT}) config cannot
+     * simply drop the flag - the constructor forbids codec 3 without dictionary mode because
+     * the write path would throw per record without a dictionary - so turning the flag off
+     * while codec 3 is configured also downgrades the codec to plain {@link Compression#ZSTD}
+     * (same algorithm family and level range, no dictionary dependency): the request is
+     * satisfied as a whole instead of being a dead end. Existing codec-3 records stay
+     * decodable (the codec is per record and the dictionary file is left in place); only new
+     * writes change algorithm.
+     */
     public FolesiumConfig withDictionaryCompression(boolean v) {
+        if (!v && compression == Compression.ZSTD_DICT) {
+            // Turning dictionary mode off on a codec-3 config is the documented way to undo
+            // withCompression(ZSTD_DICT)'s automatic flag-on, but the constructor forbids
+            // codec 3 with the flag off. Downgrade the codec to plain ZSTD alongside the flag
+            // so the request is satisfiable; withCompression keeps the level in range (ZSTD
+            // and ZSTD_DICT share [1,22]) and re-applying the flag on the downgraded config
+            // is the plain path.
+            return withCompression(Compression.ZSTD).withDictionaryCompression(false);
+        }
         return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, compressionLevel, compactRatio, compactMinBytes, verifyChecksums, backupOnConvert, indexCacheBytes, indexMode, v, workloadCompaction, compactIoLimit);
     }
 

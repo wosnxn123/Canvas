@@ -237,8 +237,8 @@ public final class WorldConverter {
      * <p>Sampling mirrors the store's own scheme: the first 64 live record values, keys
      * collected via a keys-only pass ({@link Keyspace#forEachKey}) and the values read back
      * individually. A keyspace with no live records cannot yield a useful dictionary and is
-     * skipped. Training failure never fails the conversion: the store is simply left without a
-     * dictionary (plain compression) and a warning is logged.</p>
+     * skipped. Neither the sampling pass nor the training itself fails the conversion: the
+     * store is simply left without a dictionary (plain compression) and a warning is logged.</p>
      */
     private static void trainDictionariesIfMissing(Path storeDir, List<Keyspace> converted,
                                                    FolesiumConfig config) {
@@ -256,33 +256,38 @@ public final class WorldConverter {
                 // Nothing to sample: an empty keyspace cannot yield a useful dictionary.
                 continue;
             }
-            List<byte[]> sampleKeys = new ArrayList<>(64);
-            ks.forEachKey(key -> {
-                if (sampleKeys.size() < 64) {
-                    sampleKeys.add(key);
-                }
-            });
-            if (sampleKeys.isEmpty()) {
-                continue;
-            }
-            List<byte[]> samples = new ArrayList<>(sampleKeys.size());
-            for (byte[] key : sampleKeys) {
-                byte[] value = ks.get(key);
-                if (value != null) {
-                    samples.add(value);
-                }
-            }
-            if (samples.isEmpty()) {
-                continue;
-            }
+            int sampled = 0;
             try {
+                List<byte[]> sampleKeys = new ArrayList<>(64);
+                ks.forEachKey(key -> {
+                    if (sampleKeys.size() < 64) {
+                        sampleKeys.add(key);
+                    }
+                });
+                if (sampleKeys.isEmpty()) {
+                    continue;
+                }
+                List<byte[]> samples = new ArrayList<>(sampleKeys.size());
+                for (byte[] key : sampleKeys) {
+                    byte[] value = ks.get(key);
+                    if (value != null) {
+                        samples.add(value);
+                    }
+                }
+                if (samples.isEmpty()) {
+                    continue;
+                }
+                sampled = samples.size();
                 DictionaryStore.trainIfMissing(dictFile, samples);
             } catch (IOException | RuntimeException e) {
-                // Never block the conversion on a dictionary; the store stays on plain
-                // compression and codec-3 writes begin only after a successful retrain.
+                // Never block the conversion on a dictionary - neither the training
+                // itself nor the sampling pass (forEachKey / get): a shard read error
+                // mid-scan must not roll back a store that was already fully written
+                // and flushed. The store stays on plain compression and codec-3
+                // writes begin only after a successful retrain.
                 System.getLogger("Folesium").log(System.Logger.Level.WARNING,
                         "Folesium: could not train the dictionary of keyspace '" + ks.name()
-                                + "' from " + samples.size() + " samples; the store stays on plain "
+                                + "' from " + sampled + " samples; the store stays on plain "
                                 + "compression until a retrain succeeds: " + e);
             }
         }
@@ -491,7 +496,38 @@ public final class WorldConverter {
             int rx = LongKeys.chunkX(regionKey);
             int rz = LongKeys.chunkZ(regionKey);
             Path mca = writeRoot.resolve("r." + rx + "." + rz + ".mca");
-            try (AnvilRegionFile rf = new AnvilRegionFile(mca)) {
+            // A target file shorter than the two header sectors is silently
+            // re-initialized as an empty region by the writable constructor (the
+            // read-only open on the source side rejects the same file outright).
+            // When the file already exists, that re-init discards its leftover
+            // bytes, so warn about the data loss instead of wiping it silently.
+            if (Files.isRegularFile(mca)) {
+                try {
+                    long size = Files.size(mca);
+                    if (size < 2L * AnvilRegionFile.SECTOR_BYTES) {
+                        System.err.println("Folesium: region " + mca.getFileName() + " is truncated ("
+                                + size + " bytes, shorter than the 8192-byte Anvil header); re-initializing it"
+                                + " as an empty region discards any chunks it still referenced");
+                    }
+                } catch (IOException ignored) {
+                    // Best-effort size probe; the open below reports real failures.
+                }
+            }
+            AnvilRegionFile opened;
+            try {
+                opened = new AnvilRegionFile(mca);
+            } catch (IOException ex) {
+                // A single corrupt target region file (unreadable header) must not
+                // abort the whole export: skip it and warn, mirroring
+                // pruneSlotsMissingFromStore. Only the open is recoverable this way;
+                // a write or sync failure afterwards is a real I/O error and still
+                // aborts rather than silently dropping chunks.
+                System.err.println("Folesium: skipping region " + mca.getFileName()
+                        + ": cannot open it for writing, leaving that region's chunks unexported ("
+                        + ex.getMessage() + ")");
+                return;
+            }
+            try (AnvilRegionFile rf = opened) {
                 for (long key : byRegion.get(regionKey)) {
                     byte[] payload = ks.get(key);
                     if (payload == null) {
