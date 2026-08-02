@@ -235,7 +235,7 @@ final class StoreResharder {
             // and the backup - the only surviving copy of the records of the shards that
             // were never swapped - must not be deleted.
             boolean headersMatch = metaCount != null && completeNewLayoutInDir(dir, metaCount);
-            if (metaCount != null && fileCount == metaCount && headersMatch) {
+            if (movedAloneBackupDeletable(dir, metaCount, fileCount)) {
                 LOGGER.log(System.Logger.Level.INFO,
                         "Folesium: removing the backup of a completed reshard of {0}", dir);
                 deleteRecursively(backup);
@@ -333,6 +333,21 @@ final class StoreResharder {
 
         Path staging = dir.resolve(STAGING_DIR);
         Path backup = dir.resolve(BACKUP_DIR);
+        // Reuse recover()'s MOVED-alone determination before the cleanup below destroys
+        // the scratch trees: recover() only leaves a MOVED-marked backup behind when the
+        // store does NOT hold the complete new layout (its MOVED-alone branch keeps the
+        // backup otherwise), and in that retained state the backup is the only surviving
+        // copy of the old records - deleting it here would destroy the only copy. Refuse
+        // the reshard instead, so the operator resolves the leftover layout first.
+        if (Files.isDirectory(backup) && Files.isRegularFile(backup.resolve(MOVED_MARKER))) {
+            Integer metaCount = metadataShardCount(dir);
+            if (!movedAloneBackupDeletable(dir, metaCount, consistentOnDiskShardCount(dir))) {
+                throw new FolesiumException("Cannot reshard " + dir + ": the backup directory " + backup
+                        + " still holds the only surviving copy of the previous layout's records"
+                        + " (an interrupted reshard never finished its swap). Resolve the leftover"
+                        + " layout before starting a new reshard.");
+            }
+        }
         // The rewritten shards assign new offsets to every record, so any region pages left
         // from the pre-reshard layout are stale: drop the whole page index (a disposable
         // cache, rebuilt from the logs) BEFORE the leftover scratch trees are removed, so a
@@ -543,7 +558,13 @@ final class StoreResharder {
             }
             for (String name : stagedNames) {
                 for (int i = 0; i < count; i++) {
-                    if (!Files.isRegularFile(staging.resolve(String.format("%s-%04d.flog", name, i)))) {
+                    Path shard = staging.resolve(String.format("%s-%04d.flog", name, i));
+                    // Per-index completeness mirrors completeNewLayout's header rule: every
+                    // staged shard must exist AND carry the committed count in its header - a
+                    // file stamped with any other shard count is a leftover of a different
+                    // layout, so the staged set is mixed and finishSwap must not move it into
+                    // the store (the swap would strand or delete records).
+                    if (!Files.isRegularFile(shard) || recordedShardCount(shard) != count) {
                         return false;
                     }
                 }
@@ -654,6 +675,19 @@ final class StoreResharder {
         } catch (IOException | RuntimeException e) {
             return false;
         }
+    }
+
+    /**
+     * True when a MOVED-alone backup may be deleted: the metadata names a shard count, the
+     * on-disk shard files span exactly that many shards, and every shard the layout names
+     * carries the count in its header (see {@link #completeNewLayoutInDir}). This is exactly
+     * the condition under which recover()'s MOVED-alone branch deletes the backup; in every
+     * other state the backup is the only surviving copy of the old records and must be kept.
+     * Shared by recover() and reshard() so the two never disagree about when the backup is
+     * deletable.
+     */
+    private static boolean movedAloneBackupDeletable(Path dir, Integer metaCount, int fileCount) {
+        return metaCount != null && fileCount == metaCount && completeNewLayoutInDir(dir, metaCount);
     }
 
     /**

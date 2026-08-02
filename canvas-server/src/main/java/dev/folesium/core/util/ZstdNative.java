@@ -73,7 +73,6 @@ public final class ZstdNative {
         }
         COMPRESS = compress;
         DECOMPRESS = decompress;
-        AVAILABLE = compress != null && decompress != null;
 
         // The dictionary API (compressUsingDict / decompressUsingDict / trainFromBuffer) is
         // newer than the plain compress/decompress pair; bind it in a separate try so an older
@@ -109,11 +108,37 @@ public final class ZstdNative {
                 compressBound = null;
             }
         }
+        // Real native probe: reflection only proves the classes and methods exist, not that
+        // the JNI library will link at the first native call (a platform whose bundled native
+        // image does not match the class version, a partially loaded library, an
+        // UnsatisfiedLinkError from a stale native cache, ...). A cheap real call -
+        // compressBound(0) - triggers that linking NOW, so an environment where the natives
+        // cannot actually run degrades to "unavailable" here instead of blowing up on the
+        // first compressed record. Versions without compressBound (pre-dict-API zstd-jni)
+        // are probed with a real compression of an empty array instead.
+        boolean available = compress != null && decompress != null;
+        if (available) {
+            try {
+                if (compressBound != null) {
+                    compressBound.invokeExact(0L);
+                } else {
+                    compress.invokeExact(new byte[0], 3);
+                }
+            } catch (Throwable probeFailure) {
+                // The class loads but the natives will not run here: ZSTD is unavailable.
+                available = false;
+                compressUsingDict = null;
+                decompressUsingDict = null;
+                trainFromBuffer = null;
+                compressBound = null;
+            }
+        }
         COMPRESS_USING_DICT = compressUsingDict;
         DECOMPRESS_USING_DICT = decompressUsingDict;
         TRAIN_FROM_BUFFER = trainFromBuffer;
         COMPRESS_BOUND = compressBound;
-        DICT_AVAILABLE = compressUsingDict != null && decompressUsingDict != null
+        AVAILABLE = available;
+        DICT_AVAILABLE = available && compressUsingDict != null && decompressUsingDict != null
                 && trainFromBuffer != null && compressBound != null;
     }
 

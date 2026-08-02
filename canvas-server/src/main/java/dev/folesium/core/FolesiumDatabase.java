@@ -499,8 +499,15 @@ public final class FolesiumDatabase implements AutoCloseable {
         }
     }
 
-    /** Records a runtime compression switch so the next open does not report it again. */
-    private void persistCompression(FolesiumConfig.Compression compression) {
+    /**
+     * Records a runtime compression switch so the next open does not report it again.
+     *
+     * @return {@code true} when the codec was actually written to the metadata,
+     *         {@code false} when the persist was skipped (no metadata file - see below);
+     *         the caller must not treat a skipped persist as if the disk now records the
+     *         codec
+     */
+    private boolean persistCompression(FolesiumConfig.Compression compression) {
         Path meta = dir.resolve(METADATA_FILE);
         if (!Files.isRegularFile(meta)) {
             // No metadata file: writing one now would create an incomplete properties file
@@ -508,7 +515,7 @@ public final class FolesiumDatabase implements AutoCloseable {
             // and store.shardCount), which the next open would reject and thereby lock the
             // store. Skip the persist; diskCompression() keeps reporting null, so the persist
             // gate in applyRuntimeConfig simply retries once the metadata exists.
-            return;
+            return false;
         }
         Properties p = new Properties();
         try (var reader = Files.newBufferedReader(meta, StandardCharsets.UTF_8)) {
@@ -518,6 +525,7 @@ public final class FolesiumDatabase implements AutoCloseable {
         }
         p.setProperty("store.compression", compression.name());
         writeMetadataAtomically(meta, p);
+        return true;
     }
 
     /**
@@ -735,8 +743,10 @@ public final class FolesiumDatabase implements AutoCloseable {
             if (next.compression() != requestedBaseline.compression()
                     && compressionUnusableReason(requestedCodec) == null
                     && requestedCodec != diskCompression()) {
-                persistCompression(requestedCodec);
-                persistedCodec = true;
+                // Only claim the codec was persisted when the persist actually wrote it: a
+                // skipped persist (no metadata file) must not suppress the no-change early
+                // return below as if the disk now recorded the intent.
+                persistedCodec = persistCompression(requestedCodec);
             }
             if (changes.isEmpty() && !persistedCodec) {
                 return new ConfigReloadResult(current, changes, notes, reshardRequired);
@@ -954,7 +964,16 @@ public final class FolesiumDatabase implements AutoCloseable {
                 bytesSinceSleep += s.sizeBytes();
                 long sleepMillis = bytesSinceSleep * 1000 / ioLimit;
                 if (sleepMillis > 0) {
-                    sleepQuietly(sleepMillis);
+                    // Rate-limit sleep; abort the pass when the sleep was interrupted (a
+                    // retirement/close wakeup - the only interrupts this thread receives) or
+                    // when the store was closed / this flusher was retired while we slept,
+                    // so a throttled pass never lingers through a long sleep beside a
+                    // closed store or a replacement flusher (zombie flusher elimination).
+                    if (!sleepQuietly(sleepMillis)
+                            || closed.get()
+                            || (callerIsFlusher && flusher != Thread.currentThread())) {
+                        return false;
+                    }
                     bytesSinceSleep = 0;
                 }
             }
@@ -964,17 +983,24 @@ public final class FolesiumDatabase implements AutoCloseable {
 
     /**
      * Sleeps for {@code millis} as a compaction rate-limiter, clearing any interrupt so the
-     * throttled pass keeps going with a clean status. An interrupt during this sleep must
+     * throttled pass can unwind with a clean status. An interrupt during this sleep must
      * not be restored as a pending flag: the pass continues with channel I/O (the next
      * {@code ShardFile.compact()}), and a set interrupt status would close an interruptible
      * channel on that operation ({@link java.nio.channels.ClosedByInterruptException}),
      * breaking every subsequent write to the shard.
+     *
+     * @return {@code true} when the sleep ran to completion, {@code false} when it was
+     *         interrupted - the caller treats an interrupted sleep like the closed/retired
+     *         checkpoint and aborts the pass, so a retirement wakeup is not swallowed into
+     *         further compaction
      */
-    private static void sleepQuietly(long millis) {
+    private static boolean sleepQuietly(long millis) {
         try {
             Thread.sleep(millis);
+            return true;
         } catch (InterruptedException e) {
             Thread.interrupted();
+            return false;
         }
     }
 
@@ -1195,9 +1221,14 @@ public final class FolesiumDatabase implements AutoCloseable {
                     // Error is caught too: compactIfNeededThrottled() rethrows Error (e.g. a
                     // native zstd failure) after recording the failure slot, and an uncaught
                     // Error would kill this thread silently - BATCH group commit would stop
-                    // with nothing logged. Log it; the finally below clears `flusher`, so the
-                    // next driver starts a fresh thread instead of degrading to no flusher.
+                    // with nothing logged. Log it and EXIT: a persistent failure (e.g. an
+                    // unwritable shard) would otherwise be retried on every batch interval
+                    // and spam the error log forever. The finally below clears `flusher`, so
+                    // the next driver starts a fresh thread instead of degrading to no
+                    // flusher - the failure is retried at most once per driver rather than
+                    // once per interval.
                     LOGGER.log(System.Logger.Level.ERROR, "Folesium group-commit failed for " + dir, e);
+                    return;
                 }
             }
         } finally {

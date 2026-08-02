@@ -519,6 +519,21 @@ public final class WorldConverter {
                 // Foreign/corrupt name (out-of-range region coordinate); leave it alone.
                 return;
             }
+            // A target file shorter than the two header sectors is silently re-initialized
+            // as an empty region by the writable constructor, discarding its leftover
+            // bytes; warn about that data loss before the rebuild, mirroring writeKeyspace.
+            if (Files.isRegularFile(mca)) {
+                try {
+                    long size = Files.size(mca);
+                    if (size < 2L * AnvilRegionFile.SECTOR_BYTES) {
+                        System.err.println("Folesium: region " + mca.getFileName() + " is truncated ("
+                                + size + " bytes, shorter than the 8192-byte Anvil header); re-initializing it"
+                                + " as an empty region discards any chunks it still referenced");
+                    }
+                } catch (IOException ignored) {
+                    // Best-effort size probe; the open below reports real failures.
+                }
+            }
             try (AnvilRegionFile rf = new AnvilRegionFile(mca)) {
                 for (int[] xz : rf.listChunks()) {
                     long key = LongKeys.chunkKey((rx << 5) + xz[0], (rz << 5) + xz[1]);

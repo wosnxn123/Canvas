@@ -364,10 +364,11 @@ public final class WorldConversionService {
      * ({@code dimensions/<ns>/<path>/<path>/...}) are discovered correctly. A world
      * root that is itself a dimension is still walked: only its well-known data
      * directories ({@code region/}, {@code entities/}, {@code poi/},
-     * {@code folesium/}, {@code players/}) are pruned by name, so pre-1.21 sibling
-     * dimensions ({@code DIM1/}, {@code DIM-1/}) and a {@code dimensions/} sub-tree
-     * are discovered too. Basenames are otherwise not classified: names such as
-     * {@code data} are legal dimension components.</p>
+     * {@code folesium/}, {@code players/}) and its {@code .folesium-backup-*}/
+     * {@code .folesium-staging-*} converted-tree siblings are pruned by name, so
+     * pre-1.21 sibling dimensions ({@code DIM1/}, {@code DIM-1/}) and a
+     * {@code dimensions/} sub-tree are discovered too. Basenames are otherwise not
+     * classified: names such as {@code data} are legal dimension components.</p>
      */
     static List<Path> discoverDimensions(Path worldRoot) throws IOException {
         List<Path> out = new ArrayList<>();
@@ -417,19 +418,26 @@ public final class WorldConversionService {
      * The well-known data directories of a dimension ({@code region/},
      * {@code entities/}, {@code poi/}), the Folesium store directories
      * ({@code folesium/}) and the 26.x per-player container ({@code players/}) are
-     * never candidate dimensions. They are pruned by name only when they are direct
-     * children of the world root (a root dimension's own data, the legacy root player
-     * store, or the 26.x player tree -- whose {@code players/folesium} store is inside
-     * the container, so pruning {@code players/} keeps the walk out of it too); a
-     * directory that <em>is</em> a dimension is matched by
-     * {@link #isDimensionDirectory} before this check, so a dimension legitimately
-     * named {@code region} or similar is never hidden by it.
+     * never candidate dimensions. The {@code .folesium-backup-*}/{@code .folesium-staging-*}
+     * siblings of a converted tree are pruned by marker the same way: they are full
+     * copies of a dimension, so walking one would stat tens of thousands of data
+     * files. They are pruned by name only when they are direct children of the world
+     * root (a root dimension's own data, the legacy root player store, or the 26.x
+     * player tree -- whose {@code players/folesium} store is inside the container, so
+     * pruning {@code players/} keeps the walk out of it too); a directory that
+     * <em>is</em> a dimension is matched by {@link #isDimensionDirectory} before this
+     * check, so a dimension legitimately named {@code region} or similar is never
+     * hidden by it.
      */
     private static boolean isWellKnownDataDir(Path dir) {
         String name = dir.getFileName().toString();
         return name.equals("region") || name.equals("entities") || name.equals("poi")
                 || name.equalsIgnoreCase(PlayerDataConverter.DIR_PLAYERS_26)
-                || name.equals(FolesiumDatabase.STORE_DIR_NAME);
+                || name.equals(FolesiumDatabase.STORE_DIR_NAME)
+                // A <name>.folesium-backup-* / <name>.folesium-staging-* sibling of a
+                // converted tree is a full copy of it; pruning by marker keeps the walk
+                // from descending into tens of thousands of stale data files.
+                || name.contains(".folesium-backup-") || name.contains(".folesium-staging-");
     }
 
     private static boolean hasAnvilData(Path dir) {

@@ -279,24 +279,49 @@ public final class AnvilRegionFile implements Closeable {
             if (!java.nio.file.Files.isRegularFile(externalPath)) {
                 throw new IOException("External chunk payload is not a regular file: " + externalPath);
             }
-            // Bound the .mcc file before materializing it: it holds the *compressed*
+            // Bound the .mcc file while materializing it: it holds the *compressed*
             // payload, which may legitimately grow slightly beyond MAX_CHUNK_PAYLOAD_BYTES
             // (deflate inflates incompressible input by a small margin and the write side
             // admits any uncompressed payload up to that bound), so the payload bound plus a
             // 1 MiB safety margin is far above any legal compressed size - anything larger
             // is a corrupt or foreign file that must not be read into memory wholesale. The
-            // check sits before the readAllBytes and the compression-type branch, so it
+            // bound is enforced on the bytes actually read (not by a size check that could
+            // race a concurrent grow) and sits before the compression-type branch, so it
             // bounds every payload type, COMPRESSION_NONE included (whose raw payload is
             // then additionally held to the exact bound by the length check below); the
             // exact per-payload limit for the compressed types is still enforced by the
             // bounded decompression below.
-            long externalSize = java.nio.file.Files.size(externalPath);
             long externalLimit = MAX_CHUNK_PAYLOAD_BYTES + 1024L * 1024L;
-            if (externalSize > externalLimit) {
-                throw new IOException("External chunk payload file of " + externalSize
-                        + " bytes exceeds the " + externalLimit + " byte limit: " + externalPath);
+            ByteArrayOutputStream collected = new ByteArrayOutputStream();
+            try (FileChannel externalChannel = FileChannel.open(externalPath, StandardOpenOption.READ)) {
+                // Read up to the limit in bounded chunks, then probe one further byte so
+                // an over-limit file is rejected by its cumulative count (limit + 1)
+                // instead of by a size() check that can race a concurrent grow (TOCTOU).
+                ByteBuffer tmp = ByteBuffer.allocate(8192);
+                long total = 0;
+                while (total < externalLimit) {
+                    tmp.clear();
+                    tmp.limit((int) Math.min(tmp.capacity(), externalLimit - total));
+                    int n = externalChannel.read(tmp);
+                    if (n < 0) {
+                        break;
+                    }
+                    total += n;
+                    collected.write(tmp.array(), 0, n);
+                }
+                if (total == externalLimit) {
+                    tmp.clear();
+                    tmp.limit(1);
+                    if (externalChannel.read(tmp) > 0) {
+                        total++;
+                    }
+                }
+                if (total > externalLimit) {
+                    throw new IOException("External chunk payload file of " + total
+                            + " bytes exceeds the " + externalLimit + " byte limit: " + externalPath);
+                }
             }
-            data = java.nio.file.Files.readAllBytes(externalPath);
+            data = collected.toByteArray();
         } else {
             data = new byte[length - 1];
             buf.position(5);
@@ -337,11 +362,12 @@ public final class AnvilRegionFile implements Closeable {
         long chunkX;
         long chunkZ;
         try {
-            chunkX = Long.parseLong(m.group(1)) * 32 + (localX & 31);
-            chunkZ = Long.parseLong(m.group(2)) * 32 + (localZ & 31);
-        } catch (NumberFormatException e) {
-            // A name like r.9223372036854775808.0.mca cannot encode valid coordinates;
-            // treat it the same as an unparseable file name.
+            chunkX = Math.multiplyExact(Long.parseLong(m.group(1)), 32) + (localX & 31);
+            chunkZ = Math.multiplyExact(Long.parseLong(m.group(2)), 32) + (localZ & 31);
+        } catch (NumberFormatException | ArithmeticException e) {
+            // A name like r.9223372036854775808.0.mca (or a region coordinate whose x32
+            // expansion overflows long) cannot encode valid coordinates; treat it the
+            // same as an unparseable file name.
             return null;
         }
         return path.resolveSibling("c." + chunkX + "." + chunkZ + ".mcc");
@@ -381,6 +407,12 @@ public final class AnvilRegionFile implements Closeable {
         int oldLoc = locations[idx];
         int oldTimestamp = timestamps[idx];
         int sectorOff = allocateSectors(sectorsNeeded); // old allocation remains reserved
+        if (sectorOff > 0xFFFFFF) {
+            // (sectorOff << 8) would silently wrap inside the 32-bit location entry and
+            // corrupt the region file: reject the write instead of losing the offset.
+            throw new IOException("Region file " + path + " is too large: sector offset "
+                    + sectorOff + " exceeds the 24-bit location-table limit");
+        }
         int newLoc = (sectorOff << 8) | sectorsNeeded;
         int newTimestamp = (int) (System.currentTimeMillis() / 1000L);
         ByteBuffer out = ByteBuffer.allocate(sectorsNeeded * SECTOR_BYTES);

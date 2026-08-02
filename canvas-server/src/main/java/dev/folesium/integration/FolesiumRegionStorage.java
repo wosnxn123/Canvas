@@ -164,8 +164,18 @@ public final class FolesiumRegionStorage implements AutoCloseable {
     /* storage operations                                                  */
     /* ------------------------------------------------------------------ */
 
-    public boolean has(int chunkX, int chunkZ) {
-        return keyspace.contains(LongKeys.chunkKey(chunkX, chunkZ));
+    public boolean has(int chunkX, int chunkZ) throws IOException {
+        try {
+            return keyspace.contains(LongKeys.chunkKey(chunkX, chunkZ));
+        } catch (RuntimeException e) {
+            // Same contract as readRaw: the engine signals store failures as
+            // FolesiumException (a RuntimeException), which the synchronous callers (the
+            // chunk-exists checks) declare as IOException but never catch unchecked.
+            // Surface it as an IOException so the caller's existing IOException handling
+            // applies instead of an unchecked escape.
+            throw new IOException("Folesium: failed to check chunk " + chunkX + "," + chunkZ
+                    + " in keyspace '" + keyspaceName + "'", e);
+        }
     }
 
     public byte[] readRaw(int chunkX, int chunkZ) throws IOException {

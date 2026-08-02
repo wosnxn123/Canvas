@@ -492,6 +492,16 @@ public final class DictionaryStore {
             } catch (IOException e) {
                 channel.close();
                 lastFailure = e;
+            } catch (UnsupportedOperationException e) {
+                // The filesystem rejects the locking/attribute operations outright (e.g.
+                // certain Windows mounts) - the same condition fsyncDirectory tolerates for
+                // directory fsync. Treat it like an I/O failure (same path as the IOException
+                // catch above): record the attempt's failure so the retries exhaust and
+                // acquisition is reported loudly instead of silently degrading to contention
+                // (trainIfMissing would then claim the dictionary already exists when it was
+                // never trained).
+                channel.close();
+                lastFailure = new IOException("file locking unsupported on " + lockFile, e);
             }
         }
         if (lastFailure != null) {

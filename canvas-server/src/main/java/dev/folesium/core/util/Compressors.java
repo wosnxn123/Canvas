@@ -192,7 +192,21 @@ public final class Compressors {
     }
 
     private static byte[] zstdInflate(byte[] stored, int rawLen) {
-        byte[] out = ZstdNative.decompress(stored, rawLen);
+        byte[] out;
+        try {
+            out = ZstdNative.decompress(stored, rawLen);
+        } catch (RuntimeException e) {
+            // zstd-jni reports a corrupt/truncated frame as ZstdException; normalize it to
+            // the same IllegalStateException the DEFLATE path throws for corrupt records so
+            // every codec fails uniformly. Matched by class name: zstd-jni is an optional
+            // runtime dependency, never a compile-time one (ZstdNative is a reflection
+            // bridge). Anything else - e.g. the UnsupportedOperationException thrown when
+            // zstd-jni is absent - propagates unchanged.
+            if (isZstdException(e)) {
+                throw new IllegalStateException("Corrupt compressed record", e);
+            }
+            throw e;
+        }
         if (out.length != rawLen) {
             // zstd-jni's decompress(byte[], int) treats rawLen as the *maximum* output
             // size and trims the result when the frame is actually smaller, so an
@@ -201,5 +215,22 @@ public final class Compressors {
             throw new IllegalStateException("Decompressed size mismatch: " + out.length + " != " + rawLen);
         }
         return out;
+    }
+
+    /**
+     * Whether {@code t} is (a subclass of) {@code com.github.luben.zstd.ZstdException} -
+     * zstd-jni's runtime exception for corrupt/truncated frames. Matched by class name
+     * because zstd-jni is an optional runtime dependency: the main source set must not
+     * reference its types at compile time (see {@link ZstdNative}).
+     */
+    private static boolean isZstdException(Throwable t) {
+        Class<?> c = t.getClass();
+        while (c != null && c != Object.class) {
+            if ("com.github.luben.zstd.ZstdException".equals(c.getName())) {
+                return true;
+            }
+            c = c.getSuperclass();
+        }
+        return false;
     }
 }

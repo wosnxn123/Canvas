@@ -188,6 +188,19 @@ public final class FolesiumRegistry {
      * do not change within a JVM run), which is what lets the config watcher recognise a
      * regenerated file - a deleted {@code folesium.properties} recreated by
      * {@link #fileProperties()} - and skip reloading it as if it were an operator edit.
+     *
+     * <p>Known boundary: the text embeds {@link #describeMachine()} (which reports the
+     * zstd-jni availability) and the machine-tuned defaults, both fixed for the life of a
+     * JVM in production ({@code ZstdNative.available()} caches its probe; cores and heap
+     * do not change). Only the test-only {@code ZstdNative.setForcedUnavailable} switch
+     * can change them mid-run, which would make a file generated before the flip fail the
+     * exact-content comparison in {@link #reload()} / {@link #watchConfigFile()} and be
+     * misread as an operator edit. The failure is confined to that test switch (no test
+     * exercises the regeneration path today), and comparing key-value pairs instead of
+     * full text would not fix it either: the flip also changes the generated
+     * {@code compression}/{@code compressionLevel} defaults, and excluding those
+     * machine-dependent keys would weaken the protection against operator edits of
+     * {@code shards}/{@code compression}. Accepted as a known boundary.</p>
      */
     private static String defaultConfigContent() {
         // The generated file carries this machine's auto-tuned defaults (docs/AUTO-CONFIG.md),
@@ -634,6 +647,15 @@ public final class FolesiumRegistry {
                         "Folesium: {0} is the auto-generated default (previously deleted?);"
                                 + " keeping the running configuration",
                         configFile.toAbsolutePath());
+                // Same reconciliation as the watcher's regeneration skip (watchConfigFile):
+                // the file on disk is the regenerated default, so a fileProperties /
+                // enabledCache loaded from the deleted pre-regeneration file must not be
+                // served by the next acquire()/isEnabled() - clear both so the next access
+                // re-reads the file unconditionally.
+                synchronized (FolesiumRegistry.class) {
+                    fileProperties = null;
+                    enabledCache = null;
+                }
                 return List.of();
             }
         } else if (!hasSystemPropertyOverrides()) {
@@ -892,6 +914,16 @@ public final class FolesiumRegistry {
                             configFilePath().toAbsolutePath());
                     synchronized (FolesiumRegistry.class) {
                         configFileStamp = stamp;
+                        // The skip commits the stamp but must not leave the properties /
+                        // enabled caches serving the pre-regeneration content: the file on
+                        // disk already reads as the regenerated default, so a cache still
+                        // holding the deleted file's values (e.g. enabled=true) would be
+                        // served by the next acquire()/isEnabled() until a later mtime
+                        // change happened to re-read it. Clear both here so the next access
+                        // re-reads the file unconditionally (same reconciliation that
+                        // reload() performs).
+                        fileProperties = null;
+                        enabledCache = null;
                     }
                     continue;
                 }
