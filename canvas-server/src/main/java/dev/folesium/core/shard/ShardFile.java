@@ -596,6 +596,13 @@ public final class ShardFile implements AutoCloseable {
                 int rawValLen = b.getInt();
                 int storedValLen = b.getInt();
                 byte flags = b.get();
+                // Mirror the record-header validation from scanRange(): an out-of-range
+                // length is a corrupt entry, so discard the whole hint and fall back to
+                // the full scan instead of indexing a bogus record size.
+                if (rawValLen < 0 || rawValLen > MAX_VALUE_LEN
+                        || storedValLen < 0 || storedValLen > MAX_VALUE_LEN) {
+                    return false;
+                }
                 loaded.put(new Bytes(key),
                         new Loc(off, RECORD_HEADER_LEN + keyLen + storedValLen + 4, keyLen, rawValLen, storedValLen, flags));
             }
@@ -731,6 +738,26 @@ public final class ShardFile implements AutoCloseable {
         }
     }
 
+    /**
+     * Guards the write path. A read-only shard must never be written: its channel is
+     * opened READ-only, so an unguarded write would only fail deep inside
+     * {@code writeFully} with a confusing {@code NonWritableChannelException} wrapped
+     * in "Write failed" (and put/putIfAbsent would have wasted a compression first).
+     * A shard whose channel was released by a failed compaction restore must fail
+     * loudly too: appending through the orphaned inode the field used to point at
+     * would be silent data loss (every record lands in a file the next open never
+     * sees). Caller holds the write lock.
+     */
+    private void ensureWritable() {
+        if (readOnly) {
+            throw new FolesiumException("store is read-only");
+        }
+        if (channel == null) {
+            throw new FolesiumException("Shard " + path
+                    + " is unusable: its file channel was closed after a failed compaction restore");
+        }
+    }
+
     public void put(Bytes key, byte[] rawValue) {
         if (key.length() == 0 || key.length() > MAX_KEY_LEN) {
             throw new IllegalArgumentException("Bad key length " + key.length());
@@ -755,6 +782,7 @@ public final class ShardFile implements AutoCloseable {
 
         lock.writeLock().lock();
         try {
+            ensureWritable();
             long off = writePos;
             writeFully(ByteBuffer.wrap(record), off);
             Loc old = index.put(key, new Loc(off, record.length, key.length(), rawValue.length, stored.length, flags));
@@ -807,6 +835,7 @@ public final class ShardFile implements AutoCloseable {
 
         lock.writeLock().lock();
         try {
+            ensureWritable();
             if (index.containsKey(key)) {
                 return false;
             }
@@ -836,6 +865,7 @@ public final class ShardFile implements AutoCloseable {
     public void delete(Bytes key) {
         lock.writeLock().lock();
         try {
+            ensureWritable();
             Loc old = index.get(key);
             if (old == null) {
                 return; // nothing to shadow
@@ -1029,9 +1059,10 @@ public final class ShardFile implements AutoCloseable {
         lock.writeLock().lock();
         try {
             if (dirty) {
-                if (!channel.isOpen()) {
-                    // Closed concurrently (e.g. by a racing closeAll()): close() already
-                    // forced this shard, so there is nothing left to fsync.
+                if (channel == null || !channel.isOpen()) {
+                    // Channel released (failed compaction restore) or closed concurrently
+                    // (e.g. by a racing closeAll()): close() already forced this shard, so
+                    // there is nothing left to fsync.
                     return;
                 }
                 channel.force(false);
@@ -1129,6 +1160,32 @@ public final class ShardFile implements AutoCloseable {
             // The stale hint describes the pre-compaction log; drop it first so a crash in the
             // middle of the swap can never pair the new file with the old index.
             Files.deleteIfExists(hintPath);
+            // Publish the compaction anchor BEFORE the swap so every crash-after-swap state
+            // has a .cwmk on disk. The anchor is written as 0 (the file header), not as the
+            // new log's EOF: this compaction invalidates and deletes every region page below
+            // (see the pageIndex block after the swap), so the next open must replay the whole
+            // compacted log to rebuild them; anchoring at the new EOF would replay nothing and
+            // leave every PAGE-mode chunk read missing. The value 0 makes the open-time build
+            // replay [header, EOF) regardless of which log won the race:
+            //  * crash before this write: old log with the previous anchor (0, or no .cwmk on
+            //    a first-ever compaction) - the open replays fully and, absent an anchor, keeps
+            //    page files that are valid for the still-live old log;
+            //  * crash after this write, before the swap: old log + anchor 0 - the open
+            //    discards the stale page files and replays the intact old log from the header;
+            //  * crash after the swap: new log + anchor 0 - the open discards the stale page
+            //    files and replays the whole compacted log, which holds every live record.
+            // A failure here aborts the compaction BEFORE the swap: the old log stays live and
+            // the leftover .compact scratch file is removed by the finally block. PageIndex
+            // guards setCompactionWatermark on its own readOnly flag, but compact() already
+            // returned for read-only shards above, so that guard never swallows this write.
+            if (pageIndex != null && shardName != null) {
+                try {
+                    pageIndex.setCompactionWatermark(shardName, 0);
+                } catch (IOException e) {
+                    throw new FolesiumException("Compaction of " + path
+                            + " aborted: could not write the compaction watermark", e);
+                }
+            }
             // The old channel stays open across the swap: it still refers to the pre-compaction
             // data and is the fallback if the compacted file cannot be reopened.
             moveReplacing(tmp, path);
@@ -1159,31 +1216,14 @@ public final class ShardFile implements AutoCloseable {
                 // absent (PAGE, while the index is invalidated) until the pages are rebuilt
                 // on the next open, and the write path keeps refreshing slots as it goes.
                 pageIndex.invalidateAll();
-                if (shardName != null) {
-                    // The compaction watermark anchors the page rebuild at the next open.
-                    // It is reset to 0 (the file header) rather than to the new EOF: the
-                    // compacted log starts at the header and holds every live record, so a
-                    // replay of [0, EOF) rebuilds all pages from scratch. Anchoring at EOF
-                    // would replay nothing - the pages were invalidated here and their
-                    // files deleted right below, so PAGE-mode reads of pre-compaction
-                    // records would be lost forever. A stale or missing anchor only makes
-                    // that replay longer, so a write failure is logged, not fatal.
-                    try {
-                        pageIndex.setCompactionWatermark(shardName, 0);
-                    } catch (IOException e) {
-                        LOGGER.log(System.Logger.Level.WARNING,
-                                "Folesium: failed to write the compaction watermark of {0}: {1}",
-                                path, e.toString());
-                    }
-                }
                 // Delete the stale page files immediately instead of waiting for close():
                 // a crash between the swap above and close() used to leave page files
                 // holding pre-compaction offsets, which the next open would load as live
                 // slots - wrong values for records that moved, or PAGE-mode misses. The
-                // watermark was reset to 0 above, so a reopen after a crash replays the
-                // whole compacted log and rebuilds every page from scratch; with no page
-                // files left there is nothing stale to load. Best-effort: failures are
-                // logged inside.
+                // anchor was already published to 0 before the swap, so a reopen after a
+                // crash replays the whole compacted log and rebuilds every page from
+                // scratch; with no page files left there is nothing stale to load.
+                // Best-effort: failures are logged inside.
                 pageIndex.deleteAllPageFiles();
             }
         } catch (IOException e) {
@@ -1217,7 +1257,9 @@ public final class ShardFile implements AutoCloseable {
      * inode the field still referred to, so without a rebind every later write would land on
      * that orphaned inode and be invisible to the next open (silent data loss). Throws when
      * the restore itself fails, in which case the compaction failure propagates with both
-     * errors attached.
+     * errors attached and the shard is left unusable for writes: the orphaned channel is
+     * closed and the field cleared, so subsequent writes throw an explicit error (see
+     * {@link #ensureWritable}) instead of landing in the unlinked file.
      */
     private void restoreOldShardAfterFailedReopen(IOException reopenFailure) throws IOException {
         IOException restoreFailure = null;
@@ -1258,6 +1300,18 @@ public final class ShardFile implements AutoCloseable {
             restoreFailure = e;
         }
         if (restoreFailure != null) {
+            // The restore failed: `path` now holds the compacted file (or a partial copy),
+            // while the field channel still refers to the pre-compaction inode that
+            // moveReplacing() unlinked. Writing through that channel would append to an
+            // orphaned file the next open never sees - silent data loss - so release it
+            // and mark the shard unwritable: every later write fails loudly (see
+            // ensureWritable) instead of vanishing.
+            try {
+                channel.close();
+            } catch (IOException closeFailure) {
+                restoreFailure.addSuppressed(closeFailure);
+            }
+            channel = null;
             restoreFailure.addSuppressed(reopenFailure);
             throw new FolesiumException("Compaction failed for " + path
                     + ": could not reopen the compacted shard, and restoring the previous shard failed too",
@@ -1343,10 +1397,13 @@ public final class ShardFile implements AutoCloseable {
     public void close() {
         lock.writeLock().lock();
         try {
-            if (channel.isOpen()) {
+            if (channel != null && channel.isOpen()) {
                 if (!readOnly) {
                     // Read-only mode never fsyncs (nothing was written) and never writes
-                    // the hint file (it would describe a log this open may not touch).
+                    // the hint file (it would describe a log this open may not touch). A
+                    // shard whose channel was released by a failed compaction restore
+                    // skips both as well: its on-disk state is inconsistent, so no hint
+                    // must be written against it (the next open does a full scan).
                     channel.force(false);
                     writeHint();
                 }

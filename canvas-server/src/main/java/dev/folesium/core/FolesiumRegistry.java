@@ -394,14 +394,18 @@ public final class FolesiumRegistry {
                     "Folesium: unknown compression ''{0}'', using {1}", compressionName, d.compression());
             compression = d.compression();
         }
-        // ZSTD_DICT additionally needs the zstd-jni dictionary API (ZstdNative.dictAvailable()),
-        // but that is only probed once the library itself is present, so a single !ZSTD_AVAILABLE
-        // check covers both codecs.
-        if ((compression == FolesiumConfig.Compression.ZSTD
-                || compression == FolesiumConfig.Compression.ZSTD_DICT) && !ZSTD_AVAILABLE) {
+        // ZSTD_DICT needs the zstd-jni dictionary API on top of plain ZSTD, so each codec is
+        // probed with its own gate: ZSTD against ZSTD_AVAILABLE, ZSTD_DICT against
+        // dictAvailable() (which also covers the library being entirely absent).
+        if ((compression == FolesiumConfig.Compression.ZSTD && !ZSTD_AVAILABLE)
+                || (compression == FolesiumConfig.Compression.ZSTD_DICT && !ZstdNative.dictAvailable())) {
             LOGGER.log(System.Logger.Level.WARNING,
-                    "Folesium: compression={0} requested but zstd-jni is not available, using {1}",
-                    compression, d.compression());
+                    "Folesium: compression={0} requested but {1}, using {2}",
+                    compression,
+                    compression == FolesiumConfig.Compression.ZSTD_DICT
+                            ? "the zstd-jni dictionary API is not available"
+                            : "zstd-jni is not available",
+                    d.compression());
             compression = d.compression();
         }
         int shards = intProperty("shards", d.shardCount());

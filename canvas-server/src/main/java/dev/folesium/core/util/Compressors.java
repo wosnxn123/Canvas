@@ -42,7 +42,15 @@ public final class Compressors {
 
     public static byte[] decompress(Compression c, byte[] stored, int rawLen) {
         return switch (c) {
-            case NONE -> stored;
+            case NONE -> {
+                // NONE is a length-prefixed copy, so stored must be exactly rawLen. A
+                // short array would otherwise silently return truncated data (only the
+                // CRC would catch it); fail loudly like the DEFLATE/ZSTD size checks.
+                if (stored.length != rawLen) {
+                    throw new IllegalStateException("Decompressed size mismatch: " + stored.length + " != " + rawLen);
+                }
+                yield stored;
+            }
             case DEFLATE -> inflate(stored, rawLen);
             case ZSTD -> zstdInflate(stored, rawLen);
             case ZSTD_DICT -> throw new IllegalArgumentException(

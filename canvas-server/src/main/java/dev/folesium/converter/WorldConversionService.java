@@ -108,7 +108,10 @@ public final class WorldConversionService {
      */
     public Report convertWorld(Path worldRoot, Direction dir, FolesiumConfig config) throws IOException {
         long t0 = System.nanoTime();
-        long players = convertPlayerData(worldRoot, dir, config);
+        // Stores moved aside by backupOnConvert during this run, so the retention note can
+        // point the operator at their backup locations.
+        List<Path> movedStores = new ArrayList<>();
+        long players = convertPlayerData(worldRoot, dir, config, movedStores);
 
         List<Path> dimensionDirs = discoverDimensions(worldRoot);
         WorldConverter converter = new WorldConverter(threads);
@@ -166,7 +169,7 @@ public final class WorldConversionService {
                         System.out.println("Folesium: whose root is a pure dimension, not the legacy player-store host).");
                         continue;
                     }
-                    stats = converter.anvilToFolesium(dim, folesiumStore, config);
+                    stats = converter.anvilToFolesium(dim, folesiumStore, config, movedStores::add);
                 }
                 case TO_ANVIL -> {
                     if (!hasFolesium) continue;
@@ -182,7 +185,7 @@ public final class WorldConversionService {
             bytes += stats.bytes();
             converted++;
         }
-        printRetentionNote(worldRoot, dir, converted, players, keptStores, config.backupOnConvert());
+        printRetentionNote(worldRoot, dir, converted, players, keptStores, movedStores, config.backupOnConvert());
         long millis = (System.nanoTime() - t0) / 1_000_000L;
         return new Report(converted, chunks, bytes, players, millis);
     }
@@ -195,13 +198,22 @@ public final class WorldConversionService {
      */
     private static void printRetentionNote(Path worldRoot, Direction dir,
                                            int dimensions, long players, Set<Path> keptStores,
-                                           boolean backupOnConvert) {
+                                           List<Path> movedStores, boolean backupOnConvert) {
         if (dir == Direction.TO_ANVIL) {
             printRetainedStores(keptStores, backupOnConvert);
         } else if (dimensions > 0 || players > 0) {
             System.out.println("Folesium: no files were deleted. The vanilla files (region/, entities/, poi/ and the");
             System.out.println("Folesium: per-player files) were kept as a backup; the server ignores them while Folesium");
             System.out.println("Folesium: is enabled. Delete them manually once the converted world is verified.");
+            if (backupOnConvert && !movedStores.isEmpty()) {
+                // backupOnConvert moved the pre-existing stores aside before rebuilding them;
+                // the operator must remove those backups by hand once the world is verified.
+                System.out.println("Folesium: the pre-existing stores were moved aside and kept as backups:");
+                for (Path p : movedStores) {
+                    System.out.println("    " + p.toAbsolutePath().normalize());
+                }
+                System.out.println("Folesium: backups from earlier conversions are pruned, so they do not accumulate.");
+            }
         }
     }
 
@@ -243,7 +255,8 @@ public final class WorldConversionService {
      * Converts the world's {@code playerdata/}, {@code advancements/} and {@code stats/}
      * to or from the world-root player store. Returns the number of records moved.
      */
-    private long convertPlayerData(Path worldRoot, Direction dir, FolesiumConfig config) throws IOException {
+    private long convertPlayerData(Path worldRoot, Direction dir, FolesiumConfig config,
+                                   List<Path> movedStores) throws IOException {
         Path store = PlayerDataConverter.storeDirectoryFor(worldRoot);
         PlayerDataConverter.Stats stats;
         switch (dir) {
@@ -251,7 +264,7 @@ public final class WorldConversionService {
                 if (!PlayerDataConverter.hasVanillaPlayerData(worldRoot)) {
                     return 0;
                 }
-                stats = PlayerDataConverter.anvilToFolesium(worldRoot, store, config);
+                stats = PlayerDataConverter.anvilToFolesium(worldRoot, store, config, movedStores::add);
             }
             case TO_ANVIL -> {
                 if (FolesiumDatabase.readRole(store) != FolesiumDatabase.StoreRole.PLAYERS) {

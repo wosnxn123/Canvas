@@ -26,6 +26,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -112,7 +113,8 @@ public final class DictionaryStore {
      * dictionary would make existing codec-3 records undecodable, so retraining requires
      * deleting {@code dictFile} first.
      *
-     * @throws FolesiumException if {@code dictFile} already exists, or if fewer than
+     * @throws FolesiumException if {@code dictFile} already exists (or appears
+     *                           concurrently while training), or if fewer than
      *                           {@link #MIN_SAMPLES} samples are provided
      * @throws IOException       if the file cannot be written
      */
@@ -147,7 +149,14 @@ public final class DictionaryStore {
                 }
                 channel.force(true);
             }
-            moveReplacing(tmp, dictFile);
+            moveIntoPlace(tmp, dictFile);
+        } catch (FileAlreadyExistsException e) {
+            // The exists() check above ran before training; a dictionary created in the
+            // meantime must not be silently overwritten (the immutable-once-minted
+            // contract), so surface the race as the same refusal as a pre-existing file.
+            throw new FolesiumException("Dictionary file " + dictFile + " appeared concurrently; refusing to "
+                    + "overwrite it (existing codec-3 records may depend on the trained dictionary). "
+                    + "Delete dict.bin first to retrain.");
         } finally {
             Files.deleteIfExists(tmp);
         }
@@ -190,19 +199,27 @@ public final class DictionaryStore {
     }
 
     /**
-     * Moves {@code source} over {@code target}, preferring an atomic replace but falling back to a
-     * plain replace move on filesystems that do not support atomic moves (reported either as
-     * {@link AtomicMoveNotSupportedException} or as a generic filesystem error). Mirrors
-     * {@link WatermarkFile#write}.
+     * Moves {@code source} to {@code target} <em>without</em> replacing an existing file,
+     * preferring an atomic move but falling back to a plain move on filesystems that do not
+     * support atomic moves (reported either as {@link AtomicMoveNotSupportedException} or as a
+     * generic filesystem error). The fallback re-checks {@link Files#exists} first to narrow
+     * the check-then-act window; a target that appears anyway surfaces as
+     * {@link FileAlreadyExistsException} from the move itself.
      */
-    private static void moveReplacing(Path source, Path target) throws IOException {
+    private static void moveIntoPlace(Path source, Path target) throws IOException {
         try {
-            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            Files.move(source, target, StandardCopyOption.ATOMIC_MOVE);
         } catch (AtomicMoveNotSupportedException e) {
-            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
+            if (Files.exists(target)) {
+                throw new FileAlreadyExistsException(target.toString());
+            }
+            Files.move(source, target);
         } catch (FileSystemException e) {
-            // Some platforms report missing atomic-replace support as a generic filesystem error.
-            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
+            // Some platforms report missing atomic-move support as a generic filesystem error.
+            if (Files.exists(target)) {
+                throw new FileAlreadyExistsException(target.toString());
+            }
+            Files.move(source, target);
         }
     }
 }

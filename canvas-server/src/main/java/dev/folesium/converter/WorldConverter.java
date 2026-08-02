@@ -21,6 +21,7 @@ package dev.folesium.converter;
 import dev.folesium.anvil.AnvilRegionFile;
 import dev.folesium.core.FolesiumConfig;
 import dev.folesium.core.FolesiumDatabase;
+import dev.folesium.core.FolesiumException;
 import dev.folesium.core.Keyspace;
 import dev.folesium.core.index.DictionaryStore;
 import dev.folesium.core.util.LongKeys;
@@ -36,6 +37,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletionService;
 import java.util.concurrent.ConcurrentHashMap;
@@ -45,6 +47,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -98,7 +101,9 @@ public final class WorldConverter {
      * <p>With {@code backupOnConvert} the existing store is moved to a
      * {@code .folesium-backup-*} sibling before the fresh store is created, turning
      * the merge into a full rebuild of the store (the previous store is preserved
-     * under the backup name).</p>
+     * under the backup name). If the rebuild fails, the backup is moved back to its
+     * original location, so a failed backup-mode conversion leaves the previous
+     * store in place instead of a half-written store.</p>
      *
      * <p>When dictionary compression is enabled, the per-keyspace dictionaries
      * ({@code <store>/idx/<name>/dict.bin}) of the converted region keyspaces are trained
@@ -106,76 +111,108 @@ public final class WorldConverter {
      * {@link #trainDictionariesIfMissing(Path, List, FolesiumConfig)}.</p>
      */
     public Stats anvilToFolesium(Path dimensionDir, Path folesiumDir, FolesiumConfig config) throws IOException {
+        return anvilToFolesium(dimensionDir, folesiumDir, config, null);
+    }
+
+    /**
+     * Same as {@link #anvilToFolesium(Path, Path, FolesiumConfig)}, but reports the backup
+     * sibling created for a pre-existing store (only when {@code backupOnConvert} is set)
+     * through {@code backupSink}, once the conversion has succeeded. The sink is never
+     * invoked when the conversion fails, because the backup is then moved back to its
+     * original location and the failed run leaves the canonical store untouched.
+     *
+     * @param backupSink receives the {@code .folesium-backup-*} sibling of {@code folesiumDir}
+     *                   after a successful backup-mode rebuild; {@code null} to ignore
+     */
+    public Stats anvilToFolesium(Path dimensionDir, Path folesiumDir, FolesiumConfig config,
+                                 Consumer<Path> backupSink) throws IOException {
         long start = System.nanoTime();
         AtomicLong chunkCount = new AtomicLong();
         AtomicLong byteCount = new AtomicLong();
 
+        // With backupOnConvert the existing store is moved aside first; the whole move +
+        // rebuild runs inside the try below, so a failed conversion restores the backup
+        // instead of leaving the canonical path missing or holding a half-written store.
+        Path backup = null;
         if (config.backupOnConvert() && Files.isDirectory(folesiumDir)) {
-            movePath(folesiumDir, backupPath(folesiumDir), false);
+            backup = backupPath(folesiumDir);
         }
-
-        try (FolesiumDatabase db = FolesiumDatabase.open(folesiumDir,
-                config.withDurability(FolesiumConfig.DurabilityMode.EXPLICIT))) {
-            List<Keyspace> converted = new ArrayList<>();
-            for (Map.Entry<String, String> e : DIR_TO_KEYSPACE.entrySet()) {
-                Path src = dimensionDir.resolve(e.getKey());
-                if (!Files.isDirectory(src)) {
-                    continue;
-                }
-                Keyspace ks = db.keyspace(e.getValue());
-                converted.add(ks);
-                List<Path> mcaFiles;
-                try (var s = Files.list(src)) {
-                    mcaFiles = s.filter(p -> MCA.matcher(p.getFileName().toString()).matches()).toList();
-                }
-                runParallel(mcaFiles, mca -> {
-                    Matcher m = MCA.matcher(mca.getFileName().toString());
-                    if (!m.matches()) {
-                        return;
-                    }
-                    int regionX;
-                    int regionZ;
-                    try {
-                        regionX = Integer.parseInt(m.group(1));
-                        regionZ = Integer.parseInt(m.group(2));
-                        // Reject coordinates whose region -> chunk shift would overflow int
-                        // (|region| >= 2^26); such names are corrupt or foreign files. Compare in
-                        // long so that region == Integer.MIN_VALUE cannot slip past Math.abs
-                        // (whose overflow keeps the value negative).
-                        long rx = regionX;
-                        long rz = regionZ;
-                        if (rx >= (1L << 26) || rx <= -(1L << 26)
-                                || rz >= (1L << 26) || rz <= -(1L << 26)) {
-                            throw new NumberFormatException("region coordinate out of range");
-                        }
-                    } catch (NumberFormatException ex) {
-                        // Out-of-range coordinates (e.g. r.9999999999999999.0.mca from a
-                        // corrupt or foreign file): skip the file instead of aborting the
-                        // whole conversion.
-                        System.err.println("Folesium: skipping " + mca.getFileName()
-                                + ": region coordinates out of range");
-                        return;
-                    }
-                    try (AnvilRegionFile rf = new AnvilRegionFile(mca)) {
-                        for (int[] xz : rf.listChunks()) {
-                            byte[] payload = rf.readChunk(xz[0], xz[1]);
-                            if (payload == null) {
-                                continue;
-                            }
-                            int cx = (regionX << 5) + xz[0];
-                            int cz = (regionZ << 5) + xz[1];
-                            if (ks.putIfAbsent(LongKeys.chunkKey(cx, cz), payload)) {
-                                chunkCount.incrementAndGet();
-                                byteCount.addAndGet(payload.length);
-                            }
-                        }
-                    } catch (IOException ex) {
-                        throw new UncheckedIOException("Failed converting " + mca, ex);
-                    }
-                });
+        try {
+            if (backup != null) {
+                movePath(folesiumDir, backup, false);
             }
-            db.flush();
-            trainDictionariesIfMissing(folesiumDir, converted, config);
+
+            try (FolesiumDatabase db = FolesiumDatabase.open(folesiumDir,
+                    config.withDurability(FolesiumConfig.DurabilityMode.EXPLICIT))) {
+                List<Keyspace> converted = new ArrayList<>();
+                for (Map.Entry<String, String> e : DIR_TO_KEYSPACE.entrySet()) {
+                    Path src = dimensionDir.resolve(e.getKey());
+                    if (!Files.isDirectory(src)) {
+                        continue;
+                    }
+                    Keyspace ks = db.keyspace(e.getValue());
+                    converted.add(ks);
+                    List<Path> mcaFiles;
+                    try (var s = Files.list(src)) {
+                        mcaFiles = s.filter(p -> MCA.matcher(p.getFileName().toString()).matches()).toList();
+                    }
+                    runParallel(mcaFiles, mca -> {
+                        Matcher m = MCA.matcher(mca.getFileName().toString());
+                        if (!m.matches()) {
+                            return;
+                        }
+                        int regionX;
+                        int regionZ;
+                        try {
+                            regionX = Integer.parseInt(m.group(1));
+                            regionZ = Integer.parseInt(m.group(2));
+                            // Reject coordinates whose region -> chunk shift would overflow int
+                            // (|region| >= 2^26); such names are corrupt or foreign files. Compare in
+                            // long so that region == Integer.MIN_VALUE cannot slip past Math.abs
+                            // (whose overflow keeps the value negative).
+                            long rx = regionX;
+                            long rz = regionZ;
+                            if (rx >= (1L << 26) || rx <= -(1L << 26)
+                                    || rz >= (1L << 26) || rz <= -(1L << 26)) {
+                                throw new NumberFormatException("region coordinate out of range");
+                            }
+                        } catch (NumberFormatException ex) {
+                            // Out-of-range coordinates (e.g. r.9999999999999999.0.mca from a
+                            // corrupt or foreign file): skip the file instead of aborting the
+                            // whole conversion.
+                            System.err.println("Folesium: skipping " + mca.getFileName()
+                                    + ": region coordinates out of range");
+                            return;
+                        }
+                        try (AnvilRegionFile rf = new AnvilRegionFile(mca)) {
+                            for (int[] xz : rf.listChunks()) {
+                                byte[] payload = rf.readChunk(xz[0], xz[1]);
+                                if (payload == null) {
+                                    continue;
+                                }
+                                int cx = (regionX << 5) + xz[0];
+                                int cz = (regionZ << 5) + xz[1];
+                                if (ks.putIfAbsent(LongKeys.chunkKey(cx, cz), payload)) {
+                                    chunkCount.incrementAndGet();
+                                    byteCount.addAndGet(payload.length);
+                                }
+                            }
+                        } catch (IOException ex) {
+                            throw new UncheckedIOException("Failed converting " + mca, ex);
+                        }
+                    });
+                }
+                db.flush();
+                trainDictionariesIfMissing(folesiumDir, converted, config);
+            }
+        } catch (IOException | RuntimeException ex) {
+            if (backup != null) {
+                rollbackFailedBackup(folesiumDir, backup, ex);
+            }
+            throw ex;
+        }
+        if (backup != null && backupSink != null) {
+            backupSink.accept(backup);
         }
         return new Stats(chunkCount.get(), byteCount.get(), (System.nanoTime() - start) / 1_000_000);
     }
@@ -274,9 +311,16 @@ public final class WorldConverter {
      * empty dimension store.
      *
      * @param role the store role to open {@code folesiumDir} as
+     * @throws FolesiumException if {@code role} is not
+     *         {@link FolesiumDatabase.StoreRole#DIMENSION}: a PLAYERS store holds no chunk
+     *         data, so exporting it to Anvil region files would silently write nothing
      */
     public Stats folesiumToAnvil(Path folesiumDir, Path dimensionDir, FolesiumConfig config,
                                  FolesiumDatabase.StoreRole role) throws IOException {
+        if (role != FolesiumDatabase.StoreRole.DIMENSION) {
+            throw new FolesiumException("to-anvil export requires a DIMENSION store; "
+                    + "use the world convert command for PLAYERS stores");
+        }
         long start = System.nanoTime();
         AtomicLong chunkCount = new AtomicLong();
         AtomicLong byteCount = new AtomicLong();
@@ -324,11 +368,43 @@ public final class WorldConverter {
     private void convertKeyspaceInPlace(Path out, Keyspace ks, AtomicLong chunkCount, AtomicLong byteCount)
             throws IOException {
         Files.createDirectories(out);
-        writeKeyspace(out, ks, chunkCount, byteCount);
+        Map<Long, List<Long>> byRegion = writeKeyspace(out, ks, chunkCount, byteCount);
+        // Staging mode starts from an empty tree, so records absent from the store cannot
+        // survive a rebuild; the in-place path reuses the existing .mca files and would
+        // otherwise resurrect chunks that were deleted from the store. Zero the slots of
+        // every region the store holds records in that the store no longer contains.
+        pruneSlotsMissingFromStore(out, byRegion);
     }
 
-    private void writeKeyspace(Path writeRoot, Keyspace ks,
-                               AtomicLong chunkCount, AtomicLong byteCount) throws IOException {
+    /**
+     * In-place exports keep every chunk the store still has and delete the slots of chunks
+     * the store dropped since the target .mca was written, mirroring the staging-mode
+     * semantics "records absent from the store cannot survive". Only the regions the store
+     * holds records in (the set {@link #writeKeyspace} just wrote) are swept: a full sweep
+     * of the whole target tree would rewrite every region on each conversion.
+     */
+    private void pruneSlotsMissingFromStore(Path out, Map<Long, List<Long>> byRegion) throws IOException {
+        runParallel(new ArrayList<>(byRegion.keySet()), regionKey -> {
+            int rx = LongKeys.chunkX(regionKey);
+            int rz = LongKeys.chunkZ(regionKey);
+            Path mca = out.resolve("r." + rx + "." + rz + ".mca");
+            Set<Long> stored = Set.copyOf(byRegion.get(regionKey));
+            try (AnvilRegionFile rf = new AnvilRegionFile(mca)) {
+                for (int[] xz : rf.listChunks()) {
+                    long key = LongKeys.chunkKey((rx << 5) + xz[0], (rz << 5) + xz[1]);
+                    if (!stored.contains(key)) {
+                        rf.deleteChunk(xz[0], xz[1]);
+                    }
+                }
+                rf.sync();
+            } catch (IOException ex) {
+                throw new UncheckedIOException("Failed pruning deleted chunks in " + mca, ex);
+            }
+        });
+    }
+
+    private Map<Long, List<Long>> writeKeyspace(Path writeRoot, Keyspace ks,
+                                                AtomicLong chunkCount, AtomicLong byteCount) throws IOException {
         Map<Long, List<Long>> byRegion = new ConcurrentHashMap<>();
         ks.forEachKey(k -> {
             long key = LongKeys.decode(k);
@@ -357,6 +433,7 @@ public final class WorldConverter {
                 throw new UncheckedIOException("Failed writing " + mca, ex);
             }
         });
+        return byRegion;
     }
 
     private static Path siblingPath(Path destination, String marker) {
@@ -401,6 +478,29 @@ public final class WorldConverter {
                 }
             }
             throw failure;
+        }
+    }
+
+    /**
+     * Restores the previous store after a failed backup-mode conversion, mirroring the
+     * rollback of {@link #replaceDirectory}: the half-written new store at the canonical
+     * path is removed and the backup is moved back into place. The original failure is
+     * rethrown by the caller; a restore failure is attached to it as suppressed. When the
+     * initial backup move itself failed, the backup does not exist and the canonical path
+     * still holds the intact original, so nothing is deleted or moved.
+     */
+    private static void rollbackFailedBackup(Path destination, Path backup, Exception failure) {
+        if (Files.exists(destination)) {
+            // The new store may be only partially written; it must not survive next to the
+            // restored original.
+            deleteTreeQuietly(destination);
+        }
+        if (Files.exists(backup)) {
+            try {
+                movePath(backup, destination, false);
+            } catch (IOException restoreFailure) {
+                failure.addSuppressed(restoreFailure);
+            }
         }
     }
 

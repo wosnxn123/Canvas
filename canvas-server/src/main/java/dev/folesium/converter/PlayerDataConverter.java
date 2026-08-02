@@ -35,6 +35,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -56,6 +57,8 @@ import java.util.regex.Pattern;
  * replaces with a crash-safe append-only log. They stay on disk untouched.</p>
  */
 public final class PlayerDataConverter {
+
+    private static final System.Logger LOGGER = System.getLogger("Folesium");
 
     /** Vanilla directory holding {@code <uuid>.dat} player NBT (pre-26.x layout). */
     public static final String DIR_PLAYERDATA = "playerdata";
@@ -93,9 +96,21 @@ public final class PlayerDataConverter {
      * store: {@code <world>/players} on a 26.x world, the world root itself on the older
      * layout. This mirrors the server hook, which anchors the store next to the directory
      * {@code LevelResource.PLAYER_DATA_DIR} resolves to.
+     *
+     * <p>A 26.x world whose {@code players/} directory holds no per-player files at all
+     * (all three 26.x data directories empty) while the pre-26 root-level directories
+     * still contain data is treated as the legacy layout it actually is, so its data is
+     * not silently left behind by {@link #mappingsFor}.</p>
      */
     public static Path playerRootFor(Path worldRoot) {
         Path players = worldRoot.resolve(DIR_PLAYERS_26);
+        if (Files.isDirectory(players) && modernTreeIsEmpty(players) && legacyTreeHasData(worldRoot)) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: " + worldRoot + " has a players/ directory with no player files,"
+                            + " while the legacy root-level playerdata/advancements/stats directories hold data;"
+                            + " using the legacy layout for this world");
+            return worldRoot;
+        }
         return Files.isDirectory(players) ? players : worldRoot;
     }
 
@@ -105,10 +120,35 @@ public final class PlayerDataConverter {
      * existing PLAYERS store sits at the legacy world-root location (see
      * {@link #storeDirectoryFor}). The vanilla root is therefore always derived
      * from the world layout via {@link #playerRootFor}; the store location is used
-     * for the store itself only.
+     * for the store itself only. The one exception is the empty-26.x-shell case
+     * handled by {@link #playerRootFor}, which downgrades such a world to the
+     * legacy directories it actually holds its data in.
      */
     private static List<Mapping> mappingsFor(Path worldRoot, Path playerRoot) {
         return playerRoot.equals(worldRoot) ? LEGACY_MAPPINGS : MODERN_MAPPINGS;
+    }
+
+    /** True when none of the 26.x per-player directories under {@code players/} holds a player file. */
+    private static boolean modernTreeIsEmpty(Path playersRoot) {
+        return MODERN_MAPPINGS.stream().noneMatch(m -> hasPlayerFiles(playersRoot.resolve(m.dir())));
+    }
+
+    /** True when at least one legacy root-level per-player directory holds a player file. */
+    private static boolean legacyTreeHasData(Path worldRoot) {
+        return LEGACY_MAPPINGS.stream().anyMatch(m -> hasPlayerFiles(worldRoot.resolve(m.dir())));
+    }
+
+    /** True when the directory exists and contains at least one {@code <uuid>.dat} / {@code <uuid>.json} file. */
+    private static boolean hasPlayerFiles(Path dir) {
+        if (!Files.isDirectory(dir)) {
+            return false;
+        }
+        try (var s = Files.list(dir)) {
+            return s.anyMatch(p -> Files.isRegularFile(p)
+                    && UUID_FILE.matcher(p.getFileName().toString()).matches());
+        } catch (IOException e) {
+            return false;
+        }
     }
 
     private static final Pattern UUID_FILE = Pattern.compile(
@@ -175,12 +215,27 @@ public final class PlayerDataConverter {
      * the store.</p>
      */
     public static Stats anvilToFolesium(Path worldRoot, Path storeDir, FolesiumConfig config) throws IOException {
+        return anvilToFolesium(worldRoot, storeDir, config, null);
+    }
+
+    /**
+     * Same as {@link #anvilToFolesium(Path, Path, FolesiumConfig)}, but reports the backup
+     * sibling created for a pre-existing store (only when {@code backupOnConvert} is set)
+     * through {@code backupSink} once the conversion has succeeded.
+     *
+     * @param backupSink receives the {@code .folesium-backup-*} sibling of {@code storeDir}
+     *                   after a successful backup-mode rebuild; {@code null} to ignore
+     */
+    public static Stats anvilToFolesium(Path worldRoot, Path storeDir, FolesiumConfig config,
+                                        Consumer<Path> backupSink) throws IOException {
         long start = System.nanoTime();
         long entries = 0;
         long bytes = 0;
 
+        Path backup = null;
         if (config.backupOnConvert() && Files.isDirectory(storeDir)) {
-            movePath(storeDir, backupPath(storeDir), false);
+            backup = backupPath(storeDir);
+            movePath(storeDir, backup, false);
         }
 
         Path playerRoot = playerRootFor(worldRoot);
@@ -206,6 +261,9 @@ public final class PlayerDataConverter {
                 }
             }
             db.flush();
+        }
+        if (backup != null && backupSink != null) {
+            backupSink.accept(backup);
         }
         return new Stats(entries, bytes, (System.nanoTime() - start) / 1_000_000);
     }

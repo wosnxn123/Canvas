@@ -44,9 +44,12 @@ import java.util.logging.Logger;
  * here means the converter does not leak into the runtime classpath otherwise.</p>
  *
  * <p>The conversion runs against {@code -W &lt;worldDir&gt;}/{@code <worldName>},
- * matching the same path the rest of the server uses. If the user supplied
- * {@code --folesiumWorldDir}, that path is used verbatim (no level-name appended),
- * so operators can point it at any directory containing Anvil subdirs.</p>
+ * matching the same path the rest of the server uses; when {@code -W} is not
+ * supplied the server's default world container (the working directory) is used,
+ * so a bare {@code --folesiumConvert*} invocation converts the same world a plain
+ * server start would load. If the user supplied {@code --folesiumWorldDir}, that
+ * path is used verbatim (no level-name appended), so operators can point it at
+ * any directory containing Anvil subdirs.</p>
  */
 public final class FolesiumCli {
 
@@ -119,14 +122,23 @@ public final class FolesiumCli {
         // We replicate the resolution here instead of pulling in MC internals so
         // this hook stays callable before Bootstrap.bootStrap().
         //
-        // Both options are declared File-typed by CraftBukkit/Folia/Canvas today, but
-        // guard against an upstream re-declaration as String: a ClassCastException
-        // here would abort startup with a confusing stack trace instead of a clean
-        // conversion error.
-        File container = fileOrNull(options.valueOf("world-dir"));
-        if (container == null) {
-            LOGGER.severe("Folesium: -W/--world-dir did not resolve to a File value");
-            System.exit(2);
+        // Without -W/--world-dir the server's default world container is the working
+        // directory (DedicatedServerOptions defaults world-dir to "."), so a bare
+        // --folesiumConvert* run converts exactly the world a plain server start
+        // would load -- the same behaviour verify-server.sh exercises. The File-typed
+        // guard only rejects an explicitly supplied value that cannot be a File
+        // (if upstream ever re-declares this option as String, a ClassCastException
+        // here would escape the caller's try/catch and abort startup with a
+        // confusing stack trace instead of a clean conversion error).
+        File container;
+        if (options.has("world-dir")) {
+            container = fileOrNull(options.valueOf("world-dir"));
+            if (container == null) {
+                LOGGER.severe("Folesium: -W/--world-dir did not resolve to a File value");
+                System.exit(2);
+            }
+        } else {
+            container = new File(".");
         }
         Object worldValue = options.has("world") ? options.valueOf("world") : null;
         String levelName = worldValue == null ? readLevelName()

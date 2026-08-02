@@ -200,7 +200,7 @@ public final class PageIndex implements AutoCloseable {
             cacheMisses.incrementAndGet();
             Path file = pagePath(regionX, regionZ);
             boolean exists = Files.exists(file);
-            RegionPage page = exists ? readPage(file) : RegionPage.create(regionX, regionZ);
+            RegionPage page = exists ? readPage(file, regionX, regionZ) : RegionPage.create(regionX, regionZ);
             e = new Entry(page);
             e.persisted = exists;
             seg.map.put(key, e);
@@ -210,9 +210,21 @@ public final class PageIndex implements AutoCloseable {
         }
     }
 
-    private RegionPage readPage(Path file) {
+    /**
+     * Reads a region page file and verifies its header coordinates name the region the
+     * caller asked for. A page whose header disagrees with the requested region is
+     * corrupt (e.g. a stale file left behind by a removed region); it fails with a
+     * {@link FolesiumException} exactly like any other damaged page, so callers repair
+     * it in place via {@link #rebuildPageFrom}.
+     */
+    private RegionPage readPage(Path file, int regionX, int regionZ) {
         try {
-            return RegionPage.read(file);
+            RegionPage page = RegionPage.read(file);
+            if (page.regionX() != regionX || page.regionZ() != regionZ) {
+                throw new FolesiumException("Region page header (" + page.regionX() + ", " + page.regionZ()
+                        + ") does not match requested region (" + regionX + ", " + regionZ + ") in " + file);
+            }
+            return page;
         } catch (IOException e) {
             throw new FolesiumException("Failed to read region page " + file, e);
         }
@@ -293,7 +305,7 @@ public final class PageIndex implements AutoCloseable {
                 cacheMisses.incrementAndGet();
                 Path file = pagePath(regionX, regionZ);
                 boolean exists = Files.exists(file);
-                RegionPage page = exists ? readPage(file) : RegionPage.create(regionX, regionZ);
+                RegionPage page = exists ? readPage(file, regionX, regionZ) : RegionPage.create(regionX, regionZ);
                 e = new Entry(page);
                 e.persisted = exists;
                 seg.map.put(key, e);

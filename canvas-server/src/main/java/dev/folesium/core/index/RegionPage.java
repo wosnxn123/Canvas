@@ -114,7 +114,7 @@ public final class RegionPage {
         int version = b.get() & 0xFF;
         int regionX = b.getInt();
         int regionZ = b.getInt();
-        b.get(); // flags (reserved, always 0)
+        int flags = b.get() & 0xFF;
         int watermark = b.getInt();
         if (magic != MAGIC) {
             throw new FolesiumException("Bad region page magic in " + file + " (region (" + regionX + ", " + regionZ + "))");
@@ -123,12 +123,21 @@ public final class RegionPage {
             throw new FolesiumException("Unsupported region page version " + version + " in " + file
                     + " (region (" + regionX + ", " + regionZ + "))");
         }
+        if (flags != 0) {
+            throw new FolesiumException("Bad region page flags " + flags + " in " + file
+                    + " (region (" + regionX + ", " + regionZ + "))");
+        }
         int[] slots = new int[SLOT_COUNT];
         for (int i = 0; i < SLOT_COUNT; i++) {
             slots[i] = b.getInt();
         }
         int storedCrc = b.getInt();
         int storedCount = b.getInt();
+        long reservedTail = b.getLong();
+        if (reservedTail != 0L) {
+            throw new FolesiumException("Reserved tail bytes of region page " + file + " are not zero"
+                    + " (region (" + regionX + ", " + regionZ + "))");
+        }
         CRC32C crc = new CRC32C();
         crc.update(bytes, 0, TAIL_CRC_OFF);
         if ((int) crc.getValue() != storedCrc) {
@@ -197,10 +206,22 @@ public final class RegionPage {
         slots[slot] = offset;
     }
 
+    /**
+     * The replay-skip hint (u32) carried in the page header.
+     *
+     * @deprecated Deprecated placeholder: the field is kept only for on-disk format
+     *             compatibility and is always {@code 0} in Phase 1. It has no effect on
+     *             reads or writes; do not rely on it.
+     */
     public int watermark() {
         return watermark;
     }
 
+    /**
+     * @deprecated Deprecated placeholder, see {@link #watermark()}. The value is
+     *             preserved through write/read for format compatibility but is never
+     *             consulted by the engine.
+     */
     public void setWatermark(int watermark) {
         this.watermark = watermark;
     }

@@ -164,6 +164,44 @@ public final class AnvilRegionFile implements Closeable {
         return out;
     }
 
+    /**
+     * Removes a chunk from the region: its header slot (location and timestamp) is zeroed
+     * and its payload sectors are released, so the chunk no longer exists in the region
+     * file. An external ({@code .mcc}) payload of an oversized chunk is deleted as well,
+     * so no orphan payload file survives the deletion. Deleting an already-empty slot is
+     * a no-op.
+     */
+    public void deleteChunk(int localX, int localZ) throws IOException {
+        int idx = indexOf(localX, localZ);
+        int oldLoc = locations[idx];
+        if (oldLoc == 0) {
+            return;
+        }
+        int oldSectorOff = oldLoc >>> 8;
+        int oldSectorCount = oldLoc & 0xFF;
+        Path externalPath = externalChunkPathOrNull(localX, localZ);
+        if (externalPath != null) {
+            // Detect the external stub (length 1 + EXTERNAL_FLAG) before touching the
+            // sibling payload; a stale or foreign .mcc file must not be deleted on its own.
+            ByteBuffer stub = ByteBuffer.allocate(5);
+            if (readUpTo(stub, (long) oldSectorOff * SECTOR_BYTES) == 5
+                    && stub.getInt(0) == 1
+                    && (stub.get(4) & 0xFF & EXTERNAL_FLAG) != 0) {
+                try {
+                    java.nio.file.Files.deleteIfExists(externalPath);
+                } catch (IOException ignored) {
+                    // Orphan cleanup must not fail the slot zeroing; the region file no
+                    // longer references the payload anyway.
+                }
+            }
+        }
+        writeHeaderEntry(0, 0, idx);
+        channel.force(false);
+        locations[idx] = 0;
+        timestamps[idx] = 0;
+        usedSectors.clear(oldSectorOff, oldSectorOff + oldSectorCount);
+    }
+
     /** Reads and decompresses a chunk payload; null if absent. */
     public byte[] readChunk(int localX, int localZ) throws IOException {
         int loc = locations[indexOf(localX, localZ)];

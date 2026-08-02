@@ -111,6 +111,15 @@ public final class Keyspace implements AutoCloseable {
         byte[] dict;
         try {
             dict = loadKeyspaceDict(dir, name);
+            // Read-only opens must validate every shard header against the topology the
+            // file headers actually record ({@link #readRecordedShardCount}), not against
+            // the current configuration: a config/metadata shard count that no longer
+            // matches the physical files (e.g. a reshard interrupted between the file swap
+            // and the metadata rewrite) must not fail a read-only open - the whole point
+            // of the discovered-layout path is to open the store exactly as it lies on
+            // disk. When no shard file exists (shardCount == 0) no ShardFile is
+            // constructed, so the config is left alone.
+            FolesiumConfig shardConfig = readOnly && shardCount > 0 ? config.withShardCount(shardCount) : config;
             for (int i = 0; i < shards.length; i++) {
                 if (readOnly && Arrays.binarySearch(discovered, i) < 0) {
                     // Read-only: no shard file exists for this index (a keyspace that was
@@ -121,8 +130,8 @@ public final class Keyspace implements AutoCloseable {
                     continue;
                 }
                 String shardName = String.format("%s-%04d", name, i);
-                shards[i] = new ShardFile(dir.resolve(shardName + ".flog"), i, config, pageIndex,
-                        shardName, config.indexMode() == FolesiumConfig.IndexMode.PAGE, dict, readOnly);
+                shards[i] = new ShardFile(dir.resolve(shardName + ".flog"), i, shardConfig, pageIndex,
+                        shardName, shardConfig.indexMode() == FolesiumConfig.IndexMode.PAGE, dict, readOnly);
             }
         } catch (RuntimeException e) {
             // One bad shard must not leak the handles of the shards already opened: nobody
