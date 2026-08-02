@@ -124,8 +124,19 @@ public final class WorldConverter {
                     if (!m.matches()) {
                         return;
                     }
-                    int regionX = Integer.parseInt(m.group(1));
-                    int regionZ = Integer.parseInt(m.group(2));
+                    int regionX;
+                    int regionZ;
+                    try {
+                        regionX = Integer.parseInt(m.group(1));
+                        regionZ = Integer.parseInt(m.group(2));
+                    } catch (NumberFormatException ex) {
+                        // Out-of-range coordinates (e.g. r.9999999999999999.0.mca from a
+                        // corrupt or foreign file): skip the file instead of aborting the
+                        // whole conversion.
+                        System.err.println("Folesium: skipping " + mca.getFileName()
+                                + ": region coordinates out of range");
+                        return;
+                    }
                     try (AnvilRegionFile rf = new AnvilRegionFile(mca)) {
                         for (int[] xz : rf.listChunks()) {
                             byte[] payload = rf.readChunk(xz[0], xz[1]);

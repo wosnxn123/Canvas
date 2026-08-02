@@ -448,12 +448,21 @@ final class StoreResharder {
             names.addAll(discoverKeyspaces(staging));
             for (String name : names) {
                 for (int i = 0; i < count; i++) {
-                    if (!isPopulatedShard(dir.resolve(String.format("%s-%04d.flog", name, i)))
-                            && !isPopulatedShard(staging.resolve(String.format("%s-%04d.flog", name, i)))) {
+                    Path dirShard = dir.resolve(String.format("%s-%04d.flog", name, i));
+                    Path stagingShard = staging.resolve(String.format("%s-%04d.flog", name, i));
+                    // A staging file - even header-only - is copyKeyspace's output for that
+                    // shard: a shard of the new layout legitimately holds no records when the
+                    // keyspace has fewer records than shards (e.g. a growth reshard), so its
+                    // mere presence proves the swap reached it. A dir file only counts when
+                    // populated: a header-only file there may be an eagerly recreated empty
+                    // shard after a crash mid-swap, which must not make a partial new layout
+                    // look complete (that would let the backup - the only surviving copy of
+                    // the records the missing shards should have held - be deleted).
+                    if (!isPopulatedShard(dirShard) && !Files.isRegularFile(stagingShard)) {
                         return false;
                     }
                 }
-                if (countShardFiles(dir, name) + countShardFiles(staging, name) != count) {
+                if (countShardFiles(dir, name) + countStagedShardFiles(staging, name) != count) {
                     return false;
                 }
             }
@@ -485,6 +494,20 @@ final class StoreResharder {
     private static long countShardFiles(Path dir, String keyspace) throws IOException {
         try (Stream<Path> files = Files.list(dir)) {
             return files.filter(StoreResharder::isPopulatedShard)
+                    .filter(p -> p.getFileName().toString().startsWith(keyspace + "-")
+                            && p.getFileName().toString().endsWith(".flog"))
+                    .count();
+        }
+    }
+
+    /**
+     * Number of shard files of one keyspace inside the staging tree by mere presence:
+     * copyKeyspace writes even header-only files for the empty shards of the new layout,
+     * so they are legitimate evidence the swap reached them (see {@link #completeNewLayout}).
+     */
+    private static long countStagedShardFiles(Path dir, String keyspace) throws IOException {
+        try (Stream<Path> files = Files.list(dir)) {
+            return files.filter(Files::isRegularFile)
                     .filter(p -> p.getFileName().toString().startsWith(keyspace + "-")
                             && p.getFileName().toString().endsWith(".flog"))
                     .count();

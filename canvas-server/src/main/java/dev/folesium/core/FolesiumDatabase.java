@@ -276,7 +276,13 @@ public final class FolesiumDatabase implements AutoCloseable {
         } catch (IOException e) {
             throw new FolesiumException("Cannot read " + meta, e);
         }
-        int version = Integer.parseInt(p.getProperty("store.version", "0"));
+        int version;
+        try {
+            version = Integer.parseInt(p.getProperty("store.version", "0"));
+        } catch (NumberFormatException e) {
+            throw new FolesiumException("Corrupt store.version in " + meta
+                    + ": '" + p.getProperty("store.version") + "' is not a number", e);
+        }
         if (version != STORE_VERSION) {
             throw new FolesiumException("Unsupported Folesium store version " + version + " at " + dir
                     + " (this build supports " + STORE_VERSION + ")");
