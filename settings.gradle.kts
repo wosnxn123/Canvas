@@ -3,6 +3,10 @@ import java.util.*
 pluginManagement {
     repositories {
         mavenLocal()
+        maven {
+            name = "canvasmc"
+            url = uri("https://maven.canvasmc.io/public")
+        }
         maven("https://maven.aliyun.com/repository/gradle-plugin") // Folesium: Maven Central blocks CNB/CN hosts (HTTP 403)
         maven("https://maven.aliyun.com/repository/public")
         gradlePluginPortal()

@@ -35,6 +35,8 @@ public final class Compressors {
             case NONE -> raw;
             case DEFLATE -> deflate(raw, level);
             case ZSTD -> zstdCompress(raw, level);
+            case ZSTD_DICT -> throw new IllegalArgumentException(
+                    "ZSTD_DICT requires a per-keyspace dictionary; use compressWithDict(byte[], byte[], int)");
         };
     }
 
@@ -43,7 +45,33 @@ public final class Compressors {
             case NONE -> stored;
             case DEFLATE -> inflate(stored, rawLen);
             case ZSTD -> zstdInflate(stored, rawLen);
+            case ZSTD_DICT -> throw new IllegalArgumentException(
+                    "ZSTD_DICT requires a per-keyspace dictionary; use decompressWithDict(byte[], byte[], int)");
         };
+    }
+
+    /**
+     * Dictionary-aware compression. The caller has already decided the codec is
+     * {@link Compression#ZSTD_DICT}, so this is a thin wrapper over
+     * {@link ZstdNative#compressUsingDict}. A null {@code dict} is rejected here as a
+     * defensive guard (the write path must not reach codec 3 without a dictionary).
+     */
+    public static byte[] compressWithDict(byte[] raw, byte[] dict, int level) {
+        if (dict == null) {
+            throw new IllegalArgumentException("ZSTD_DICT compression requires a non-null dictionary");
+        }
+        return ZstdNative.compressUsingDict(raw, dict, level);
+    }
+
+    /**
+     * Dictionary-aware decompression, mirror of {@link #compressWithDict}: codec 3 records
+     * decompress with the keyspace dictionary via {@link ZstdNative#decompressUsingDict}.
+     */
+    public static byte[] decompressWithDict(byte[] stored, byte[] dict, int rawLen) {
+        if (dict == null) {
+            throw new IllegalArgumentException("ZSTD_DICT decompression requires a non-null dictionary");
+        }
+        return ZstdNative.decompressUsingDict(stored, dict, rawLen);
     }
 
     private static byte[] deflate(byte[] raw, int level) {

@@ -34,7 +34,10 @@ import java.lang.invoke.MethodType;
  *
  * <p>Everything is resolved lazily and cached: if zstd-jni is absent,
  * {@link #available()} is {@code false} and callers surface a clear error
- * instead of a cryptic {@link NoClassDefFoundError}.</p>
+ * instead of a cryptic {@link NoClassDefFoundError}. The dictionary API
+ * (used by {@link dev.folesium.core.FolesiumConfig.Compression#ZSTD_DICT}) is
+ * probed separately via {@link #dictAvailable()}, so an older zstd-jni that
+ * only has the plain compress/decompress pair degrades gracefully.</p>
  */
 public final class ZstdNative {
 
@@ -47,7 +50,12 @@ public final class ZstdNative {
      */
     private static final MethodHandle COMPRESS;
     private static final MethodHandle DECOMPRESS;
+    private static final MethodHandle COMPRESS_USING_DICT;
+    private static final MethodHandle DECOMPRESS_USING_DICT;
+    private static final MethodHandle TRAIN_FROM_BUFFER;
+    private static final MethodHandle COMPRESS_BOUND;
     private static final boolean AVAILABLE;
+    private static final boolean DICT_AVAILABLE;
 
     static {
         MethodHandle compress = null;
@@ -66,6 +74,47 @@ public final class ZstdNative {
         COMPRESS = compress;
         DECOMPRESS = decompress;
         AVAILABLE = compress != null && decompress != null;
+
+        // The dictionary API (compressUsingDict / decompressUsingDict / trainFromBuffer) is
+        // newer than the plain compress/decompress pair; bind it in a separate try so an older
+        // zstd-jni jar degrades to DICT_AVAILABLE=false without losing the plain ZSTD path.
+        // Real signatures (zstd-jni 1.5.7-11):
+        //   compressUsingDict(byte[] dst, int dstOffset, byte[] src, int srcOffset, int srcSize, byte[] dict, int level) -> long
+        //   decompressUsingDict(byte[] dst, int dstOffset, byte[] src, int srcOffset, int srcSize, byte[] dict) -> long
+        //   trainFromBuffer(byte[][] samples, byte[] dictBuffer, boolean legacy) -> long
+        //   compressBound(long srcSize) -> long
+        MethodHandle compressUsingDict = null;
+        MethodHandle decompressUsingDict = null;
+        MethodHandle trainFromBuffer = null;
+        MethodHandle compressBound = null;
+        if (compress != null) {
+            try {
+                Class<?> zstd = Class.forName("com.github.luben.zstd.Zstd");
+                MethodHandles.Lookup lookup = MethodHandles.publicLookup();
+                compressUsingDict = lookup.findStatic(zstd, "compressUsingDict",
+                        MethodType.methodType(long.class, byte[].class, int.class, byte[].class,
+                                int.class, int.class, byte[].class, int.class));
+                decompressUsingDict = lookup.findStatic(zstd, "decompressUsingDict",
+                        MethodType.methodType(long.class, byte[].class, int.class, byte[].class,
+                                int.class, int.class, byte[].class));
+                trainFromBuffer = lookup.findStatic(zstd, "trainFromBuffer",
+                        MethodType.methodType(long.class, byte[][].class, byte[].class, boolean.class));
+                compressBound = lookup.findStatic(zstd, "compressBound",
+                        MethodType.methodType(long.class, long.class));
+            } catch (Throwable ignored) {
+                // Old zstd-jni without the dictionary API; only the dict path is unavailable.
+                compressUsingDict = null;
+                decompressUsingDict = null;
+                trainFromBuffer = null;
+                compressBound = null;
+            }
+        }
+        COMPRESS_USING_DICT = compressUsingDict;
+        DECOMPRESS_USING_DICT = decompressUsingDict;
+        TRAIN_FROM_BUFFER = trainFromBuffer;
+        COMPRESS_BOUND = compressBound;
+        DICT_AVAILABLE = compressUsingDict != null && decompressUsingDict != null
+                && trainFromBuffer != null && compressBound != null;
     }
 
     /** Whether {@code zstd-jni} is loadable on the current classpath. */
@@ -102,6 +151,113 @@ public final class ZstdNative {
             throw e;
         } catch (Throwable t) {
             throw new IllegalStateException("zstd decompression failed", t);
+        }
+    }
+
+    /**
+     * Whether the zstd dictionary API (compressUsingDict / decompressUsingDict / trainFromBuffer)
+     * is loadable on the current classpath. Independent of {@link #available()}: an older zstd-jni
+     * may expose the plain compress/decompress pair without the dictionary API.
+     */
+    public static boolean dictAvailable() {
+        return DICT_AVAILABLE;
+    }
+
+    private static String dictUnavailableMessage() {
+        return "Folesium ZSTD_DICT compression requested but the zstd-jni dictionary API is not available. "
+                + "Run on a Folia/Canvas server with zstd-jni >= 1.5.x (which ships the dictionary API) or "
+                + "add com.github.luben:zstd-jni.";
+    }
+
+    /**
+     * Compresses {@code raw} with the pre-trained {@code dict} at {@code level}. The destination
+     * buffer is sized with {@code Zstd.compressBound(srcSize)} (worst-case bound, as required by
+     * zstd-jni's offset-based {@code compressUsingDict}), then trimmed to the produced size.
+     */
+    public static byte[] compressUsingDict(byte[] raw, byte[] dict, int level) {
+        MethodHandle mh = COMPRESS_USING_DICT;
+        if (mh == null) {
+            throw new UnsupportedOperationException(dictUnavailableMessage());
+        }
+        try {
+            long bound = (long) COMPRESS_BOUND.invokeExact((long) raw.length);
+            if (bound > Integer.MAX_VALUE - 8) {
+                throw new IllegalStateException("zstd dictionary compression input too large: " + raw.length + " bytes");
+            }
+            byte[] dst = new byte[(int) bound];
+            long n = (long) mh.invokeExact(dst, 0, raw, 0, raw.length, dict, level);
+            if (n < 0) {
+                throw new IllegalStateException("zstd dictionary compression failed with error code " + n);
+            }
+            if (n == dst.length) {
+                return dst;
+            }
+            byte[] out = new byte[(int) n];
+            System.arraycopy(dst, 0, out, 0, (int) n);
+            return out;
+        } catch (RuntimeException | Error e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new IllegalStateException("zstd dictionary compression failed", t);
+        }
+    }
+
+    /**
+     * Decompresses {@code stored} with the pre-trained {@code dict}, expecting exactly
+     * {@code rawLen} bytes. A mismatch means the record was written with a different
+     * dictionary (or is corrupt) and fails loudly rather than returning truncated data.
+     */
+    public static byte[] decompressUsingDict(byte[] stored, byte[] dict, int rawLen) {
+        MethodHandle mh = DECOMPRESS_USING_DICT;
+        if (mh == null) {
+            throw new UnsupportedOperationException(dictUnavailableMessage());
+        }
+        try {
+            byte[] dst = new byte[rawLen];
+            long n = (long) mh.invokeExact(dst, 0, stored, 0, stored.length, dict);
+            if (n < 0) {
+                throw new IllegalStateException("zstd dictionary decompression failed with error code " + n);
+            }
+            if (n != rawLen) {
+                throw new IllegalStateException("zstd dictionary decompressed size mismatch: " + n + " != " + rawLen);
+            }
+            return dst;
+        } catch (RuntimeException | Error e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new IllegalStateException("zstd dictionary decompression failed", t);
+        }
+    }
+
+    /**
+     * Trains a dictionary from {@code samples} into a fresh {@code dictSize}-byte buffer using the
+     * COVER algorithm ({@code legacy=false}). Returns the dictionary bytes exactly as long as the
+     * native side wrote them. Requires at least 11 samples, matching {@code Zstd.trainFromBuffer}.
+     */
+    public static byte[] trainDict(byte[][] samples, int dictSize) {
+        MethodHandle mh = TRAIN_FROM_BUFFER;
+        if (mh == null) {
+            throw new UnsupportedOperationException(dictUnavailableMessage());
+        }
+        if (dictSize < 1) {
+            throw new IllegalArgumentException("dictSize must be >= 1: " + dictSize);
+        }
+        try {
+            byte[] dict = new byte[dictSize];
+            long n = (long) mh.invokeExact(samples, dict, false);
+            if (n < 0) {
+                throw new IllegalStateException("zstd dictionary training failed with error code " + n);
+            }
+            if (n == dict.length) {
+                return dict;
+            }
+            byte[] out = new byte[(int) n];
+            System.arraycopy(dict, 0, out, 0, (int) n);
+            return out;
+        } catch (RuntimeException | Error e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new IllegalStateException("zstd dictionary training failed", t);
         }
     }
 }

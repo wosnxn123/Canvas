@@ -21,8 +21,12 @@ package dev.folesium.core.shard;
 import dev.folesium.core.FolesiumConfig;
 import dev.folesium.core.FolesiumConfig.Compression;
 import dev.folesium.core.FolesiumException;
+import dev.folesium.core.index.PageIndex;
+import dev.folesium.core.index.RegionPage;
 import dev.folesium.core.util.Bytes;
 import dev.folesium.core.util.Compressors;
+import dev.folesium.core.util.LongKeys;
+import dev.folesium.core.util.ZstdNative;
 
 import java.io.EOFException;
 import java.io.IOException;
@@ -36,8 +40,11 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.BiConsumer;
 import java.util.zip.CRC32C;
@@ -62,7 +69,12 @@ import java.util.zip.CRC32C;
  * <p>Recovery: on open the shard is scanned sequentially; the first record that
  * fails magic/bounds/CRC validation marks the end of the valid prefix and the
  * file is truncated there (torn-write recovery). A hint file
- * ({@code *.fidx}) written on clean close allows skipping the scan.</p>
+ * ({@code *.fidx}) written on clean close allows skipping the scan. When a page
+ * index exists, the region pages are then rebuilt by replaying the log from the
+ * shard's compaction watermark ({@code <shardName>.cwmk}) to EOF, so every live
+ * chunk record has a page slot and tombstones clear theirs; a record that fails
+ * validation truncates the shard there, and page slots are trimmed lazily by
+ * treating any offset at or beyond the log EOF as a miss.</p>
  *
  * <p>Thread model: many concurrent readers OR one writer per shard
  * ({@link ReentrantReadWriteLock}). Different shards are fully independent, so
@@ -113,13 +125,63 @@ public final class ShardFile implements AutoCloseable {
     private long writePos;
     private long deadBytes;
     private volatile boolean dirty;
+    /**
+     * Number of records appended to this shard since it was opened (puts,
+     * putIfAbsent appends and delete tombstones; no-ops - a putIfAbsent that found
+     * the key or a delete of an absent key - are not counted because no record was
+     * written). Drives the workload-compaction priority: a shard with heavy write
+     * churn is compacted ahead of an equally dead shard with little traffic. The
+     * counter is not reset by compaction: priority is an all-time write-frequency
+     * signal and the log1p scaling keeps old counters from dominating the score.
+     */
+    private final AtomicLong writeCount = new AtomicLong();
+    /**
+     * Optional per-keyspace region-page index. When non-null, 8-byte chunk keys are
+     * mirrored into region pages on every write and probed first on reads. In AUTO
+     * mode the pages are a pure acceleration cache whose correctness is guaranteed by
+     * {@link #index}; in PAGE mode ({@link #pageAuthoritative}) they are the only
+     * index for chunk keys, rebuilt at open from the compaction watermark so every
+     * live chunk has a slot. Null for non-region-keyed keyspaces, when the page index
+     * is disabled ({@code indexCacheBytes == 0}), or for standalone shards. Owned and
+     * closed by the {@code Keyspace}, never by this shard.
+     */
+    private final PageIndex pageIndex;
+    /**
+     * Name of this shard used to key its watermark files in the page-index directory
+     * ({@code <shardName>.wmk} for the checkpoint watermark, {@code <shardName>.cwmk}
+     * for the compaction anchor). Equals the shard file name without extension (e.g.
+     * {@code chunks-0000}), supplied by the {@code Keyspace}. {@code null} for shards
+     * without a page index, where no watermark files exist.
+     */
+    private final String shardName;
+    /**
+     * True when {@code indexMode == PAGE}: for 8-byte chunk keys the region page is the
+     * only index, so a slot of 0 means the key is truly absent and reads never fall back
+     * to the HashMap. AUTO keeps the Phase 1 fallback semantics. Only consulted while a
+     * page index exists and is not invalidated.
+     */
+    private final boolean pageAuthoritative;
+    /**
+     * Immutable per-keyspace dictionary used for codec-3 (ZSTD_DICT) records, or
+     * {@code null} when dictionary compression is disabled, no dictionary exists for this
+     * keyspace, or zstd dictionary support is unavailable. Snapshotted at construction: every
+     * record this shard writes uses this same dictionary, so codec-3 records stay decodable for
+     * as long as the keyspace is open. Owned by the {@code Keyspace}; this shard never mutates
+     * the bytes.
+     */
+    private final byte[] keyspaceDict;
 
-    public ShardFile(Path path, int shardIndex, FolesiumConfig config) {
+    public ShardFile(Path path, int shardIndex, FolesiumConfig config, PageIndex pageIndex,
+                     String shardName, boolean pageAuthoritative, byte[] keyspaceDict) {
         this.path = path;
         this.hintPath = path.resolveSibling(path.getFileName() + ".fidx");
         this.shardIndex = shardIndex;
         this.shardCount = config.shardCount();
         this.config = config;
+        this.pageIndex = pageIndex;
+        this.shardName = shardName;
+        this.pageAuthoritative = pageAuthoritative;
+        this.keyspaceDict = keyspaceDict;
         try {
             boolean fresh = !Files.exists(path) || Files.size(path) == 0;
             this.channel = FileChannel.open(path,
@@ -144,6 +206,12 @@ public final class ShardFile implements AutoCloseable {
                 if (!tryLoadHint()) {
                     scanAndRecover();
                 }
+            }
+            // Phase 2: mirror the log into the region pages. The HashMap above (hint or
+            // scan) is authoritative for AUTO mode; the incremental build below makes the
+            // pages complete for PAGE mode, where they are the only index at open.
+            if (pageIndex != null) {
+                buildPagesFromCompactionAnchor();
             }
         } catch (Throwable e) {
             closeAfterOpenFailure(e);
@@ -188,6 +256,18 @@ public final class ShardFile implements AutoCloseable {
     /** Physical shard topology recorded in this file's header. */
     public int shardCount() {
         return shardCount;
+    }
+
+    /**
+     * The log offset at which the last compaction finished - the anchor the next open
+     * uses to rebuild the region pages (incremental scan of {@code [anchor, EOF)}).
+     * Returns 0 when there is no page index or the shard has no name. Contract §3.
+     */
+    public long compactionAnchor() {
+        if (pageIndex == null || shardName == null) {
+            return 0;
+        }
+        return pageIndex.compactionWatermark(shardName);
     }
 
     // ------------------------------------------------------------------ open
@@ -245,18 +325,61 @@ public final class ShardFile implements AutoCloseable {
     /** Full sequential scan; truncates at the first torn/corrupt record. */
     private void scanAndRecover() throws IOException {
         long fileSize = channel.size();
-        long pos = FILE_HEADER_LEN;
+        ScanOutcome outcome = scanRange(FILE_HEADER_LEN, fileSize, this::applyScanRecord);
+        if (outcome.firstInvalidOffset < fileSize) {
+            truncateAt(outcome.firstInvalidOffset, outcome.reason);
+        }
+        writePos = outcome.firstInvalidOffset;
+    }
+
+    /**
+     * Applies one validated record to the HashMap index: puts/removes the key and
+     * tracks dead bytes, exactly as the pre-refactor {@code scanAndRecover} loop did.
+     */
+    private void applyScanRecord(byte[] key, byte flags, long recordOffset, int recordLength,
+                                 int rawValLen, int storedValLen) {
+        Bytes k = new Bytes(key);
+        Loc old;
+        if ((flags & FLAG_TOMBSTONE) != 0) {
+            old = index.remove(k);
+            deadBytes += recordLength; // tombstone itself is dead weight
+        } else {
+            old = index.put(k, new Loc(recordOffset, recordLength, key.length, rawValLen, storedValLen, flags));
+        }
+        if (old != null) {
+            deadBytes += old.recordLength;
+        }
+    }
+
+    /** Callback for every record validated by {@link #scanRange}. */
+    @FunctionalInterface
+    private interface RecordHandler {
+        void accept(byte[] key, byte flags, long recordOffset, int recordLength, int rawValLen, int storedValLen);
+    }
+
+    /** Outcome of a range scan: the first offset that failed validation, or {@code eof} when clean. */
+    private record ScanOutcome(long firstInvalidOffset, String reason) {
+    }
+
+    /**
+     * Parses the records of {@code [start, eof)}, validating magic, bounds and CRC
+     * exactly like the full recovery scan, and feeds every valid record to
+     * {@code handler}. Stops at the first record that fails validation and returns
+     * its offset so the caller can truncate there; returns {@code eof} when the whole
+     * range is clean. Shared by {@link #scanAndRecover} (HashMap rebuild) and
+     * {@link #buildPagesFromCompactionAnchor} (page incremental build).
+     */
+    private ScanOutcome scanRange(long start, long eof, RecordHandler handler) throws IOException {
+        long pos = start;
         ByteBuffer header = ByteBuffer.allocate(RECORD_HEADER_LEN);
         CRC32C crc = new CRC32C();
-
-        while (pos < fileSize) {
+        while (pos < eof) {
             long recordStart = pos;
             header.clear();
             try {
                 readFully(header, pos);
             } catch (EOFException e) {
-                truncateAt(recordStart, "torn record header");
-                return;
+                return new ScanOutcome(recordStart, "torn record header");
             }
             byte magic = header.get();
             byte flags = header.get();
@@ -267,9 +390,8 @@ public final class ShardFile implements AutoCloseable {
             if (magic != RECORD_MAGIC || keyLen == 0
                     || rawValLen < 0 || rawValLen > MAX_VALUE_LEN
                     || storedValLen < 0 || storedValLen > MAX_VALUE_LEN
-                    || recordStart + RECORD_HEADER_LEN + keyLen + storedValLen + 4L > fileSize) {
-                truncateAt(recordStart, "invalid record header");
-                return;
+                    || recordStart + RECORD_HEADER_LEN + keyLen + storedValLen + 4L > eof) {
+                return new ScanOutcome(recordStart, "invalid record header");
             }
 
             int bodyLen = keyLen + storedValLen;
@@ -277,8 +399,7 @@ public final class ShardFile implements AutoCloseable {
             try {
                 readFully(body, recordStart + RECORD_HEADER_LEN);
             } catch (EOFException e) {
-                truncateAt(recordStart, "torn record body");
-                return;
+                return new ScanOutcome(recordStart, "torn record body");
             }
 
             crc.reset();
@@ -287,29 +408,82 @@ public final class ShardFile implements AutoCloseable {
             crc.update(body.slice(0, bodyLen));
             int expected = body.getInt(bodyLen);
             if ((int) crc.getValue() != expected) {
-                truncateAt(recordStart, "CRC mismatch");
-                return;
+                return new ScanOutcome(recordStart, "CRC mismatch");
             }
 
             byte[] key = new byte[keyLen];
             body.position(0);
             body.get(key);
-            Bytes k = new Bytes(key);
             int recordLength = RECORD_HEADER_LEN + bodyLen + 4;
-
-            Loc old;
-            if ((flags & FLAG_TOMBSTONE) != 0) {
-                old = index.remove(k);
-                deadBytes += recordLength; // tombstone itself is dead weight
-            } else {
-                old = index.put(k, new Loc(recordStart, recordLength, keyLen, rawValLen, storedValLen, flags));
-            }
-            if (old != null) {
-                deadBytes += old.recordLength;
-            }
+            handler.accept(key, flags, recordStart, recordLength, rawValLen, storedValLen);
             pos = recordStart + recordLength;
         }
-        writePos = pos;
+        return new ScanOutcome(pos, null);
+    }
+
+    /**
+     * Rebuilds this shard's region pages by replaying every record in
+     * {@code [compactionWatermark, EOF)}: the compaction watermark is the log offset at
+     * which the last compaction finished, so everything at or above it is an append made
+     * after the pages were last known-good. Live 8-byte chunk keys update their slot to
+     * the record offset; tombstones clear the slot (0 = absent). Records are validated
+     * with the same magic/bounds/CRC rules as {@link #scanAndRecover} - a record that
+     * fails validation truncates the shard there (torn tail), so no page slot built here
+     * can point past the new EOF (slots loaded from older page files are trimmed lazily
+     * on reads by {@link #pageIndexLoc}).
+     *
+     * <p>Runs in the constructor whenever a page index exists, in AUTO as well as PAGE
+     * mode (in AUTO the pages are an acceleration cache, in PAGE they are the only index
+     * at open). The built pages end up dirty and are persisted by the next checkpoint or
+     * close. A damaged page file is repaired in place (the corrupt file is deleted so the
+     * replay continues into a fresh page) rather than failing the open; only a page whose
+     * file cannot be removed is skipped for the rest of the replay.
+     */
+    private void buildPagesFromCompactionAnchor() throws IOException {
+        if (shardName == null) {
+            return; // defensive: without a shard name there is no watermark file to anchor on
+        }
+        long eof = channel.size();
+        long anchor = Math.max(FILE_HEADER_LEN, Math.min(pageIndex.compactionWatermark(shardName), eof));
+        Set<Long> corruptRegions = new HashSet<>();
+        ScanOutcome outcome = scanRange(anchor, eof, (key, flags, recordOffset, recordLength, rawValLen, storedValLen) -> {
+            if (key.length != 8) {
+                return; // only chunk keys have page slots
+            }
+            long chunkKey = LongKeys.decode(key);
+            int regionX = RegionPage.regionXFromChunk(chunkKey);
+            int regionZ = RegionPage.regionZFromChunk(chunkKey);
+            int slot = RegionPage.slotIndex(LongKeys.chunkX(chunkKey), LongKeys.chunkZ(chunkKey));
+            long region = ((long) regionX << 32) | (regionZ & 0xFFFFFFFFL);
+            if (corruptRegions.contains(region)) {
+                return;
+            }
+            try {
+                pageIndex.updateSlot(regionX, regionZ, slot, (flags & FLAG_TOMBSTONE) != 0 ? 0 : (int) recordOffset);
+            } catch (RuntimeException e) {
+                // A damaged or unreadable page file must not fail the open. Repair it in
+                // place: drop any cached entry and delete the corrupt file, so the next
+                // updateSlot for this region loads a fresh page and keeps replaying the
+                // log into it - in PAGE mode the page is the only index, so this replay
+                // is what restores the region's data. The record that hit the damage is
+                // retried against the fresh page: the replay is single-pass, so without
+                // the retry that record's slot would stay empty. If the file cannot be
+                // removed (read-only mode, permissions), skip the region for the rest of
+                // this replay rather than failing once per record.
+                if (!pageIndex.rebuildPageFrom(regionX, regionZ)) {
+                    corruptRegions.add(region);
+                } else {
+                    pageIndex.updateSlot(regionX, regionZ, slot,
+                            (flags & FLAG_TOMBSTONE) != 0 ? 0 : (int) recordOffset);
+                }
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Folesium: page build for {0} repaired damaged page of region ({1}, {2}): {3}",
+                        path, regionX, regionZ, e.toString());
+            }
+        });
+        if (outcome.firstInvalidOffset < eof) {
+            truncateAt(outcome.firstInvalidOffset, outcome.reason);
+        }
     }
 
     private void truncateAt(long pos, String reason) throws IOException {
@@ -408,13 +582,27 @@ public final class ShardFile implements AutoCloseable {
     public byte[] get(Bytes key) {
         lock.readLock().lock();
         try {
+            Loc pageLoc;
+            try {
+                pageLoc = pageIndexLoc(key);
+            } catch (IOException e) {
+                pageLoc = null; // stale page entry (e.g. its record was truncated); AUTO falls back to the HashMap
+            }
+            if (pageLoc != null) {
+                byte[] stored = readStoredValue(pageLoc, config.verifyChecksums());
+                Compression c = Compression.byId((byte) (pageLoc.flags & 0x0F));
+                return decompressValue(c, stored, pageLoc);
+            }
+            if (pageOnly(key)) {
+                return null; // PAGE mode: the page is the only index - a miss means the key is absent
+            }
             Loc loc = index.get(key);
             if (loc == null) {
                 return null;
             }
             byte[] stored = readStoredValue(loc, config.verifyChecksums());
             Compression c = Compression.byId((byte) (loc.flags & 0x0F));
-            return Compressors.decompress(c, stored, loc.rawValLen);
+            return decompressValue(c, stored, loc);
         } catch (IOException e) {
             throw new FolesiumException("Read failed in " + path, e);
         } finally {
@@ -431,6 +619,22 @@ public final class ShardFile implements AutoCloseable {
         ByteBuffer value = ByteBuffer.allocate(loc.storedValLen);
         readFully(value, loc.valueOffset());
         return value.array();
+    }
+
+    /**
+     * Decompresses a stored value according to the record's codec. Codec 3 (ZSTD_DICT)
+     * requires the keyspace dictionary this shard was opened with; when it is missing the
+     * record cannot be decoded - that is a data problem (dictionary absent/corrupt), not a
+     * silent miss, so it fails loudly.
+     */
+    private byte[] decompressValue(Compression c, byte[] stored, Loc loc) {
+        if (c == Compression.ZSTD_DICT) {
+            if (keyspaceDict == null) {
+                throw new FolesiumException("codec 3 record but no dictionary loaded");
+            }
+            return Compressors.decompressWithDict(stored, keyspaceDict, loc.rawValLen);
+        }
+        return Compressors.decompress(c, stored, loc.rawValLen);
     }
 
     /** Reads a complete indexed record and optionally validates its CRC. */
@@ -452,6 +656,18 @@ public final class ShardFile implements AutoCloseable {
     public boolean contains(Bytes key) {
         lock.readLock().lock();
         try {
+            Loc pageLoc;
+            try {
+                pageLoc = pageIndexLoc(key);
+            } catch (IOException e) {
+                pageLoc = null; // stale page entry; AUTO mode falls back to the HashMap
+            }
+            if (pageLoc != null) {
+                return true;
+            }
+            if (pageOnly(key)) {
+                return false; // PAGE mode: the page is the only index
+            }
             return index.containsKey(key);
         } finally {
             lock.readLock().unlock();
@@ -466,7 +682,13 @@ public final class ShardFile implements AutoCloseable {
             throw new IllegalArgumentException("Value too large: " + rawValue.length);
         }
         Compression c = config.compression();
-        byte[] stored = Compressors.compress(c, config.compressionLevel(), rawValue);
+        byte[] stored;
+        if (config.dictionaryCompression() && keyspaceDict != null && ZstdNative.dictAvailable()) {
+            c = Compression.ZSTD_DICT;
+            stored = Compressors.compressWithDict(rawValue, keyspaceDict, config.compressionLevel());
+        } else {
+            stored = Compressors.compress(c, config.compressionLevel(), rawValue);
+        }
         if (stored.length >= rawValue.length && c != Compression.NONE) {
             c = Compression.NONE; // incompressible value: store raw
             stored = rawValue;
@@ -483,6 +705,9 @@ public final class ShardFile implements AutoCloseable {
                 deadBytes += old.recordLength;
             }
             writePos = off + record.length;
+            updatePageIndex(key, off, false);
+            advanceShardWatermark(writePos);
+            writeCount.incrementAndGet();
             dirty = true;
             if (config.durability() == FolesiumConfig.DurabilityMode.ALWAYS) {
                 channel.force(false);
@@ -509,7 +734,13 @@ public final class ShardFile implements AutoCloseable {
             throw new IllegalArgumentException("Value too large: " + rawValue.length);
         }
         Compression c = config.compression();
-        byte[] stored = Compressors.compress(c, config.compressionLevel(), rawValue);
+        byte[] stored;
+        if (config.dictionaryCompression() && keyspaceDict != null && ZstdNative.dictAvailable()) {
+            c = Compression.ZSTD_DICT;
+            stored = Compressors.compressWithDict(rawValue, keyspaceDict, config.compressionLevel());
+        } else {
+            stored = Compressors.compress(c, config.compressionLevel(), rawValue);
+        }
         if (stored.length >= rawValue.length && c != Compression.NONE) {
             c = Compression.NONE; // incompressible value: store raw
             stored = rawValue;
@@ -529,6 +760,9 @@ public final class ShardFile implements AutoCloseable {
                 deadBytes += old.recordLength;
             }
             writePos = off + record.length;
+            updatePageIndex(key, off, false);
+            advanceShardWatermark(writePos);
+            writeCount.incrementAndGet();
             dirty = true;
             if (config.durability() == FolesiumConfig.DurabilityMode.ALWAYS) {
                 channel.force(false);
@@ -553,6 +787,8 @@ public final class ShardFile implements AutoCloseable {
             long off = writePos;
             writeFully(ByteBuffer.wrap(record), off);
             writePos = off + record.length;
+            updatePageIndex(key, off, true);
+            advanceShardWatermark(writePos);
             dirty = true;
             if (config.durability() == FolesiumConfig.DurabilityMode.ALWAYS) {
                 channel.force(false);
@@ -560,6 +796,7 @@ public final class ShardFile implements AutoCloseable {
             }
             index.remove(key);
             deadBytes += old.recordLength + record.length;
+            writeCount.incrementAndGet();
         } catch (IOException e) {
             throw new FolesiumException("Delete failed in " + path, e);
         } finally {
@@ -576,6 +813,108 @@ public final class ShardFile implements AutoCloseable {
         crc.update(b.array(), 0, b.position());
         b.putInt((int) crc.getValue());
         return b.array();
+    }
+
+    // -------------------------------------------------------------- page index
+
+    /**
+     * Mirrors a write into the region-page index. Only 8-byte chunk keys have pages;
+     * {@code tombstone} clears the slot (offset 0), otherwise the new record offset is
+     * stored. No-op when the page index is disabled. Caller holds the write lock.
+     */
+    private void updatePageIndex(Bytes key, long off, boolean tombstone) {
+        if (pageIndex == null || key.length() != 8) {
+            return;
+        }
+        try {
+            long chunkKey = LongKeys.decode(key.array());
+            int regionX = RegionPage.regionXFromChunk(chunkKey);
+            int regionZ = RegionPage.regionZFromChunk(chunkKey);
+            int slot = RegionPage.slotIndex(LongKeys.chunkX(chunkKey), LongKeys.chunkZ(chunkKey));
+            pageIndex.updateSlot(regionX, regionZ, slot, tombstone ? 0 : (int) off);
+        } catch (RuntimeException e) {
+            // The page index is a disposable cache: a slot update failure (e.g. a corrupt
+            // page file) must never fail a write that is already durable in the log and
+            // the HashMap index. Reads fall back to the HashMap until the page recovers.
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: page index update failed for {0} (key {1}): {2}", path, key, e.toString());
+        }
+    }
+
+    /**
+     * Advances this shard's checkpoint watermark to {@code newWritePos} (the offset just
+     * past the appended record) so the next {@code flushWatermarks()} can persist it.
+     * Called together with {@link #updatePageIndex} under the write lock. No-op without
+     * a page index or shard name.
+     */
+    private void advanceShardWatermark(long newWritePos) {
+        if (pageIndex != null && shardName != null) {
+            pageIndex.advanceShardWatermark(shardName, newWritePos);
+        }
+    }
+
+    /**
+     * Whether the region page is this shard's only index for {@code key}: true in PAGE
+     * mode for 8-byte chunk keys while the page index exists and is not invalidated
+     * (after compaction the pages are dormant, so the HashMap serves reads until the
+     * pages are rebuilt on the next open). Non-chunk keys have no page representation
+     * and always use the HashMap.
+     */
+    private boolean pageOnly(Bytes key) {
+        return pageAuthoritative && pageIndex != null && !pageIndex.isInvalidated() && key.length() == 8;
+    }
+
+    /**
+     * Probes the page index for an 8-byte chunk key. Returns the record location the
+     * page points at, or {@code null} when the page index is disabled or invalidated, the
+     * key is not a chunk key, the slot is empty, the slot offset is outside the current
+     * log (page trimming: torn-tail recovery may have truncated the log below a slot
+     * written earlier; a garbage slot read from a damaged page is treated the same), or
+     * the record header at the slot offset does not validate (stale page / tombstone).
+     * AUTO mode callers fall back to the HashMap index on {@code null}; PAGE mode
+     * callers treat {@code null} as "key absent". Caller holds the read lock.
+     */
+    private Loc pageIndexLoc(Bytes key) throws IOException {
+        if (pageIndex == null || pageIndex.isInvalidated() || key.length() != 8) {
+            return null;
+        }
+        long chunkKey = LongKeys.decode(key.array());
+        int regionX = RegionPage.regionXFromChunk(chunkKey);
+        int regionZ = RegionPage.regionZFromChunk(chunkKey);
+        int slot = RegionPage.slotIndex(LongKeys.chunkX(chunkKey), LongKeys.chunkZ(chunkKey));
+        int off;
+        try {
+            off = pageIndex.pageFor(regionX, regionZ).get(slot);
+        } catch (RuntimeException e) {
+            // A damaged or unreadable page (corrupt cache file) must not break reads; the
+            // HashMap index is authoritative. The page is repaired on the next write.
+            return null;
+        }
+        if (off == 0) {
+            return null;
+        }
+        // Page trimming: a slot offset at or beyond the current log EOF references a
+        // record that torn-tail recovery truncated away after the page was written -
+        // treat it as a miss (PAGE mode: absent; AUTO mode: HashMap fallback). A
+        // negative slot is a garbage u32 read from a damaged page: also a miss.
+        if (off < 0 || off >= channel.size()) {
+            return null;
+        }
+        // The slot stores only the offset; keyLen/rawValLen/storedValLen/flags live in the
+        // 12-byte record header, so read it back to build a Loc for the shared read paths.
+        ByteBuffer h = ByteBuffer.allocate(RECORD_HEADER_LEN);
+        readFully(h, off);
+        byte magic = h.get();
+        byte flags = h.get();
+        int keyLen = h.getShort() & 0xFFFF;
+        int rawValLen = h.getInt();
+        int storedValLen = h.getInt();
+        if (magic != RECORD_MAGIC || (flags & FLAG_TOMBSTONE) != 0 || keyLen != 8
+                || rawValLen < 0 || rawValLen > MAX_VALUE_LEN
+                || storedValLen < 0 || storedValLen > MAX_VALUE_LEN) {
+            return null;
+        }
+        return new Loc(off, RECORD_HEADER_LEN + keyLen + storedValLen + 4, keyLen, rawValLen, storedValLen, flags);
     }
 
     // ------------------------------------------------------------- maintenance
@@ -607,6 +946,29 @@ public final class ShardFile implements AutoCloseable {
         try {
             long size = writePos;
             return size > config.compactMinBytes() && deadBytes > (long) (config.compactRatio() * size);
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
+    /**
+     * Workload-aware compaction priority used to order shards when
+     * {@code workloadCompaction} is enabled: dead-space ratio scaled by write
+     * activity, {@code deadRatio * (1 + log1p(writeCount))}. A shard that is both
+     * mostly dead and frequently written scores highest and is compacted first.
+     * An empty shard ({@code sizeBytes() == 0}) scores 0 because there is nothing
+     * to reclaim. Purely a scheduling hint - {@link #needsCompaction()} still
+     * gates whether a shard is eligible at all.
+     */
+    public double compactionPriority() {
+        lock.readLock().lock();
+        try {
+            long size = writePos;
+            if (size == 0) {
+                return 0;
+            }
+            double deadRatio = (double) deadBytes / size;
+            return deadRatio * (1.0 + Math.log1p(writeCount.get()));
         } finally {
             lock.readLock().unlock();
         }
@@ -680,6 +1042,30 @@ public final class ShardFile implements AutoCloseable {
             deadBytes = 0;
             dirty = false;
             swapped = true;
+            if (pageIndex != null) {
+                // The compacted log assigns new offsets to every live record, so every page
+                // entry is stale; reads fall back to the HashMap (AUTO) or treat the key as
+                // absent (PAGE, while the index is invalidated) until the pages are rebuilt
+                // on the next open, and the write path keeps refreshing slots as it goes.
+                pageIndex.invalidateAll();
+                if (shardName != null) {
+                    // The compaction watermark anchors the page rebuild at the next open.
+                    // It is reset to 0 (the file header) rather than to the new EOF: the
+                    // compacted log starts at the header and holds every live record, so a
+                    // replay of [0, EOF) rebuilds all pages from scratch. Anchoring at EOF
+                    // would replay nothing - the pages were invalidated here and their
+                    // files deleted on close, so PAGE-mode reads of pre-compaction records
+                    // would be lost forever. A stale or missing anchor only makes that
+                    // replay longer, so a write failure is logged, not fatal.
+                    try {
+                        pageIndex.setCompactionWatermark(shardName, 0);
+                    } catch (IOException e) {
+                        LOGGER.log(System.Logger.Level.WARNING,
+                                "Folesium: failed to write the compaction watermark of {0}: {1}",
+                                path, e.toString());
+                    }
+                }
+            }
         } catch (IOException e) {
             FolesiumException failure = new FolesiumException("Compaction failed for " + path, e);
             if (!swapped && !channel.isOpen()) {
@@ -751,7 +1137,7 @@ public final class ShardFile implements AutoCloseable {
                 Loc loc = e.getValue();
                 byte[] stored = readStoredValue(loc, verifyChecksums);
                 Compression c = Compression.byId((byte) (loc.flags & 0x0F));
-                byte[] value = Compressors.decompress(c, stored, loc.rawValLen);
+                byte[] value = decompressValue(c, stored, loc);
                 snapshot.add(new IterationEntry(e.getKey().array(), value));
             }
         } catch (IOException e) {

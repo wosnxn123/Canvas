@@ -59,6 +59,18 @@ import java.util.Objects;
  *                          under a {@code .folesium-backup-*} sibling name instead of overwriting it
  *                          in place. Default {@code false} (cesium-fabric parity: targets are
  *                          written in place); only the converter reads this flag.
+ * @param indexCacheBytes   bytes for the per-keyspace region-page index cache; {@code 0} disables
+ *                          the page index entirely (pure v1 hash behaviour). Default 64 MiB.
+ * @param indexMode         page-index mode, see {@link IndexMode}. Takes effect on store open, like
+ *                          {@link #shardCount()}. Default {@link IndexMode#AUTO}.
+ * @param dictionaryCompression
+ *                          use a per-keyspace zstd dictionary (codec 3) for new region-record writes.
+ *                          Default {@code false}; requires zstd-jni and a trained dictionary.
+ * @param workloadCompaction
+ *                          prefer compacting shards with the most write churn (dead ratio weighted by
+ *                          write count) over a pure dead-ratio order. Default {@code false}.
+ * @param compactIoLimit    cap compaction I/O at this many bytes/second; {@code 0} = unlimited.
+ *                          Default {@code 0}.
  */
 public record FolesiumConfig(
         int shardCount,
@@ -69,7 +81,12 @@ public record FolesiumConfig(
         double compactRatio,
         long compactMinBytes,
         boolean verifyChecksums,
-        boolean backupOnConvert
+        boolean backupOnConvert,
+        long indexCacheBytes,
+        IndexMode indexMode,
+        boolean dictionaryCompression,
+        boolean workloadCompaction,
+        long compactIoLimit
 ) {
     public enum DurabilityMode {
         /** fsync on every write. Safest, slowest. */
@@ -80,11 +97,31 @@ public record FolesiumConfig(
         EXPLICIT
     }
 
+    /**
+     * Region-page index mode. Only takes effect when a store is opened, like {@link #shardCount()}.
+     *
+     * <p>{@code AUTO}: the page index is used with the HashMap index as a read fallback when pages
+     * are invalidated (after compaction/reshard). {@code PAGE}: the page index is the only index for
+     * region-keyed keys. Disabling the page index entirely is done with {@code indexCacheBytes = 0}.</p>
+     */
+    public enum IndexMode {
+        /** page index first, HashMap fallback. */
+        AUTO,
+        /** page index is the only index for region-keyed keys. */
+        PAGE
+    }
+
     public enum Compression {
         NONE((byte) 0),
         DEFLATE((byte) 1),
         /** zstd via zstd-jni, provided by the host Minecraft/Folia server. */
-        ZSTD((byte) 2);
+        ZSTD((byte) 2),
+        /**
+         * zstd with a per-keyspace trained dictionary (see {@code index.DictionaryStore}).
+         * Level range is the same as {@link #ZSTD}; the dictionary improves ratios on the
+         * repetitive NBT payloads typical of Minecraft world data.
+         */
+        ZSTD_DICT((byte) 3);
 
         public final byte id;
 
@@ -97,6 +134,7 @@ public record FolesiumConfig(
                 case 0 -> NONE;
                 case 1 -> DEFLATE;
                 case 2 -> ZSTD;
+                case 3 -> ZSTD_DICT;
                 default -> throw new IllegalArgumentException("Unknown compression id " + id);
             };
         }
@@ -104,10 +142,13 @@ public record FolesiumConfig(
 
     /** Highest meaningful {@code compressionLevel} for the given algorithm. */
     public static int maxCompressionLevel(Compression c) {
-        // zstd supports 1-22; java.util.zip.Deflater only 1-9. NONE ignores the level
-        // entirely but is validated against the widest range so that switching
-        // NONE -> ZSTD -> NONE at runtime never trips the constructor.
-        return c == Compression.DEFLATE ? 9 : 22;
+        // zstd supports 1-22 (plain and dictionary variants); java.util.zip.Deflater only 1-9.
+        // NONE ignores the level entirely but is validated against the widest range so that
+        // switching NONE -> ZSTD -> NONE at runtime never trips the constructor.
+        return switch (c) {
+            case DEFLATE -> 9;
+            case NONE, ZSTD, ZSTD_DICT -> 22;
+        };
     }
 
     /** Clamps {@code level} into the range valid for {@code c}. */
@@ -138,6 +179,13 @@ public record FolesiumConfig(
         if (compactMinBytes < 0) {
             throw new IllegalArgumentException("compactMinBytes must be >= 0: " + compactMinBytes);
         }
+        Objects.requireNonNull(indexMode, "indexMode");
+        if (indexCacheBytes < 0) {
+            throw new IllegalArgumentException("indexCacheBytes must be >= 0: " + indexCacheBytes);
+        }
+        if (compactIoLimit < 0) {
+            throw new IllegalArgumentException("compactIoLimit must be >= 0: " + compactIoLimit);
+        }
     }
 
     public static FolesiumConfig defaults() {
@@ -150,16 +198,21 @@ public record FolesiumConfig(
                 0.5,
                 8L * 1024 * 1024,
                 false,
-                false
+                false,
+                64L * 1024 * 1024,
+                IndexMode.AUTO,
+                false,
+                false,
+                0
         );
     }
 
     public FolesiumConfig withShardCount(int n) {
-        return new FolesiumConfig(n, durability, batchFlushMillis, compression, compressionLevel, compactRatio, compactMinBytes, verifyChecksums, backupOnConvert);
+        return new FolesiumConfig(n, durability, batchFlushMillis, compression, compressionLevel, compactRatio, compactMinBytes, verifyChecksums, backupOnConvert, indexCacheBytes, indexMode, dictionaryCompression, workloadCompaction, compactIoLimit);
     }
 
     public FolesiumConfig withDurability(DurabilityMode d) {
-        return new FolesiumConfig(shardCount, d, batchFlushMillis, compression, compressionLevel, compactRatio, compactMinBytes, verifyChecksums, backupOnConvert);
+        return new FolesiumConfig(shardCount, d, batchFlushMillis, compression, compressionLevel, compactRatio, compactMinBytes, verifyChecksums, backupOnConvert, indexCacheBytes, indexMode, dictionaryCompression, workloadCompaction, compactIoLimit);
     }
 
     /**
@@ -169,31 +222,51 @@ public record FolesiumConfig(
      */
     public FolesiumConfig withCompression(Compression c) {
         return new FolesiumConfig(shardCount, durability, batchFlushMillis, c,
-                clampCompressionLevel(c, compressionLevel), compactRatio, compactMinBytes, verifyChecksums, backupOnConvert);
+                clampCompressionLevel(c, compressionLevel), compactRatio, compactMinBytes, verifyChecksums, backupOnConvert, indexCacheBytes, indexMode, dictionaryCompression, workloadCompaction, compactIoLimit);
     }
 
     public FolesiumConfig withCompressionLevel(int level) {
-        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, level, compactRatio, compactMinBytes, verifyChecksums, backupOnConvert);
+        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, level, compactRatio, compactMinBytes, verifyChecksums, backupOnConvert, indexCacheBytes, indexMode, dictionaryCompression, workloadCompaction, compactIoLimit);
     }
 
     public FolesiumConfig withBatchFlushMillis(int millis) {
-        return new FolesiumConfig(shardCount, durability, millis, compression, compressionLevel, compactRatio, compactMinBytes, verifyChecksums, backupOnConvert);
+        return new FolesiumConfig(shardCount, durability, millis, compression, compressionLevel, compactRatio, compactMinBytes, verifyChecksums, backupOnConvert, indexCacheBytes, indexMode, dictionaryCompression, workloadCompaction, compactIoLimit);
     }
 
     public FolesiumConfig withCompactRatio(double ratio) {
-        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, compressionLevel, ratio, compactMinBytes, verifyChecksums, backupOnConvert);
+        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, compressionLevel, ratio, compactMinBytes, verifyChecksums, backupOnConvert, indexCacheBytes, indexMode, dictionaryCompression, workloadCompaction, compactIoLimit);
     }
 
     public FolesiumConfig withCompactMinBytes(long bytes) {
-        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, compressionLevel, compactRatio, bytes, verifyChecksums, backupOnConvert);
+        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, compressionLevel, compactRatio, bytes, verifyChecksums, backupOnConvert, indexCacheBytes, indexMode, dictionaryCompression, workloadCompaction, compactIoLimit);
     }
 
     public FolesiumConfig withVerifyChecksums(boolean v) {
-        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, compressionLevel, compactRatio, compactMinBytes, v, backupOnConvert);
+        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, compressionLevel, compactRatio, compactMinBytes, v, backupOnConvert, indexCacheBytes, indexMode, dictionaryCompression, workloadCompaction, compactIoLimit);
     }
 
     public FolesiumConfig withBackupOnConvert(boolean v) {
-        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, compressionLevel, compactRatio, compactMinBytes, verifyChecksums, v);
+        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, compressionLevel, compactRatio, compactMinBytes, verifyChecksums, v, indexCacheBytes, indexMode, dictionaryCompression, workloadCompaction, compactIoLimit);
+    }
+
+    public FolesiumConfig withIndexCacheBytes(long bytes) {
+        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, compressionLevel, compactRatio, compactMinBytes, verifyChecksums, backupOnConvert, bytes, indexMode, dictionaryCompression, workloadCompaction, compactIoLimit);
+    }
+
+    public FolesiumConfig withIndexMode(IndexMode m) {
+        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, compressionLevel, compactRatio, compactMinBytes, verifyChecksums, backupOnConvert, indexCacheBytes, m, dictionaryCompression, workloadCompaction, compactIoLimit);
+    }
+
+    public FolesiumConfig withDictionaryCompression(boolean v) {
+        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, compressionLevel, compactRatio, compactMinBytes, verifyChecksums, backupOnConvert, indexCacheBytes, indexMode, v, workloadCompaction, compactIoLimit);
+    }
+
+    public FolesiumConfig withWorkloadCompaction(boolean v) {
+        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, compressionLevel, compactRatio, compactMinBytes, verifyChecksums, backupOnConvert, indexCacheBytes, indexMode, dictionaryCompression, v, compactIoLimit);
+    }
+
+    public FolesiumConfig withCompactIoLimit(long bytes) {
+        return new FolesiumConfig(shardCount, durability, batchFlushMillis, compression, compressionLevel, compactRatio, compactMinBytes, verifyChecksums, backupOnConvert, indexCacheBytes, indexMode, dictionaryCompression, workloadCompaction, bytes);
     }
 
     /**
@@ -229,6 +302,21 @@ public record FolesiumConfig(
         }
         if (backupOnConvert != other.backupOnConvert) {
             out.add("backupOnConvert: " + backupOnConvert + " -> " + other.backupOnConvert);
+        }
+        if (indexCacheBytes != other.indexCacheBytes) {
+            out.add("indexCacheBytes: " + indexCacheBytes + " -> " + other.indexCacheBytes);
+        }
+        if (indexMode != other.indexMode) {
+            out.add("indexMode: " + indexMode + " -> " + other.indexMode);
+        }
+        if (dictionaryCompression != other.dictionaryCompression) {
+            out.add("dictionaryCompression: " + dictionaryCompression + " -> " + other.dictionaryCompression);
+        }
+        if (workloadCompaction != other.workloadCompaction) {
+            out.add("workloadCompaction: " + workloadCompaction + " -> " + other.workloadCompaction);
+        }
+        if (compactIoLimit != other.compactIoLimit) {
+            out.add("compactIoLimit: " + compactIoLimit + " -> " + other.compactIoLimit);
         }
         return out;
     }

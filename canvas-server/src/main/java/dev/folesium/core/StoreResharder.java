@@ -130,6 +130,7 @@ final class StoreResharder {
                 // swap itself still has to be re-run.
                 applyShardCountMetadata(dir, newCount);
                 finishSwap(dir, staging, backup);
+                invalidatePageIndex(dir);
                 return;
             }
             LOGGER.log(System.Logger.Level.WARNING,
@@ -169,6 +170,9 @@ final class StoreResharder {
             }
             // The swap evidence is gone, so bring the metadata in line with the files
             // before the store is opened.
+            // The layout the store now holds is whatever the interrupted swap left behind,
+            // so any region pages are of uncertain provenance: drop them (rebuildable cache).
+            invalidatePageIndex(dir);
             reconcileStaleMetadata(dir);
             return;
         }
@@ -232,6 +236,10 @@ final class StoreResharder {
         Path backup = dir.resolve(BACKUP_DIR);
         deleteRecursively(staging);
         deleteRecursively(backup);
+        // The rewritten shards assign new offsets to every record, so any region pages left
+        // from the pre-reshard layout are stale: drop the whole page index (a disposable
+        // cache, rebuilt from the logs) before the new layout is staged.
+        invalidatePageIndex(dir);
 
         long records = 0;
         try {
@@ -281,9 +289,9 @@ final class StoreResharder {
         ShardFile[] out = new ShardFile[newShardCount];
         try {
             for (int i = 0; i < newShardCount; i++) {
-                out[i] = new ShardFile(staging.resolve(String.format("%s-%04d.flog", name, i)), i, writeConfig);
+                out[i] = new ShardFile(staging.resolve(String.format("%s-%04d.flog", name, i)), i, writeConfig, null, null, false, null);
             }
-            try (Keyspace source = new Keyspace(dir, name, oldConfig)) {
+            try (Keyspace source = new Keyspace(dir, name, oldConfig, true)) {
                 source.forEach((key, value) -> {
                     out[(int) (Bytes.mix64(key) & mask)].put(new Bytes(key), value);
                     copied[0]++;
@@ -641,6 +649,16 @@ final class StoreResharder {
                 LOGGER.log(System.Logger.Level.WARNING, "Folesium: error closing a staged shard", e);
             }
         }
+    }
+
+    /**
+     * Drops the whole store's region-page index. Called whenever a reshard completes or is
+     * resumed: the rewritten shards assign new offsets to every record, so pages from the
+     * old layout would point at the wrong records. Page files are a disposable cache
+     * (rebuildable from the logs), so removing them is always safe.
+     */
+    private static void invalidatePageIndex(Path dir) {
+        deleteRecursively(dir.resolve("idx"));
     }
 
     private static void deleteRecursively(Path root) {

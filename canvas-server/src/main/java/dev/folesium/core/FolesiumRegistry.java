@@ -206,6 +206,25 @@ public final class FolesiumRegistry {
         sb.append("# '.folesium-backup-*' sibling name (both directions) instead of overwriting it in place.\n");
         sb.append("backupOnConvert=").append(defaults.backupOnConvert()).append('\n');
         sb.append('\n');
+        sb.append("# Bytes of region-page index cache per keyspace (0 disables the page index, pure v1 behaviour).\n");
+        sb.append("# Auto-tuned: min(64 MiB, 2% of max heap).\n");
+        sb.append("indexCacheBytes=").append(defaults.indexCacheBytes()).append('\n');
+        sb.append('\n');
+        sb.append("# Page-index mode: AUTO (page first, hash fallback) | PAGE (page only). Takes effect when a\n");
+        sb.append("# world is next loaded. Invalid values fall back to AUTO.\n");
+        sb.append("indexMode=").append(defaults.indexMode().name()).append('\n');
+        sb.append('\n');
+        sb.append("# Compress new region records with a per-keyspace zstd dictionary (codec 3). Requires zstd-jni;\n");
+        sb.append("# the dictionary is trained once on first store open. Off by default.\n");
+        sb.append("dictionaryCompression=").append(defaults.dictionaryCompression()).append('\n');
+        sb.append('\n');
+        sb.append("# Prioritise compacting the shards with the most write churn instead of a pure dead-ratio order.\n");
+        sb.append("# Off by default.\n");
+        sb.append("workloadCompaction=").append(defaults.workloadCompaction()).append('\n');
+        sb.append('\n');
+        sb.append("# Cap compaction I/O at this many bytes/second (0 = unlimited).\n");
+        sb.append("compactIoLimit=").append(defaults.compactIoLimit()).append('\n');
+        sb.append('\n');
         sb.append("# Watch this file and apply edits to the running server without a restart.\n");
         sb.append("autoReload=true\n");
         sb.append('\n');
@@ -262,6 +281,12 @@ public final class FolesiumRegistry {
         long compactMinBytes = 8L * 1024 * 1024;
         boolean verifyChecksums = false;
         boolean backupOnConvert = false; // cesium parity: converters write targets in place
+        // Page index cache: 2% of max heap, capped at 64 MiB (0 = pure v1 hash behaviour).
+        long indexCacheBytes = Math.min(64L * 1024 * 1024,
+                (long) (Runtime.getRuntime().maxMemory() * 0.02));
+        boolean dictionaryCompression = false; // Phase 3: per-keyspace zstd dict codec, opt-in
+        boolean workloadCompaction = false; // Phase 3: write-churn-aware compaction priority, opt-in
+        long compactIoLimit = 0; // compaction I/O cap in bytes/sec, 0 = unlimited
 
         return new FolesiumConfig(
                 shards,
@@ -272,7 +297,12 @@ public final class FolesiumRegistry {
                 compactRatio,
                 compactMinBytes,
                 verifyChecksums,
-                backupOnConvert
+                backupOnConvert,
+                indexCacheBytes,
+                FolesiumConfig.IndexMode.AUTO,
+                dictionaryCompression,
+                workloadCompaction,
+                compactIoLimit
         );
     }
 
@@ -403,6 +433,29 @@ public final class FolesiumRegistry {
                     "Folesium: compactMinBytes={0} must be >= 0, using {1}", compactMinBytes, d.compactMinBytes());
             compactMinBytes = d.compactMinBytes();
         }
+        long indexCacheBytes = longProperty("indexCacheBytes", d.indexCacheBytes());
+        if (indexCacheBytes < 0) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: indexCacheBytes={0} must be >= 0, using {1}", indexCacheBytes, d.indexCacheBytes());
+            indexCacheBytes = d.indexCacheBytes();
+        }
+        FolesiumConfig.IndexMode indexMode;
+        String indexModeName = property("indexMode", d.indexMode().name()).toUpperCase(Locale.ROOT);
+        try {
+            indexMode = FolesiumConfig.IndexMode.valueOf(indexModeName);
+        } catch (IllegalArgumentException e) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: unknown indexMode ''{0}'', using {1}", indexModeName, d.indexMode());
+            indexMode = d.indexMode();
+        }
+        boolean dictionaryCompression = boolProperty("dictionaryCompression", d.dictionaryCompression());
+        boolean workloadCompaction = boolProperty("workloadCompaction", d.workloadCompaction());
+        long compactIoLimit = longProperty("compactIoLimit", d.compactIoLimit());
+        if (compactIoLimit < 0) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: compactIoLimit={0} must be >= 0, using 0", compactIoLimit);
+            compactIoLimit = 0;
+        }
         return new FolesiumConfig(
                 shards,
                 durability,
@@ -412,7 +465,12 @@ public final class FolesiumRegistry {
                 compactRatio,
                 compactMinBytes,
                 boolProperty("verifyChecksums", d.verifyChecksums()),
-                boolProperty("backupOnConvert", d.backupOnConvert())
+                boolProperty("backupOnConvert", d.backupOnConvert()),
+                indexCacheBytes,
+                indexMode,
+                dictionaryCompression,
+                workloadCompaction,
+                compactIoLimit
         );
     }
 

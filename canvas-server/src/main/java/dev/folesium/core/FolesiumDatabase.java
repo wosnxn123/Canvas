@@ -30,6 +30,7 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -38,6 +39,7 @@ import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import dev.folesium.core.shard.ShardFile;
 import dev.folesium.core.util.ZstdNative;
 
 /**
@@ -109,6 +111,11 @@ public final class FolesiumDatabase implements AutoCloseable {
      */
     private volatile FolesiumConfig config;
     private final StoreRole role;
+    /**
+     * {@code true} when the store was opened read-only ({@code applyLayoutChanges == false}):
+     * no layout-changing writes are performed and the page index is built in memory only.
+     */
+    private final boolean readOnly;
     private final Map<String, Keyspace> keyspaces = new ConcurrentHashMap<>();
     private final AtomicBoolean closed = new AtomicBoolean();
 
@@ -207,6 +214,7 @@ public final class FolesiumDatabase implements AutoCloseable {
     private FolesiumDatabase(Path dir, FolesiumConfig requested, StoreRole requestedRole, boolean applyLayoutChanges) {
         this.dir = dir;
         this.role = requestedRole;
+        this.readOnly = !applyLayoutChanges;
         try {
             Files.createDirectories(dir);
         } catch (IOException e) {
@@ -443,7 +451,7 @@ public final class FolesiumDatabase implements AutoCloseable {
             if (closed.get()) {
                 throw new FolesiumException("Database is closed: " + dir);
             }
-            return keyspaces.computeIfAbsent(name, n -> new Keyspace(dir, n, config));
+            return keyspaces.computeIfAbsent(name, n -> new Keyspace(dir, n, config, readOnly));
         }
     }
 
@@ -582,13 +590,16 @@ public final class FolesiumDatabase implements AutoCloseable {
         return Map.copyOf(keyspaces);
     }
 
-    /** fsyncs every dirty shard of every open keyspace. */
+    /** fsyncs every dirty shard of every open keyspace, then persists shard watermarks. */
     public void flush() {
         if (closed.get()) {
             return; // close() already forced every shard; nothing left to flush
         }
         for (Keyspace ks : keyspaces.values()) {
             ks.flush();
+            // After the log force and page flush: persist the shard watermarks so a crash
+            // never leaves the on-disk pages ahead of what the recovery anchor claims.
+            ks.flushWatermarks();
         }
     }
 
@@ -596,8 +607,50 @@ public final class FolesiumDatabase implements AutoCloseable {
         if (closed.get()) {
             return; // do not touch shards that close() is tearing down
         }
+        // Collect every shard that needs a rewrite first, so the pass can be ordered
+        // (workload mode) and rate-limited (compactIoLimit) without interleaving the
+        // scheduling decisions with the rewrites. With workloadCompaction disabled the
+        // collection preserves the historical iteration order: keyspaces in map order,
+        // shards in routing order, each compacted in the order its need was observed.
+        List<ShardFile> candidates = new ArrayList<>();
         for (Keyspace ks : keyspaces.values()) {
-            ks.compactIfNeeded();
+            for (ShardFile s : ks.shards()) {
+                if (s.needsCompaction()) {
+                    candidates.add(s);
+                }
+            }
+        }
+        if (config.workloadCompaction()) {
+            // Workload compaction (DumpKV/ArceKV-style): reclaim the dead, write-hot
+            // shards first instead of following iteration order, so the rewrite budget
+            // is spent where it buys the most read/write amplification relief.
+            candidates.sort(Comparator.comparingDouble(ShardFile::compactionPriority).reversed());
+        }
+        long ioLimit = config.compactIoLimit();
+        long bytesSinceSleep = 0;
+        for (ShardFile s : candidates) {
+            s.compact();
+            // compactIoLimit: cap compaction I/O near `limit` bytes/second. Simple
+            // version - accumulate the post-compaction size of every shard rewritten in
+            // this pass and, once the accumulated budget crosses 1 ms of I/O time
+            // (bytes / limit * 1000 ms), sleep it off. limit <= 0 means unlimited.
+            if (ioLimit > 0) {
+                bytesSinceSleep += s.sizeBytes();
+                long sleepMillis = bytesSinceSleep * 1000 / ioLimit;
+                if (sleepMillis > 0) {
+                    sleepQuietly(sleepMillis);
+                    bytesSinceSleep = 0;
+                }
+            }
+        }
+    }
+
+    /** Sleeps for {@code millis}, restoring the interrupt flag so the pass keeps going. */
+    private static void sleepQuietly(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
