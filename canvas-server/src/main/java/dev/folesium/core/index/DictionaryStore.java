@@ -91,7 +91,7 @@ public final class DictionaryStore {
      * {@code RegionPage.read}'s size pre-check) so a stray huge file is rejected instead of
      * being read into memory whole.
      */
-    private static final long MAX_DICT_BYTES = 64L * 1024 * 1024;
+    public static final long MAX_DICT_BYTES = 64L * 1024 * 1024;
 
     /** {@code Zstd.trainFromBuffer} rejects fewer than 11 samples. */
     private static final int MIN_SAMPLES = 11;
@@ -485,11 +485,42 @@ public final class DictionaryStore {
                     // proven mismatch - both keys available and different - is an orphaned
                     // inode, released and retried against the current file.
                     Object currentFileKey = fileKeyOf(lockFile);
-                    if (openedFileKey == null || currentFileKey == null
-                            || openedFileKey.equals(currentFileKey)) {
+                    if (openedFileKey == null || currentFileKey == null) {
                         return channel;
                     }
-                    channel.close();
+                    if (!openedFileKey.equals(currentFileKey)) {
+                        // Proven mismatch: our lock is the orphaned inode - retry against
+                        // the file the path now names.
+                        channel.close();
+                        continue;
+                    }
+                    // Keys match. Inode numbers can be reused after a delete+recreate, so
+                    // a matched key does not by itself prove the file we locked is still
+                    // the one the path names. Confirm nobody else holds a lock on the
+                    // current file: if another process does, our first lock is the
+                    // orphaned inode after all and we must retry.
+                    try (FileChannel verify = FileChannel.open(lockFile,
+                            StandardOpenOption.WRITE)) {
+                        FileLock verifyLock = verify.tryLock();
+                        if (verifyLock == null) {
+                            // Another process holds the recreated file: orphaned inode.
+                            channel.close();
+                            continue;
+                        }
+                        verifyLock.release();
+                    } catch (OverlappingFileLockException ignored) {
+                        // Same-JVM lock on the file the path names: our own lock. (A peer
+                        // thread holding a live lock on a recreated file with a reused
+                        // inode remains indistinguishable from our own lock - an accepted
+                        // limitation with an astronomically narrow trigger window.)
+                    } catch (IOException e2) {
+                        // The path vanished or became unreadable between the probe and
+                        // the verify: the current file is not the one we locked - retry.
+                        channel.close();
+                        lastFailure = e2;
+                        continue;
+                    }
+                    return channel;
                 }
             } catch (OverlappingFileLockException e) {
                 // This JVM already holds the lock on this keyspace: contention.

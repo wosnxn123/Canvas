@@ -18,6 +18,7 @@
 
 package dev.folesium.core.util;
 
+import dev.folesium.core.index.DictionaryStore;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
@@ -338,8 +339,14 @@ public final class ZstdNative {
             throw new IllegalStateException(dictUnavailableMessage());
         }
         MethodHandle mh = TRAIN_FROM_BUFFER;
+        // Mirror the load-side size gates (DictionaryStore.load enforces the same 64 MiB
+        // ceiling): reject absurd sizes up front instead of allocating first and OOM-ing.
         if (dictSize < 1) {
             throw new IllegalArgumentException("dictSize must be >= 1: " + dictSize);
+        }
+        if (dictSize > DictionaryStore.MAX_DICT_BYTES) {
+            throw new IllegalArgumentException("dictSize exceeds maximum of "
+                    + DictionaryStore.MAX_DICT_BYTES + " bytes: " + dictSize);
         }
         try {
             byte[] dict = new byte[dictSize];

@@ -78,6 +78,15 @@ public final class FolesiumRegistry {
     private static long filePropertiesStamp;
     private static Boolean enabledCache;
 
+    /**
+     * The enabled value worlds last bound, saved when a config edit lands between that
+     * query and a later {@link #reload()}: {@link #isEnabled()} refreshes
+     * {@link #enabledCache} to the edited value, so without this the
+     * "enabled flips take effect on the next world load" warning in reload() silently
+     * disappears whenever a world happens to load between the edit and the reload.
+     */
+    private static Boolean enabledBeforeEdit;
+
     private static Thread configWatcher;
     private static long configFileStamp;
 
@@ -435,6 +444,12 @@ public final class FolesiumRegistry {
      */
     public static synchronized boolean isEnabled() {
         if (enabledCache == null || configFileChanged()) {
+            if (enabledCache != null) {
+                // An edit landed since the last query and the cache held the value
+                // worlds actually bound: keep it for reload()'s enabled-flip warning
+                // (see enabledBeforeEdit).
+                enabledBeforeEdit = enabledCache;
+            }
             enabledCache = null;
             try {
                 enabledCache = boolProperty("enabled", false);
@@ -658,6 +673,7 @@ public final class FolesiumRegistry {
                 synchronized (FolesiumRegistry.class) {
                     fileProperties = null;
                     enabledCache = null;
+                    enabledBeforeEdit = null;
                 }
                 return List.of();
             }
@@ -684,8 +700,15 @@ public final class FolesiumRegistry {
                 // comparison below read the new value and the warning dead code. The cache
                 // holds the value running worlds actually bound; null means no world has
                 // loaded since the last cache clear (nothing to warn about), so fall back
-                // to isEnabled() to keep the comparison harmless.
-                enabledBefore = enabledCache != null ? enabledCache : isEnabled();
+                // to isEnabled() to keep the comparison harmless. A world load between the
+                // edit and this reload refreshes enabledCache to the new value - the
+                // pre-edit value is then taken from enabledBeforeEdit, saved by isEnabled()
+                // exactly for this warning.
+                Boolean beforeEdit = enabledBeforeEdit;
+                enabledBeforeEdit = null;
+                enabledBefore = beforeEdit != null
+                        ? beforeEdit
+                        : (enabledCache != null ? enabledCache : isEnabled());
                 fileProperties = null;
                 enabledCache = null;
                 cfg = configFromProperties();
@@ -751,17 +774,21 @@ public final class FolesiumRegistry {
         if (configWatcher != null) {
             return;
         }
-        // Baseline the watcher BEFORE the autoReload probe: boolProperty(...) ->
-        // fileProperties() re-reads the file when its mtime changed and commits that read
-        // into filePropertiesStamp, so a probe-first order would baseline the watcher at
-        // the post-edit stamp and the very edit that started it would never be detected
-        // or applied to the running stores. Capturing the stamp first keeps the pre-edit
-        // baseline, so the first poll sees the absorbed edit as a change and applies it.
-        long stamp = configFileTimestamp();
+        // Baseline the watcher at the last APPLIED configuration stamp instead of the
+        // current file stamp: boolProperty(...) -> fileProperties() re-reads the file
+        // when its mtime changed and commits that read into filePropertiesStamp, so a
+        // probe-first order would baseline the watcher at the post-edit stamp and the
+        // very edit that started it would never be detected or applied to the running
+        // stores. This also covers an edit that landed while the watcher was stopped
+        // (e.g. an autoReload=false->true flip that also retuned other settings): the
+        // probe absorbs it, but the baseline stays at the last-applied stamp, so the
+        // first poll sees the absorbed edit as a change and applies it. With no
+        // outstanding edit the stamps agree and the first poll applies nothing.
+        long appliedStamp = filePropertiesStamp;
         if (!boolProperty("autoReload", true)) {
             return;
         }
-        configFileStamp = stamp;
+        configFileStamp = appliedStamp;
         Thread t = Thread.ofPlatform().daemon().name("folesium-config-watch")
                 .unstarted(FolesiumRegistry::watchConfigFile);
         configWatcher = t;
@@ -944,6 +971,7 @@ public final class FolesiumRegistry {
                         // reload() performs).
                         fileProperties = null;
                         enabledCache = null;
+                        enabledBeforeEdit = null;
                     }
                     continue;
                 }

@@ -175,8 +175,39 @@ public final class FolesiumPlayerStorage implements AutoCloseable {
             return legacy;
         }
         // Default follows the world's layout: next to players/ when present (26.x),
-        // at the world root otherwise (pre-26 layout).
-        return Files.isDirectory(root.resolve(DIR_PLAYERS_26)) ? modern : legacy;
+        // at the world root otherwise (pre-26 layout). The container name is matched
+        // case-insensitively, mirroring PlayerDataConverter.playersContainer and
+        // PlayerPathRecognizer: on a case-sensitive file system a container created as
+        // PLAYERS/ must still count as the 26.x layout - a case-sensitive check here
+        // would send the server to the legacy <world>/folesium store while the
+        // converter keeps writing <world>/PLAYERS/folesium, splitting player data
+        // across two stores (converted players silently starting fresh).
+        Path players = playersContainer(root);
+        return players == null ? legacy : players.resolve(FolesiumDatabase.STORE_DIR_NAME);
+    }
+
+    /**
+     * The {@code players/} container under {@code worldRoot}, or {@code null} when there is
+     * none. Mirrors {@code PlayerDataConverter.playersContainer}: the name is matched
+     * case-insensitively so a container created as {@code PLAYERS/} on a case-sensitive
+     * file system is still recognised as the 26.x layout.
+     */
+    private static Path playersContainer(Path worldRoot) {
+        Path players = worldRoot.resolve(DIR_PLAYERS_26);
+        if (Files.isDirectory(players)) {
+            return players;
+        }
+        try (var s = Files.list(worldRoot)) {
+            return s.filter(Files::isDirectory)
+                    .filter(p -> DIR_PLAYERS_26.equalsIgnoreCase(p.getFileName().toString()))
+                    .findFirst()
+                    .orElse(null);
+        } catch (IOException e) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: cannot list {0} to locate the players/ container; treating the world"
+                            + " as the pre-26 layout: {1}", worldRoot, e);
+            return null;
+        }
     }
 
     /**

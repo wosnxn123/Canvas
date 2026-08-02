@@ -1284,11 +1284,24 @@ public final class ShardFile implements AutoCloseable {
         lock.writeLock().lock();
         try {
             if (dirty) {
-                if (channel == null || !channel.isOpen()) {
-                    // Channel released (failed compaction restore) or closed concurrently
-                    // (e.g. by a racing closeAll()): close() already forced this shard, so
-                    // there is nothing left to fsync.
+                if (channel == null) {
+                    // Channel released (failed compaction restore): never reopen - see
+                    // reopenIfClosed. close() already forced this shard, so there is
+                    // nothing left to fsync.
                     return;
+                }
+                if (!channel.isOpen()) {
+                    // Channel closed by an interrupt on some other thread's blocking
+                    // operation (not the flusher's own force), or concurrently by
+                    // closeAll(). Previously this silently returned, which hid the
+                    // closure from the group-commit recovery loop - the shard would keep
+                    // failing every read/write until a compaction happened to self-heal.
+                    // Throw so the flushLoop's isChannelClosedFailure check reopens the
+                    // channel (it skips stores that are closing, so a racing close()
+                    // stays safe); close() itself forces shards directly and never goes
+                    // through here.
+                    throw new FolesiumException("channel of " + path + " is closed",
+                            new java.nio.channels.ClosedChannelException());
                 }
                 channel.force(false);
                 dirty = false;
@@ -1319,12 +1332,18 @@ public final class ShardFile implements AutoCloseable {
      * <p>Package-private: called by the store's group-commit loop after a flush failed
      * with a channel-closing exception (see {@code FolesiumDatabase.flushLoop}).</p>
      */
-    void reopenIfClosed() {
+    public void reopenIfClosed() {
         lock.writeLock().lock();
         try {
             if (channel != null && !channel.isOpen()) {
                 try {
-                    channel = FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE);
+                    // Reopen with the same access mode the constructor used: reopening a
+                    // read-only shard READ|WRITE would both fail on truly read-only media
+                    // (leaving the channel closed and every read broken) and silently
+                    // upgrade a writable-file read-only shard's channel capability.
+                    channel = readOnly
+                            ? FileChannel.open(path, StandardOpenOption.READ)
+                            : FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE);
                     LOGGER.log(System.Logger.Level.WARNING,
                             "Folesium: reopened channel of shard {0} (closed by an interrupt during flush)", path);
                 } catch (IOException reopenFailure) {
