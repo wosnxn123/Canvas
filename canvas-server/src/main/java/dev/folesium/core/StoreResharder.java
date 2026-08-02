@@ -144,13 +144,20 @@ final class StoreResharder {
             LOGGER.log(System.Logger.Level.WARNING,
                     "Folesium: ignoring malformed or mismatched reshard COMMIT marker in {0}", dir);
             if (moved) {
-                // MOVED is durable evidence that the old set was already displaced, so it
-                // must not be restored over the freshly swapped-in new files. But with the
-                // new set incomplete, the old files are also the only surviving copy of the
-                // records the missing new shards would have held: keep them. Deleting them
-                // while any new shard is still missing would silently destroy data.
-                deleteRecursively(staging);
-                fsyncDirectory(dir);
+                // MOVED proves the old set was displaced into backup before the swap
+                // started. With the new set incomplete (completeNewLayout failed), the
+                // partial new files in dir cannot be trusted: the records of the shards
+                // the swap never reached live only in staging or backup. Restore the
+                // complete old layout from backup (removing the partial new files) and
+                // drop the staging tree, so the store reopens as the consistent
+                // pre-reshard layout instead of silently losing records.
+                try {
+                    restoreOldLayout(dir, backup, staging);
+                } catch (IOException restoreFailure) {
+                    throw new FolesiumException(
+                            "Cannot restore the old layout of " + dir + " after an incomplete reshard",
+                            restoreFailure);
+                }
                 return;
             }
         }
@@ -488,6 +495,35 @@ final class StoreResharder {
         } catch (IOException e) {
             return false;
         }
+    }
+
+    /**
+     * Restores the complete pre-reshard layout of {@code dir} from the backup tree after
+     * an aborted swap: the partial new files are removed, every old shard file is moved
+     * back, and both the staging and backup trees are dropped. Only called on the MOVED
+     * path, where the backup is the sole surviving copy of the records the swap never
+     * reached - deleting the staging tree without restoring it would silently lose data.
+     */
+    private static void restoreOldLayout(Path dir, Path backup, Path staging) throws IOException {
+        // 1. Remove the partial new files from dir (they belong to the aborted new layout).
+        for (Path p : listShardFiles(dir)) {
+            Files.deleteIfExists(p);
+        }
+        // 2. Move every old shard file back from the backup (markers stay behind; the
+        //    whole backup tree is dropped below).
+        if (Files.isDirectory(backup)) {
+            try (Stream<Path> files = Files.list(backup)) {
+                List<Path> olds = files.filter(Files::isRegularFile).toList();
+                for (Path p : olds) {
+                    Files.move(p, dir.resolve(p.getFileName().toString()),
+                            StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                }
+            }
+        }
+        // 3. Drop the staging and backup trees.
+        deleteRecursively(staging);
+        deleteRecursively(backup);
+        fsyncDirectory(dir);
     }
 
     /** Number of populated {@code .flog} shard files of one keyspace directly inside {@code dir}. */
