@@ -68,11 +68,13 @@ import java.util.stream.Stream;
  * driven to completion. The {@code MOVED} marker is what makes phase 3 re-runnable - without
  * it, a retry could mistake already-swapped-in new files for leftovers of the old set.</p>
  *
- * <p>Two ordering invariants make recovery safe. The shard-count metadata is updated before
- * the swap evidence is destroyed, so a crash can never leave the metadata and the shard
- * files disagreeing. And the old shard files are only deleted once every new shard is
- * confirmed present in the store directory, so a crash in the middle of phase 3 can never
- * destroy the only surviving copy of the records.</p>
+ * <p>Three ordering invariants make recovery safe. The shard-count metadata is updated
+ * before the swap evidence is destroyed, so a crash can never leave the metadata and the
+ * shard files disagreeing. The rebuildable page index is invalidated before the swap
+ * evidence is destroyed, so a crash can never pair old-layout region pages with the
+ * new-layout logs on the next open. And the old shard files are only deleted once every
+ * new shard is confirmed present in the store directory, so a crash in the middle of
+ * phase 3 can never destroy the only surviving copy of the records.</p>
  *
  * <p>Not thread-safe and not multi-process safe: it is only ever called from the
  * {@link FolesiumDatabase} constructor, before any keyspace exists and before the store is
@@ -147,12 +149,20 @@ final class StoreResharder {
             if (swappable) {
                 LOGGER.log(System.Logger.Level.WARNING,
                         "Folesium: resuming an interrupted reshard of {0}", dir);
+                // The rewritten shards assign new offsets to every record, so any region
+                // pages (and their hint/watermark anchors) from the pre-reshard layout are
+                // stale. Invalidate the page index BEFORE finishSwap deletes the staging and
+                // backup trees: whatever point a crash interrupts the swap, the next open
+                // never pairs old-layout pages with the new-layout logs. (The previous
+                // order - invalidate after the evidence was deleted - left a window where a
+                // crash between the two reopened the store against stale pages with no
+                // recovery evidence left.)
+                invalidatePageIndex(dir);
                 // Make the metadata durable BEFORE finishSwap destroys the COMMIT evidence:
                 // a crash after this point leaves files and metadata agreeing even if the
                 // swap itself still has to be re-run.
                 applyShardCountMetadata(dir, newCount);
                 finishSwap(dir, staging, backup);
-                invalidatePageIndex(dir);
                 return;
             }
             LOGGER.log(System.Logger.Level.WARNING,
@@ -210,6 +220,12 @@ final class StoreResharder {
             // to delete the backup. (Eager header-only recreation on open cannot mask an
             // unfinished swap: recovery resolves the layout before any keyspace opens, so a
             // state with staging gone is always a finished swap, never a recreated empty.)
+            // The layout the store now holds is whatever the interrupted swap left behind,
+            // so any region pages are of uncertain provenance: drop them (rebuildable cache)
+            // BEFORE the backup is deleted - a crash after the deletion but before the
+            // invalidation would reopen the store against old-layout pages with the
+            // new-layout logs and no recovery evidence left.
+            invalidatePageIndex(dir);
             Integer metaCount = metadataShardCount(dir);
             int fileCount = consistentOnDiskShardCount(dir);
             if (metaCount != null && fileCount == metaCount) {
@@ -225,9 +241,6 @@ final class StoreResharder {
             }
             // The swap evidence is gone, so bring the metadata in line with the files
             // before the store is opened.
-            // The layout the store now holds is whatever the interrupted swap left behind,
-            // so any region pages are of uncertain provenance: drop them (rebuildable cache).
-            invalidatePageIndex(dir);
             reconcileStaleMetadata(dir);
             return;
         }
@@ -238,6 +251,11 @@ final class StoreResharder {
         if (hasBackup && !Files.isRegularFile(movedMarker)) {
             restoreFromBackup(dir, backup);
         }
+        // The staging/backup trees are about to be destroyed: drop the rebuildable page
+        // index (a disposable cache, rebuilt from the logs) BEFORE they are deleted, so a
+        // crash between the two can never reopen the store against pages of a layout whose
+        // recovery evidence is gone.
+        invalidatePageIndex(dir);
         deleteRecursively(staging);
         deleteRecursively(backup);
         // The COMMIT evidence is gone, but the shard-count metadata may still have been
@@ -289,12 +307,14 @@ final class StoreResharder {
 
         Path staging = dir.resolve(STAGING_DIR);
         Path backup = dir.resolve(BACKUP_DIR);
-        deleteRecursively(staging);
-        deleteRecursively(backup);
         // The rewritten shards assign new offsets to every record, so any region pages left
         // from the pre-reshard layout are stale: drop the whole page index (a disposable
-        // cache, rebuilt from the logs) before the new layout is staged.
+        // cache, rebuilt from the logs) BEFORE the leftover scratch trees are removed, so a
+        // crash in this cleanup can never reopen the store with old-layout pages and no
+        // recovery evidence left.
         invalidatePageIndex(dir);
+        deleteRecursively(staging);
+        deleteRecursively(backup);
 
         long records = 0;
         try {

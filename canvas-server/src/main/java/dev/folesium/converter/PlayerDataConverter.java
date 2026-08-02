@@ -32,8 +32,10 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
@@ -108,16 +110,24 @@ public final class PlayerDataConverter {
      * The directory that holds the per-player vanilla directories <em>and</em> the player
      * store: {@code <world>/players} on a 26.x world, the world root itself on the older
      * layout. This mirrors the server hook, which anchors the store next to the directory
-     * {@code LevelResource.PLAYER_DATA_DIR} resolves to.
+     * {@code LevelResource.PLAYER_DATA_DIR} resolves to. The {@code players/} container is
+     * matched case-insensitively (like {@link PlayerPathRecognizer}), so a container
+     * created as {@code PLAYERS/} on a case-sensitive file system is still the 26.x
+     * container.
      *
      * <p>A 26.x world whose {@code players/} directory holds no per-player files at all
      * (all three 26.x data directories empty) while the pre-26 root-level directories
      * still contain data is treated as the legacy layout it actually is, so its data is
-     * not silently left behind by {@link #mappingsFor}.</p>
+     * not silently left behind by {@link #mappingsFor}. The one exception is a
+     * {@code players/} directory that already holds a {@code PLAYERS} store: the store
+     * location is the layout authority (the server anchors its store at exactly this
+     * spot), so such a world is a genuine 26.x+Folesium world and is never downgraded,
+     * even when its 26.x per-player directories happen to be empty.</p>
      */
     public static Path playerRootFor(Path worldRoot) {
-        Path players = worldRoot.resolve(DIR_PLAYERS_26);
-        if (Files.isDirectory(players) && modernTreeIsEmpty(players) && legacyTreeHasData(worldRoot)) {
+        Path players = playersContainer(worldRoot);
+        if (players != null && !hasModernStore(players)
+                && modernTreeIsEmpty(players) && legacyTreeHasData(worldRoot)) {
             // Operator-facing: the decision changes which directories are read and where the
             // store lives, so it must be visible even where the JUL logger is not wired up.
             System.err.println("Folesium: " + worldRoot + " has a players/ directory with no player files,"
@@ -125,7 +135,44 @@ public final class PlayerDataConverter {
                     + " using the legacy layout for this world");
             return worldRoot;
         }
-        return Files.isDirectory(players) ? players : worldRoot;
+        return players != null ? players : worldRoot;
+    }
+
+    /**
+     * The {@code players/} container under {@code worldRoot}, or {@code null} when there is
+     * none. The name is matched case-insensitively, mirroring
+     * {@link PlayerPathRecognizer#DIR_PLAYERS}: on a case-sensitive file system a container
+     * created as {@code PLAYERS/} must still be recognised, so the layout decision and the
+     * store location stay symmetric with the recognizer.
+     */
+    private static Path playersContainer(Path worldRoot) {
+        Path players = worldRoot.resolve(DIR_PLAYERS_26);
+        if (Files.isDirectory(players)) {
+            return players;
+        }
+        try (var s = Files.list(worldRoot)) {
+            return s.filter(Files::isDirectory)
+                    .filter(p -> DIR_PLAYERS_26.equalsIgnoreCase(p.getFileName().toString()))
+                    .findFirst()
+                    .orElse(null);
+        } catch (IOException e) {
+            // The layout decision in playerRootFor is made on incomplete data when the world
+            // root cannot be listed; say so instead of degrading silently.
+            System.err.println("Folesium: cannot list " + worldRoot + " (" + e + ");"
+                    + " treating it as having no players/ container");
+            return null;
+        }
+    }
+
+    /**
+     * True when the {@code players/} container already holds a {@code PLAYERS} store. The
+     * store location is the layout authority signal -- the server anchors its store at
+     * {@code <world>/players/folesium} on the 26.x layout -- so a world with such a store
+     * is a genuine 26.x+Folesium world whose empty-shell downgrade must be skipped.
+     */
+    private static boolean hasModernStore(Path players) {
+        return FolesiumDatabase.readRole(players.resolve(FolesiumDatabase.STORE_DIR_NAME))
+                == FolesiumDatabase.StoreRole.PLAYERS;
     }
 
     /**
@@ -226,17 +273,22 @@ public final class PlayerDataConverter {
      * The player store directory for a world root: {@code <world>/players/folesium} on
      * the 26.x layout, {@code <world>/folesium} on the older one. An existing store with
      * {@code store.role=PLAYERS} at either location wins, so a world converted under one
-     * layout keeps using its store even if the directory shape changes around it.
+     * layout keeps using its store even if the directory shape changes around it. The
+     * {@code players/} container is matched case-insensitively, mirroring
+     * {@link PlayerPathRecognizer} and {@link #playerRootFor}.
      */
     public static Path storeDirectoryFor(Path worldRoot) {
-        Path modern = worldRoot.resolve(DIR_PLAYERS_26).resolve(FolesiumDatabase.STORE_DIR_NAME);
+        Path players = playersContainer(worldRoot);
+        Path modern = players == null ? null : players.resolve(FolesiumDatabase.STORE_DIR_NAME);
         Path legacy = worldRoot.resolve(FolesiumDatabase.STORE_DIR_NAME);
-        if (FolesiumDatabase.readRole(modern) == FolesiumDatabase.StoreRole.PLAYERS) {
+        if (modern != null && FolesiumDatabase.readRole(modern) == FolesiumDatabase.StoreRole.PLAYERS) {
             return modern;
         }
         if (FolesiumDatabase.readRole(legacy) == FolesiumDatabase.StoreRole.PLAYERS) {
             return legacy;
         }
+        // No store anywhere yet: follow the layout decision, which downgrades an empty
+        // players/ shell to the legacy world-root location when the legacy tree holds data.
         return playerRootFor(worldRoot).resolve(FolesiumDatabase.STORE_DIR_NAME);
     }
 
@@ -346,9 +398,12 @@ public final class PlayerDataConverter {
     /**
      * Materializes every player keyspace back into the vanilla per-player files.
      *
-     * <p>Default (cesium-fabric parity): each record is written straight into the
-     * target directory, atomically replacing any existing file of the same name;
-     * files that are not in the store are left untouched.</p>
+     * <p>Default: each record is written straight into the target directory,
+     * atomically replacing any existing file of the same name, and per-player files
+     * the store no longer holds are deleted, mirroring the staging mode's "records
+     * absent from the store cannot survive" (players deleted on the server are not
+     * resurrected by a rollback). Foreign files that are not player data are left
+     * untouched.</p>
      *
      * <p>With {@code backupOnConvert} a clean staging directory is built first and
      * swapped in, and the previous directory is moved to a unique
@@ -418,10 +473,54 @@ public final class PlayerDataConverter {
         }
     }
 
-    /** Default path: write each record straight into the target directory, replacing existing files. */
+    /**
+     * Default path: write each record straight into the target directory, replacing existing
+     * files, then prune the files the store no longer holds. The prune mirrors the dimension
+     * export's {@code pruneSlotsMissingFromStore}: players deleted from the store (a shrunken
+     * or emptied store) must not be resurrected by a later export.
+     */
     private static long[] convertMappingInPlace(Path out, Keyspace ks, Mapping m) throws IOException {
         Files.createDirectories(out);
-        return writeMapping(out, ks, m);
+        long[] inc = writeMapping(out, ks, m);
+        prunePlayerFilesMissingFromStore(out, ks, m.extension());
+        return inc;
+    }
+
+    /**
+     * In-place exports keep every record the store still has and delete the per-player files
+     * the store dropped since the target directory was written, mirroring the staging-mode
+     * semantics "records absent from the store cannot survive" (and the dimension converter's
+     * {@code pruneSlotsMissingFromStore}). Every player file already present in the target
+     * tree is swept -- including directories the store holds no records in any more (a
+     * shrunken or emptied store), whose stale files would otherwise be resurrected by the
+     * next export -- by comparing each file's player UUID against the full set of player
+     * keys the store still holds. Files are only touched when they match the mapping's
+     * extension and the UUID filename pattern, so foreign files stay untouched.
+     */
+    private static void prunePlayerFilesMissingFromStore(Path out, Keyspace ks, String extension) throws IOException {
+        // Keys first: the sweep needs the full stored set (a clean staging tree would handle
+        // deleted records; the in-place path has to compare against the store explicitly).
+        List<byte[]> keys = new ArrayList<>();
+        ks.forEachKey(keys::add);
+        Set<UUID> stored = new HashSet<>();
+        for (byte[] key : keys) {
+            if (key.length == UuidKeys.LENGTH) {
+                stored.add(UuidKeys.decode(key));
+            }
+        }
+        List<Path> files;
+        try (var s = Files.list(out)) {
+            files = s.filter(Files::isRegularFile)
+                    .filter(p -> p.getFileName().toString().endsWith(extension))
+                    .filter(p -> UUID_FILE.matcher(p.getFileName().toString()).matches())
+                    .toList();
+        }
+        for (Path file : files) {
+            UUID id = uuidOf(file);
+            if (id != null && !stored.contains(id)) {
+                Files.deleteIfExists(file);
+            }
+        }
     }
 
     private static long[] writeMapping(Path writeRoot, Keyspace ks, Mapping m) throws IOException {

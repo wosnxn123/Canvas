@@ -41,8 +41,11 @@ import java.util.UUID;
  * <p>Codec {@code 3} (ZSTD_DICT) records compress against this dictionary, so it is load-once
  * and cached for the lifetime of the store: the first build never retrains (a different
  * dictionary would make existing codec-3 records undecodable). Deleting {@code dict.bin} while
- * codec-3 records exist means those records cannot be decoded - {@link #load} reports that as
- * a clear {@link FolesiumException} instead of returning garbage.</p>
+ * codec-3 records exist means those records cannot be decoded: {@link #load} treats a missing
+ * file as the "no dictionary" case and returns {@code null} (it throws a clear
+ * {@link FolesiumException} only when a file is present but invalid, see its javadoc), so a
+ * deletion is not misreported as corruption and the loss of decodeability surfaces where
+ * codec-3 records are actually read.</p>
  *
  * <p>On-disk format: exactly what {@code Zstd.trainFromBuffer} produced (a zstd dictionary,
  * identified by its magic header). Written atomically with a unique {@code .tmp-<uuid>} sibling
@@ -130,6 +133,18 @@ public final class DictionaryStore {
                             + " keyspace are not decodable without the dictionary.");
         }
         byte[] bytes = Files.readAllBytes(dictFile);
+        // Post-read size re-check: the file may have grown between the pre-check above and
+        // the read (TOCTOU), so the bytes actually held must satisfy the same bound - the
+        // third guard of the RegionPage.read triple (pre-check, re-check, post-check). A
+        // huge file that grew past the pre-check would otherwise be read into memory whole.
+        if (bytes.length > MAX_DICT_BYTES) {
+            throw new FolesiumException(
+                    "Dictionary file " + dictFile + " is corrupt: " + bytes.length
+                            + " bytes, but a valid zstd dictionary is a small trained blob (well under 1 MiB;"
+                            + " trained ones are exactly " + DICT_SIZE + " bytes). Restore dict.bin from a"
+                            + " backup, or delete it and re-run the conversion; codec-3 records in this"
+                            + " keyspace are not decodable without the dictionary.");
+        }
         if (bytes.length < MIN_DICT_BYTES) {
             throw new FolesiumException(
                     "Dictionary file " + dictFile + " is corrupt: only " + bytes.length

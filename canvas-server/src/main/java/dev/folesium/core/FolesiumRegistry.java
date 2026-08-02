@@ -542,8 +542,9 @@ public final class FolesiumRegistry {
         // file with a malformed backslash-u escape must not silently fall back to the
         // auto-tuned defaults (fileProperties() discards the unparseable prefix and yields
         // defaults) - keep the previous configuration instead. parsesAsProperties() logged
-        // the clear error. A missing file is not an error here: reload() then proceeds from
-        // system properties + defaults exactly as it always has.
+        // the clear error. A missing file proceeds from system properties + defaults only
+        // when -Dfolesium.* overrides exist; otherwise there is nothing to apply and the
+        // default file must not be regenerated (see below).
         Path configFile = configFilePath();
         if (Files.isRegularFile(configFile)) {
             String content = configFileContent();
@@ -556,6 +557,17 @@ public final class FolesiumRegistry {
             if (!parsesAsProperties(content)) {
                 return List.of();
             }
+        } else if (!hasSystemPropertyOverrides()) {
+            // A missing config file is not an operator edit: proceeding would make
+            // fileProperties() regenerate the auto-tuned default file and push those
+            // defaults onto the running stores, silently overriding the current
+            // configuration - the same regenerated-file protection the watcher applies
+            // (it recognises the generated content and skips it, see watchConfigFile).
+            // With neither a file nor -Dfolesium.* overrides there is nothing to apply:
+            // keep the running configuration and report nothing, without regenerating the
+            // file. System-property-only deployments still reload, because their values
+            // are real overrides, not regenerated defaults.
+            return List.of();
         }
         List<FolesiumDatabase> snapshot;
         FolesiumConfig cfg;
@@ -667,6 +679,22 @@ public final class FolesiumRegistry {
     }
 
     /**
+     * Whether any {@code -Dfolesium.*} system property is set. Used by {@link #reload()} to
+     * tell a headless deployment that configures Folesium entirely through system properties
+     * (which must keep applying even without a config file) apart from a truly unconfigured
+     * server (where a reload must not regenerate the default file and push its defaults onto
+     * the running stores).
+     */
+    private static boolean hasSystemPropertyOverrides() {
+        for (String name : System.getProperties().stringPropertyNames()) {
+            if (name.startsWith("folesium.")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Clears {@link #configWatcher} when the finishing thread is still the registered watcher.
      * A replacement watcher may have been started while this one was unwinding (e.g. after
      * {@code OPEN} emptied and was re-filled), so never clear a watcher that is not this thread.
@@ -695,12 +723,16 @@ public final class FolesiumRegistry {
                         // The poll head re-reads the config file (intProperty -> property ->
                         // fileProperties()); a transient read failure - e.g. an editor is
                         // still writing - must not kill the watcher (same guard as the
-                        // reload path below). Log a warning and retry on the next poll.
+                        // reload path below). Log a warning and fall back to the default
+                        // interval instead of continuing straight back to the poll head: a
+                        // persistent read failure must not busy-spin the watcher. Every
+                        // round still sleeps (autoReloadSeconds, 10 by default), so the
+                        // retry happens on the next poll exactly as before.
                         LOGGER.log(System.Logger.Level.WARNING,
                                 "Folesium: cannot read {0} to determine the reload interval;"
                                         + " will retry on the next poll: {1}",
                                 configFilePath().toAbsolutePath(), e.toString());
-                        continue;
+                        seconds = 10;
                     }
                 }
                 try {

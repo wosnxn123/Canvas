@@ -462,6 +462,34 @@ public final class FolesiumDatabase implements AutoCloseable {
         writeMetadataAtomically(meta, p);
     }
 
+    /**
+     * The codec currently recorded in this store's metadata, or {@code null} when the
+     * metadata file does not exist or records no codec. Compared against the requested
+     * codec in {@link #applyRuntimeConfig}'s persist gate; the metadata is written at open,
+     * so {@code null} is a corrupt/foreign-directory case, not a normal state.
+     */
+    private FolesiumConfig.Compression diskCompression() {
+        Path meta = dir.resolve(METADATA_FILE);
+        if (!Files.isRegularFile(meta)) {
+            return null;
+        }
+        Properties p = new Properties();
+        try (var reader = Files.newBufferedReader(meta, StandardCharsets.UTF_8)) {
+            p.load(reader);
+        } catch (IOException e) {
+            throw new FolesiumException("Cannot read " + meta, e);
+        }
+        String raw = p.getProperty("store.compression");
+        if (raw == null) {
+            return null;
+        }
+        try {
+            return FolesiumConfig.Compression.valueOf(raw.trim().toUpperCase(java.util.Locale.ROOT));
+        } catch (RuntimeException e) {
+            throw new FolesiumException("Unknown store.compression '" + raw + "' in " + meta, e);
+        }
+    }
+
     public Path directory() {
         return dir;
     }
@@ -545,21 +573,29 @@ public final class FolesiumDatabase implements AutoCloseable {
             FolesiumConfig merged = mergeRuntimeConfig(current, requestedBaseline, next);
             boolean reshardRequired = next.shardCount() != requestedBaseline.shardCount();
             FolesiumConfig effective = merged.withShardCount(current.shardCount());
-            // Whether the requested codec was degraded to a session-only fallback. A
-            // degradation must never be persisted as the store's codec (see the persist gate
-            // below): the metadata keeps the operator's requested/current codec, so the next
-            // open re-evaluates (and the note explains what actually happened).
-            boolean degraded = false;
+            // The codec this reload resolved to before any session-only degradation below.
+            // Persistence is measured against this requested codec and the codec the store
+            // records on disk, never against the possibly-degraded session `current`: an
+            // operator who explicitly switches to the same codec a previous reload degraded
+            // to (e.g. ZSTD after ZSTD_DICT -> ZSTD for this session) would otherwise be
+            // invisible - the merge sees no delta against the degraded baseline and the
+            // persist gate no delta against the degraded current - and the recorded codec
+            // would never catch up with the operator's intent.
+            FolesiumConfig.Compression requestedCodec = effective.compression();
 
             if ((effective.compression() == FolesiumConfig.Compression.ZSTD && !ZstdNative.available())
                     || (effective.compression() == FolesiumConfig.Compression.ZSTD_DICT
                             && !ZstdNative.dictAvailable())) {
+                // Degradation is a session-only accommodation: the fallback (the codec
+                // `effective` is rewritten to below) is never persisted - the persist gate
+                // further down records `requestedCodec` instead, so the metadata keeps the
+                // operator's requested codec and the next open re-evaluates (the note
+                // explains what actually happened).
                 notes.add("compression=" + effective.compression() + " ignored: "
                         + (effective.compression() == FolesiumConfig.Compression.ZSTD_DICT
                                 ? "the zstd-jni dictionary API is not available"
                                 : "zstd-jni is not available")
                         + "; keeping " + current.compression());
-                degraded = true;
                 effective = effective.withCompression(current.compression())
                         .withCompressionLevel(FolesiumConfig.clampCompressionLevel(
                                 current.compression(), effective.compressionLevel()));
@@ -585,7 +621,6 @@ public final class FolesiumDatabase implements AutoCloseable {
                     notes.add("compression=ZSTD_DICT ignored: no per-keyspace dictionary exists; "
                             + "using ZSTD for this session (dictionaryCompression stays enabled, so "
                             + "keyspaces that have a dictionary keep writing codec 3)");
-                    degraded = true;
                     effective = effective.withCompression(FolesiumConfig.Compression.ZSTD)
                             .withCompressionLevel(FolesiumConfig.clampCompressionLevel(
                                     FolesiumConfig.Compression.ZSTD, effective.compressionLevel()));
@@ -617,17 +652,24 @@ public final class FolesiumDatabase implements AutoCloseable {
             }
 
             List<String> changes = current.diff(effective);
-            if (changes.isEmpty()) {
-                return new ConfigReloadResult(current, changes, notes, reshardRequired);
+            // Persist gate: record an explicit codec change in the store metadata, but never
+            // the session-only degradation fallback. The decision compares the requested
+            // codec (captured pre-degradation) with the codec the store records on disk -
+            // never the degraded session `current`, whose delta against the request is
+            // exactly what a degradation hides. When not degraded, `requestedCodec` is the
+            // codec actually applied, so this is the previous gate in disguise; when
+            // degraded, the requested codec is recorded (not the fallback), so the metadata
+            // carries the operator's intent and the next open re-evaluates - exactly what
+            // the degradation note promises. The gate also runs when `changes` is empty: an
+            // explicit switch to the session's degraded fallback produces no session diff,
+            // yet still belongs in the metadata so the next open re-evaluates with it.
+            boolean persistedCodec = false;
+            if (requestedCodec != diskCompression()) {
+                persistCompression(requestedCodec);
+                persistedCodec = true;
             }
-            // Persist only an explicit codec change that was actually applied: a degradation
-            // (ZSTD unavailable, or ZSTD_DICT without a dictionary) is a session-only
-            // accommodation and must not rewrite the metadata with the fallback codec - the
-            // store keeps its recorded codec so the next open re-evaluates, and the note
-            // already told the operator what happened. An explicit change that survived
-            // degradation is persisted exactly as applied.
-            if (!degraded && effective.compression() != current.compression()) {
-                persistCompression(effective.compression());
+            if (changes.isEmpty() && !persistedCodec) {
+                return new ConfigReloadResult(current, changes, notes, reshardRequired);
             }
             this.config = effective;
             for (Keyspace ks : keyspaces.values()) {
@@ -797,12 +839,19 @@ public final class FolesiumDatabase implements AutoCloseable {
         }
     }
 
-    /** Sleeps for {@code millis}, restoring the interrupt flag so the pass keeps going. */
+    /**
+     * Sleeps for {@code millis} as a compaction rate-limiter, clearing any interrupt so the
+     * throttled pass keeps going with a clean status. An interrupt during this sleep must
+     * not be restored as a pending flag: the pass continues with channel I/O (the next
+     * {@code ShardFile.compact()}), and a set interrupt status would close an interruptible
+     * channel on that operation ({@link java.nio.channels.ClosedByInterruptException}),
+     * breaking every subsequent write to the shard.
+     */
     private static void sleepQuietly(long millis) {
         try {
             Thread.sleep(millis);
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+            Thread.interrupted();
         }
     }
 
@@ -905,6 +954,14 @@ public final class FolesiumDatabase implements AutoCloseable {
     private void flushLoop() {
         try {
             while (true) {
+                // Clear any stray interrupt that landed outside the wait() below (e.g. an
+                // external interrupt, or awaitFlusherExit's last-resort interrupt arriving
+                // between the wait and the next iteration): a set interrupt status closes
+                // an interruptible FileChannel on the next blocking operation (flush ->
+                // force), so it must never survive into this iteration's channel I/O. The
+                // retirement checks inside the lock are the only exit decision - an
+                // external interrupt is never a reason to stop a healthy flusher.
+                Thread.interrupted();
                 FolesiumConfig snapshot = config;
                 synchronized (flusherLock) {
                     // Either the store is closing or this thread has been superseded/retired.

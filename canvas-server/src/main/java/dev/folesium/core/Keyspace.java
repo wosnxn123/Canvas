@@ -231,8 +231,10 @@ public final class Keyspace implements AutoCloseable {
      * {@code StoreResharder}'s header reader, so a foreign or garbage file matching the
      * {@code <name>-NNNN.flog} name pattern is never trusted; validates the shard index
      * against the index the file name implies (exactly like {@code ShardFile}'s
-     * {@code validateFileHeader}) and the power-of-two invariant so the read-only
-     * routing mask is always legal.
+     * {@code validateFileHeader}), the power-of-two invariant so the read-only
+     * routing mask is always legal, and that the index lies within the recorded count
+     * (a header naming an index at or beyond its own count is internally inconsistent
+     * and cannot belong to the layout it claims).
      *
      * <p>Torn-header tolerant: the count is store-wide and stamped into every shard file
      * header, so any intact shard names the layout. Every discovered file is tried in
@@ -270,6 +272,7 @@ public final class Keyspace implements AutoCloseable {
         boolean conflicting = false; // two readable headers recorded different counts
         Integer firstReadableCount = null; // count of the lowest-index readable header (tie-break)
         Map<Integer, Integer> votes = new HashMap<>(); // count -> number of readable headers naming it
+        Map<Integer, Integer> lowestIndexForCount = new HashMap<>(); // count -> lowest readable shard index naming it (explicit tie-break)
         for (int index : discovered) {
             Path shardFile = dir.resolve(String.format("%s-%04d.flog", name, index));
             try (FileChannel ch = FileChannel.open(shardFile, StandardOpenOption.READ)) {
@@ -305,6 +308,14 @@ public final class Keyspace implements AutoCloseable {
                 if (count < 1 || count > 1024 || Integer.bitCount(count) != 1) {
                     throw new FolesiumException("Invalid shard count " + count + " in header of " + shardFile);
                 }
+                // The header's own index must lie inside the count it records: a legal
+                // power-of-two count paired with an out-of-range index is internally
+                // inconsistent (the shard could never be routed by that count's mask) and
+                // is treated as untrusted like any other failed topology validation.
+                if (shardIndex < 0 || shardIndex >= count) {
+                    throw new FolesiumException("Shard header of " + shardFile + " records index "
+                            + shardIndex + " outside its claimed shard count " + count);
+                }
                 if (firstReadableCount == null) {
                     // discovered is ascending, so the first readable header is the
                     // lowest-index one; its count is the deterministic tie-break when the
@@ -312,6 +323,11 @@ public final class Keyspace implements AutoCloseable {
                     firstReadableCount = count;
                 }
                 votes.merge(count, 1, Integer::sum);
+                // Explicit tie-break bookkeeping: an exact tie between counts resolves to
+                // the count recorded by the lowest-index readable header (see below), and
+                // HashMap iteration order is not deterministic, so the lowest index per
+                // count is tracked explicitly instead of being resolved by iteration order.
+                lowestIndexForCount.merge(count, index, Math::min);
                 // The count is store-wide and stamped into every header, so every readable
                 // header must agree on it: a reshard interrupted between the file swap and
                 // the metadata rewrite can leave a mixture of old- and new-layout shard
@@ -349,9 +365,19 @@ public final class Keyspace implements AutoCloseable {
             int best = firstReadableCount;
             int bestVotes = votes.getOrDefault(best, 0);
             for (var entry : votes.entrySet()) {
-                if (entry.getValue() > bestVotes) {
-                    best = entry.getKey();
-                    bestVotes = entry.getValue();
+                int candidate = entry.getKey();
+                int candidateVotes = entry.getValue();
+                // Ties resolve to the lowest-index readable header's count - the
+                // deterministic rule the javadoc promises. votes is a HashMap whose
+                // iteration order is not deterministic, so the tie-break uses the
+                // explicitly tracked lowest recording index, never the map's order;
+                // firstReadableCount (the global lowest readable header) wins any tie it
+                // participates in, exactly as before.
+                if (candidateVotes > bestVotes
+                        || (candidateVotes == bestVotes
+                                && lowestIndexForCount.get(candidate) < lowestIndexForCount.get(best))) {
+                    best = candidate;
+                    bestVotes = candidateVotes;
                 }
             }
             return best;
