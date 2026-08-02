@@ -121,9 +121,14 @@ public final class ZstdNative {
         if (available) {
             try {
                 if (compressBound != null) {
-                    compressBound.invokeExact(0L);
+                    // NOTE: the cast matters. As a bare statement, invokeExact infers a
+                    // (long)void call type and throws WrongMethodTypeException against the
+                    // handle's (long)long type - which would fail the probe and degrade
+                    // ZSTD to unavailable on every host that ships zstd-jni. Casting to
+                    // long infers the exact (long)long call type instead.
+                    long probeBound = (long) compressBound.invokeExact(0L);
                 } else {
-                    compress.invokeExact(new byte[0], 3);
+                    byte[] probeBytes = (byte[]) compress.invokeExact(new byte[0], 3);
                 }
             } catch (Throwable probeFailure) {
                 // The class loads but the natives will not run here: ZSTD is unavailable.
