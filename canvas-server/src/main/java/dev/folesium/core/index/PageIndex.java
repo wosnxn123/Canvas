@@ -690,11 +690,15 @@ public final class PageIndex implements AutoCloseable {
     }
 
     /**
-     * Best-effort sweep of stale {@code <page>.tmp-<uuid>} staging files left by a crash
-     * between RegionPage.write's staging write and its atomic rename. They are inert (never
-     * read by any load path) but accumulate across crashes. Runs on every hint write - the
+     * Best-effort sweep of stale staging files left by a crash between a staging write and
+     * its atomic rename: {@code <page>.idx.tmp-<uuid>} (RegionPage.write) and
+     * {@code dict.bin.tmp-<uuid>} (DictionaryStore.train). They are inert (never read by
+     * any load path) but accumulate across crashes. Runs on every hint write - the
      * {@link #close()} path - so keyspaces that never compact, which never reach the sweep
-     * in {@link #deleteAllPageFiles()}, still get cleaned up. Failures are logged, never
+     * in {@link #deleteAllPageFiles()}, still get cleaned up. Sweeping the dictionary
+     * staging file is safe: training only happens during conversion, when the store is
+     * closed and this keyspace's page index is not live, so a {@code dict.bin.tmp-*} seen
+     * here is always a crash leftover, never a write in flight. Failures are logged, never
      * thrown.
      */
     private void sweepStaleTmpFiles() {
@@ -702,7 +706,13 @@ public final class PageIndex implements AutoCloseable {
             return;
         }
         try (var stream = Files.list(idxDir)) {
-            stream.filter(p -> p.getFileName().toString().endsWith(PAGE_SUFFIX + ".tmp-") || p.getFileName().toString().matches(".*\\.idx\\.tmp-[0-9a-fA-F-]+$")).forEach(p -> {
+            stream.filter(p -> p.getFileName().toString().endsWith(PAGE_SUFFIX + ".tmp-")
+                    || p.getFileName().toString().matches(".*\\.idx\\.tmp-[0-9a-fA-F-]+$")
+                    // dict.bin.tmp-<uuid>: DictionaryStore.train's staging file, orphaned
+                    // by a crash between its staging write and the atomic rename. Training
+                    // only runs during conversion, with the store closed, so this is always
+                    // a crash leftover here - never a live write.
+                    || p.getFileName().toString().startsWith("dict.bin.tmp-")).forEach(p -> {
                 try {
                     Files.deleteIfExists(p);
                 } catch (IOException e) {

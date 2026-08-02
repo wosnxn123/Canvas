@@ -607,6 +607,25 @@ public final class AnvilRegionFile implements Closeable {
     }
 
     /**
+     * lz4-java block stream magic ({@code "LZ4Block"}, written by {@code LZ4BlockOutputStream});
+     * every block starts with it, followed by a 1-byte token, a 4-byte little-endian
+     * compressed length, a 4-byte little-endian original length and a 4-byte little-endian
+     * xxhash32 checksum (21 header bytes per block). The block stream is self-contained:
+     * the header lives inside the payload, both for inline region chunks and for the raw
+     * compressed stream of an external {@code .mcc} file.
+     */
+    private static final byte[] LZ4_BLOCK_MAGIC = { 'L', 'Z', '4', 'B', 'l', 'o', 'c', 'k' };
+    private static final int LZ4_BLOCK_HEADER_LENGTH = 8 + 1 + 4 + 4 + 4; // magic + token + lengths + checksum
+
+    /**
+     * Upper bound for a single LZ4 block's <em>compressed</em> length: the payload bound
+     * plus the same 1 MiB margin the external {@code .mcc} size check uses. A legal writer
+     * ({@code LZ4BlockOutputStream}, max block 32 MiB) stays far below it, so anything
+     * larger is a hostile or corrupt stream.
+     */
+    private static final int LZ4_BLOCK_COMPRESSED_LIMIT = MAX_CHUNK_PAYLOAD_BYTES + 1024 * 1024;
+
+    /**
      * Decompresses an LZ4 chunk with the same output bound as {@link #readBounded}.
      * Reads through {@link Lz4Native#newInputStream} -- which reuses the constructor
      * cached in {@code Lz4Native}'s static bridge (lz4-java is an optional runtime
@@ -626,12 +645,70 @@ public final class AnvilRegionFile implements Closeable {
                     "Cannot read LZ4-compressed Anvil chunk: lz4-java is not on the classpath. "
                             + "Run the conversion on a Folia/Canvas server, or add net.jpountz.lz4:lz4.");
         }
+        validateLz4BlockStream(data);
         try (InputStream in = Lz4Native.newInputStream(data)) {
             return readBounded(in, MAX_CHUNK_PAYLOAD_BYTES);
         } catch (RuntimeException e) {
             // LZ4Exception on corrupt data: Lz4Native throws it unchecked, but this path
             // feeds readChunk, which promises IOException for chunk read/decode failures.
             throw new IOException("LZ4 decompression failed", e);
+        }
+    }
+
+    /**
+     * Pre-validates every block header of an LZ4 block stream before it is handed to
+     * {@link Lz4Native#newInputStream}, closing the input-side allocation hole:
+     * {@code LZ4BlockInputStream.refill()} allocates a buffer of the block's claimed
+     * compressed length and only rejects negative lengths, so a forged header claiming
+     * ~2 GiB allocates ~2 GiB (OOM) before any read bound applies. The chunk payload is
+     * fully in memory here (inline payloads are capped by the sector allocation,
+     * external {@code .mcc} payloads by the size check in {@link #readChunk}), so walking
+     * every 21-byte header is a cheap, allocation-free guard: the compressed length is
+     * held to {@code MAX_CHUNK_PAYLOAD_BYTES + 1 MiB} and the original length to
+     * {@link #MAX_CHUNK_PAYLOAD_BYTES} (the same output bound
+     * {@link #LimitedInputStream} enforces). The layout mirrors {@code LZ4BlockInputStream}
+     * exactly -- a stream this walk accepts is decoded by lz4-java without any unbounded
+     * allocation; anything else fails here with an {@link IOException} instead of an OOM.
+     */
+    private static void validateLz4BlockStream(byte[] data) throws IOException {
+        int off = 0;
+        while (true) {
+            if (data.length - off < LZ4_BLOCK_HEADER_LENGTH) {
+                throw new IOException("Truncated LZ4 block stream: expected a " + LZ4_BLOCK_HEADER_LENGTH
+                        + " byte block header, " + (data.length - off) + " bytes remain");
+            }
+            for (int i = 0; i < LZ4_BLOCK_MAGIC.length; i++) {
+                if (data[off + i] != LZ4_BLOCK_MAGIC[i]) {
+                    throw new IOException("Corrupt LZ4 block stream: bad block magic at byte " + off);
+                }
+            }
+            // Little-endian lengths, exactly as LZ4BlockInputStream reads them.
+            int compressedLen = (data[off + 9] & 0xFF) | (data[off + 10] & 0xFF) << 8
+                    | (data[off + 11] & 0xFF) << 16 | (data[off + 12] & 0xFF) << 24;
+            int originalLen = (data[off + 13] & 0xFF) | (data[off + 14] & 0xFF) << 8
+                    | (data[off + 15] & 0xFF) << 16 | (data[off + 16] & 0xFF) << 24;
+            if (compressedLen < 0 || originalLen < 0) {
+                throw new IOException("Corrupt LZ4 block stream: negative block length at byte " + off);
+            }
+            if (compressedLen > LZ4_BLOCK_COMPRESSED_LIMIT) {
+                throw new IOException("LZ4 block compressed length " + compressedLen
+                        + " exceeds the " + LZ4_BLOCK_COMPRESSED_LIMIT + " byte limit");
+            }
+            if (originalLen > MAX_CHUNK_PAYLOAD_BYTES) {
+                throw new IOException("LZ4 block original length " + originalLen
+                        + " exceeds the " + MAX_CHUNK_PAYLOAD_BYTES + " byte limit");
+            }
+            if (originalLen == 0 && compressedLen == 0) {
+                return; // end-of-stream marker written by LZ4BlockOutputStream.finish()
+            }
+            if (originalLen == 0 || compressedLen == 0) {
+                throw new IOException("Corrupt LZ4 block stream: zero length on one side only at byte " + off);
+            }
+            off += LZ4_BLOCK_HEADER_LENGTH + compressedLen;
+            if (off > data.length) {
+                throw new IOException("LZ4 block at byte " + (off - LZ4_BLOCK_HEADER_LENGTH - compressedLen)
+                        + " extends past the end of the chunk payload");
+            }
         }
     }
 

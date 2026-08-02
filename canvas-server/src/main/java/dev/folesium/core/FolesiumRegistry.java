@@ -68,6 +68,13 @@ public final class FolesiumRegistry {
     private static final AtomicBoolean ASCII_LOGGING_INSTALLED = new AtomicBoolean();
 
     private static Properties fileProperties;
+    /** Mtime of the config file {@link #fileProperties} was loaded under, or -1 when no file
+     *  backed the load (missing/read-only fallback). {@link #fileProperties()} re-reads the
+     *  file when the current mtime differs, so an edit made while no store was open (and the
+     *  watcher therefore stopped) is seen by the next acquire()/isEnabled() instead of a
+     *  frozen cache -- the watcher's own {@link #configFileStamp} tracks a different, committed
+     *  stamp and must not be reused here. */
+    private static long filePropertiesStamp;
     private static Boolean enabledCache;
 
     private static Thread configWatcher;
@@ -98,51 +105,69 @@ public final class FolesiumRegistry {
     private static synchronized Properties fileProperties() {
         installAsciiConsoleLogging();
         ensureUtf8Logging();
-        if (fileProperties == null) {
-            Properties p = new Properties();
-            Path file = configFilePath();
-            if (Files.isRegularFile(file)) {
+        if (fileProperties != null && !configFileChanged()) {
+            return fileProperties;
+        }
+        Properties p = new Properties();
+        Path file = configFilePath();
+        if (Files.isRegularFile(file)) {
+            try (var reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
+                p.load(reader);
+                LOGGER.log(System.Logger.Level.INFO, "Folesium: loaded configuration from {0}", file.toAbsolutePath());
+            } catch (IllegalArgumentException e) {
+                // A malformed backslash-u escape (e.g. a pasted Windows path in a value) must
+                // never abort startup; fall back to the built-in defaults. Discard anything
+                // read so far - a half-parsed prefix must not apply to a running server.
+                LOGGER.log(System.Logger.Level.ERROR,
+                        "Folesium: cannot parse {0} (malformed backslash-u escape?): {1}; using built-in defaults (enabled=false)",
+                        file.toAbsolutePath(), e.toString());
+                p = new Properties();
+            } catch (IOException e) {
+                throw new UncheckedIOException("Cannot read " + file.toAbsolutePath(), e);
+            }
+        } else {
+            // No config file present: try to auto-generate one with machine-tuned defaults.
+            // Folesium stays opt-in (enabled=false) until an operator turns it on. If the
+            // working directory is read-only or the write fails for any reason, we must NOT
+            // crash the server (Folesium is opt-in) - fall back to an in-memory default.
+            try {
+                generateDefaultConfigFile(file);
                 try (var reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
                     p.load(reader);
-                    LOGGER.log(System.Logger.Level.INFO, "Folesium: loaded configuration from {0}", file.toAbsolutePath());
-                } catch (IllegalArgumentException e) {
-                    // A malformed backslash-u escape (e.g. a pasted Windows path in a value) must
-                    // never abort startup; fall back to the built-in defaults. Discard anything
-                    // read so far - a half-parsed prefix must not apply to a running server.
-                    LOGGER.log(System.Logger.Level.ERROR,
-                            "Folesium: cannot parse {0} (malformed backslash-u escape?): {1}; using built-in defaults (enabled=false)",
-                            file.toAbsolutePath(), e.toString());
-                    p = new Properties();
-                } catch (IOException e) {
-                    throw new UncheckedIOException("Cannot read " + file.toAbsolutePath(), e);
                 }
-            } else {
-                // No config file present: try to auto-generate one with machine-tuned defaults.
-                // Folesium stays opt-in (enabled=false) until an operator turns it on. If the
-                // working directory is read-only or the write fails for any reason, we must NOT
-                // crash the server (Folesium is opt-in) - fall back to an in-memory default.
-                try {
-                    generateDefaultConfigFile(file);
-                    try (var reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
-                        p.load(reader);
-                    }
-                } catch (IllegalArgumentException e) {
-                    // Same malformed backslash-u guard as above; nearly unreachable because the
-                    // file was just generated, but a load failure must never abort the server.
-                    LOGGER.log(System.Logger.Level.ERROR,
-                            "Folesium: cannot parse generated {0} ({1}); using built-in defaults (enabled=false)",
-                            file.toAbsolutePath(), e.toString());
-                    p = new Properties();
-                } catch (RuntimeException | IOException e) {
-                    LOGGER.log(System.Logger.Level.WARNING,
-                            "Folesium: cannot create/read {0} ({1}); using built-in defaults (enabled=false)",
-                            file, e.toString());
-                    p.setProperty("enabled", "false");
-                }
+            } catch (IllegalArgumentException e) {
+                // Same malformed backslash-u guard as above; nearly unreachable because the
+                // file was just generated, but a load failure must never abort the server.
+                LOGGER.log(System.Logger.Level.ERROR,
+                        "Folesium: cannot parse generated {0} ({1}); using built-in defaults (enabled=false)",
+                        file.toAbsolutePath(), e.toString());
+                p = new Properties();
+            } catch (RuntimeException | IOException e) {
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Folesium: cannot create/read {0} ({1}); using built-in defaults (enabled=false)",
+                        file, e.toString());
+                p.setProperty("enabled", "false");
             }
-            fileProperties = p;
         }
+        // The cache is invalidated by configFileChanged() on every access: the file's mtime
+        // is compared against the stamp it was loaded under, so an edit made while no store
+        // was open (watcher stopped) is picked up by the next acquire()/isEnabled().
+        // enabledCache is derived from this Properties and must not outlive a reload of it
+        // (e.g. after the file was deleted and regenerated with the defaults).
+        fileProperties = p;
+        filePropertiesStamp = configFileTimestamp();
+        enabledCache = null;
         return fileProperties;
+    }
+
+    /**
+     * True when the config file's mtime differs from the stamp {@link #fileProperties} was
+     * loaded under, i.e. the cached properties (and {@link #enabledCache}) are stale. A
+     * missing file reads as -1, which only invalidates a cache loaded from a file that
+     * existed (the file was deleted since), never the read-only fallback cache.
+     */
+    private static boolean configFileChanged() {
+        return configFileTimestamp() != filePropertiesStamp;
     }
 
     /**
@@ -388,9 +413,15 @@ public final class FolesiumRegistry {
      * Defaults to {@code false}: an unconfigured server keeps vanilla Anvil behaviour.
      * A config file that exists but cannot be read is treated as disabled (with a WARNING):
      * Folesium is opt-in, so a config read failure never crashes the world load path.
+     *
+     * <p>The cached result is invalidated when the config file's mtime changes (see
+     * {@link #configFileChanged()}), so an operator edit that happened while no store was
+     * open -- the config watcher is stopped then -- is honoured by the next world load
+     * instead of being silently ignored by a frozen cache.</p>
      */
     public static synchronized boolean isEnabled() {
-        if (enabledCache == null) {
+        if (enabledCache == null || configFileChanged()) {
+            enabledCache = null;
             try {
                 enabledCache = boolProperty("enabled", false);
             } catch (UncheckedIOException e) {
@@ -1176,7 +1207,9 @@ public final class FolesiumRegistry {
                 db.flush();
                 // The server's save path is also where a store gets the chance to reclaim
                 // dead bytes; throttled internally, and a no-op unless a shard is bloated.
-                db.compactIfNeededThrottled();
+                // The save thread is never the group-commit flusher, so a pass it drives
+                // must not abort when the store's flusher is retired.
+                db.compactIfNeededThrottled(false);
             } catch (RuntimeException ex) {
                 LOGGER.log(System.Logger.Level.ERROR, "Folesium: flush failed " + db.directory(), ex);
             }

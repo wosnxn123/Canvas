@@ -128,10 +128,15 @@ public final class FolesiumPlayerFiles {
             // `true` means "there is data to read" in the store; there is no
             // vanilla-file fallback (no lazy migration).
             return load(t) != null;
-        } catch (IOException e) {
-            // The store is the only source of truth while Folesium is active (no lazy
-            // migration), so a read failure means "no data" -- never fall back to the
-            // vanilla file, which would resurrect pre-conversion data.
+        } catch (IOException | RuntimeException e) {
+            // The engine reports store failures as FolesiumException (a
+            // RuntimeException) and the store is the only source of truth while Folesium
+            // is active (no lazy migration), so any read failure means "no data" --
+            // never fall back to the vanilla file, which would resurrect pre-conversion
+            // data. WARN so a failing store is visible instead of silently behaving
+            // like an empty one.
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: failed to read stored player JSON for " + t.player(), e);
             return false;
         }
     }
@@ -142,7 +147,18 @@ public final class FolesiumPlayerFiles {
         if (t == null) {
             return Files.newBufferedReader(path, StandardCharsets.UTF_8);
         }
-        String json = load(t);
+        final String json;
+        try {
+            json = load(t);
+        } catch (RuntimeException e) {
+            // The engine reports store failures as FolesiumException (a RuntimeException),
+            // which the vanilla call site does not catch. Surface it as an IOException --
+            // this replacement's declared contract -- so the caller's existing IOException
+            // handling applies.
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: failed to load stored player JSON for " + t.player(), e);
+            throw new IOException("failed to load stored player JSON for " + t.player(), e);
+        }
         if (json == null) {
             throw new java.io.FileNotFoundException("no stored player JSON for " + t.player());
         }

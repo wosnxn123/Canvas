@@ -130,9 +130,10 @@ public final class FolesiumDatabase implements AutoCloseable {
     private final Object flusherLock = new Object();
     /**
      * The group-commit thread, or {@code null} when group commit is not running.
-     * Volatile because the compaction pass reads it without {@link #flusherLock} (the
-     * pass-start snapshot and each per-iteration checkpoint below); every write happens
-     * under the lock, so a volatile read always sees the latest retirement decision.
+     * Volatile because the compaction pass re-reads it without {@link #flusherLock} at
+     * each per-iteration checkpoint (and {@link #flushLoop} reads it once at loop start);
+     * every write happens under the lock, so a volatile read always sees the latest
+     * retirement decision.
      */
     private volatile Thread flusher;
 
@@ -593,7 +594,7 @@ public final class FolesiumDatabase implements AutoCloseable {
      *       new interval immediately instead of after the old one elapses.</li>
      *   <li>{@code compactRatio} / {@code compactMinBytes} / {@code verifyChecksums} /
      *       {@code workloadCompaction} / {@code compactIoLimit} - read per operation (the
-     *       last two by {@link #compactIfNeeded()}).</li>
+     *       last two by {@link #compactIfNeeded(boolean)}).</li>
      *   <li>{@code shardCount} - physical; recorded as pending and applied by the automatic
      *       reshard on the next store open. The live store keeps its current layout.</li>
      *   <li>{@code indexCacheBytes} / {@code indexMode} / {@code dictionaryCompression} -
@@ -864,13 +865,26 @@ public final class FolesiumDatabase implements AutoCloseable {
      * Rewrites every shard that currently needs it (see {@link ShardFile#needsCompaction()}),
      * ordered by workload priority and rate-limited by {@code compactIoLimit}.
      *
+     * @param callerIsFlusher whether the calling thread is the {@link #flusher} - a
+     *                        flusher-class caller is one whose retirement must stop the
+     *                        pass (see the per-iteration checkpoint below), while a
+     *                        non-flusher caller (the server save thread via
+     *                        {@link FolesiumRegistry#flushAll()}) legitimately runs a
+     *                        pass on its own thread and must never abort on retirement.
+     *                        The classification is captured by the caller, never sampled
+     *                        here: the group-commit thread captures it once at
+     *                        {@link #flushLoop()} start (its identity is stable for its
+     *                        whole lifetime), so a retirement landing between the loop's
+     *                        checkpoint and this pass cannot misclassify a retired
+     *                        flusher as a non-flusher caller.
      * @return {@code true} when the pass ran to completion, {@code false} when it aborted
      *         early at the retirement/closed checkpoint (or was never started because the
-     *         store is closed) - the caller ({@link #compactIfNeededThrottled()}) treats an
-     *         aborted pass as if no check ran, so the next driver retries immediately
-     *         instead of burning the five-minute throttle on a pass that stopped early
+     *         store is closed) - the caller ({@link #compactIfNeededThrottled(boolean)})
+     *         treats an aborted pass as if no check ran, so the next driver retries
+     *         immediately instead of burning the five-minute throttle on a pass that
+     *         stopped early
      */
-    public boolean compactIfNeeded() {
+    public boolean compactIfNeeded(boolean callerIsFlusher) {
         if (closed.get()) {
             return false; // do not touch shards that close() is tearing down
         }
@@ -895,16 +909,14 @@ public final class FolesiumDatabase implements AutoCloseable {
         }
         long ioLimit = config.compactIoLimit();
         long bytesSinceSleep = 0;
-        // Whether THIS caller started the pass as the group-commit thread. The snapshot
-        // only classifies the caller - a flusher-class caller is one whose retirement
-        // must stop the pass - while each per-iteration checkpoint in the loop below
-        // re-reads the volatile flusher field, so the "still the flusher" decision is
-        // always made against the latest state. A non-flusher caller (the server save
-        // thread via {@link FolesiumRegistry#flushAll()}, which also drives
-        // {@link #compactIfNeededThrottled()}) legitimately runs this pass on its own
-        // thread and is never the flusher, so the identity comparison stays false for it
-        // and never aborts the pass.
-        boolean callerIsFlusher = Thread.currentThread() == flusher;
+        // The caller's flusher classification arrived as a parameter (see the javadoc): a
+        // flusher-class caller is one whose retirement must stop the pass, while each
+        // per-iteration checkpoint below re-reads the volatile flusher field, so the "still
+        // the flusher" decision is always made against the latest state. A non-flusher
+        // caller (the server save thread via {@link FolesiumRegistry#flushAll()}, which
+        // also drives {@link #compactIfNeededThrottled(boolean)}) legitimately runs this
+        // pass on its own thread and is never the flusher, so the identity comparison
+        // stays false for it and never aborts the pass.
         for (ShardFile s : candidates) {
             // Retirement/closed checkpoint on every iteration, BEFORE the next compact(): a
             // store that was closed (close() is tearing shards down) must not keep compacting,
@@ -917,9 +929,9 @@ public final class FolesiumDatabase implements AutoCloseable {
             // `sleepMillis > 0` branch was unreachable with the default configuration, so a
             // store closed during an unlimited pass kept compacting into channels close() was
             // closing. The flusher field is volatile (all writes are under flusherLock), so this
-            // re-read at every iteration - not the pass-start snapshot alone - always sees the
-            // latest retirement decision. Abort the pass here - before compact(), whose channel
-            // I/O may hit channels close() is closing.
+            // re-read at every iteration always sees the latest retirement decision. Abort the
+            // pass here - before compact(), whose channel I/O may hit channels close() is
+            // closing.
             if (closed.get() || (callerIsFlusher && flusher != Thread.currentThread())) {
                 // Aborted early: a store that was closed (close() is tearing shards down) or a
                 // flusher that was retired/replaced must not keep compacting. Report the early
@@ -967,7 +979,18 @@ public final class FolesiumDatabase implements AutoCloseable {
             new java.util.concurrent.atomic.AtomicLong(System.nanoTime());
 
     /**
-     * {@link #compactIfNeeded()}, rate-limited to once every five minutes per store.
+     * Whether the previous {@link #compactIfNeededThrottled(boolean)} attempt ended in an
+     * exception. Drives the conditional throttle reset in the exception path: a fresh
+     * failure (the previous attempt did not throw) resets the slot so the next driver
+     * retries immediately, while a failure directly after another failure skips the reset
+     * so the five-minute interval bounds a persistently failing pass instead of retrying
+     * it on every group-commit wakeup. Volatile: written by whichever driver attempted
+     * last, read by the next.
+     */
+    private volatile boolean lastCompactAttemptThrew;
+
+    /**
+     * {@link #compactIfNeeded(boolean)}, rate-limited to once every five minutes per store.
      *
      * <p>Compaction has to be driven by <em>something</em>: an append-only log that is never
      * compacted grows without bound and read amplification grows with it. Rather than relying
@@ -977,9 +1000,11 @@ public final class FolesiumDatabase implements AutoCloseable {
      * ({@code compactMinBytes} / {@code compactRatio}) mean a rewrite only happens for shards
      * that really are mostly dead bytes.</p>
      *
+     * @param callerIsFlusher the caller's flusher classification, forwarded to
+     *                        {@link #compactIfNeeded(boolean)} - see its javadoc
      * @return {@code true} if the check ran (not that anything was compacted)
      */
-    public boolean compactIfNeededThrottled() {
+    public boolean compactIfNeededThrottled(boolean callerIsFlusher) {
         if (closed.get()) {
             return false;
         }
@@ -989,7 +1014,11 @@ public final class FolesiumDatabase implements AutoCloseable {
             return false;
         }
         try {
-            if (!compactIfNeeded()) {
+            boolean completed = compactIfNeeded(callerIsFlusher);
+            // A completed or cleanly-aborted attempt ends any failure streak: the next
+            // exception is a fresh failure and resets the slot (see the catch below).
+            lastCompactAttemptThrew = false;
+            if (!completed) {
                 // The pass aborted before rewriting every candidate - the retirement/closed
                 // checkpoint fired, or the store was closed the moment the pass started. The
                 // five-minute throttle must not be spent on a pass that never ran: reset the
@@ -1001,11 +1030,21 @@ public final class FolesiumDatabase implements AutoCloseable {
                 lastCompactCheck.compareAndSet(now, 0);
             }
         } catch (RuntimeException | Error e) {
-            // A pass that threw did not run to completion either - symmetric with the abort
-            // path above: reset the stamp (CAS) so the next driver retries immediately instead
-            // of waiting out the interval, then propagate the failure to the caller (the
-            // group-commit loop or {@link FolesiumRegistry#flushAll()}).
-            lastCompactCheck.compareAndSet(now, 0);
+            // A pass that threw did not run to completion either - but the reset is now
+            // CONDITIONAL, unlike the abort path above. A fresh failure (the previous attempt
+            // did not throw) reopens the slot for an immediate retry: the pass never ran, so
+            // the interval must not be burned on a transient failure. A failure directly after
+            // another failure must KEEP the stamp instead: resetting would make the next driver
+            // (the group-commit loop, which wakes every batchFlushMillis - 500 ms by default)
+            // retry a persistently failing pass on every wakeup - a tight retry loop that burns
+            // CPU and spams the error log. With the reset skipped the five-minute boundary
+            // holds, so a continuous failure is retried at most once per interval. Then
+            // propagate the failure to the caller (the group-commit loop or
+            // {@link FolesiumRegistry#flushAll()}).
+            if (!lastCompactAttemptThrew) {
+                lastCompactCheck.compareAndSet(now, 0);
+            }
+            lastCompactAttemptThrew = true;
             throw e;
         }
         return true;
@@ -1076,6 +1115,18 @@ public final class FolesiumDatabase implements AutoCloseable {
     }
 
     private void flushLoop() {
+        // Whether this thread is the group-commit flusher - captured ONCE at loop start
+        // instead of being sampled at each compaction pass start. The thread's identity is
+        // stable for its whole lifetime: startFlusherIfNeeded registers it as `flusher`
+        // before start(), and any retirement (durability switched away from BATCH, store
+        // close) makes the loop exit at its next checkpoint without another pass. Sampling
+        // at pass start instead would let a retirement landing between this loop's own
+        // checkpoint and the pass misclassify a retired flusher as a non-flusher caller,
+        // and the pass would then keep compacting - potentially beside a replacement
+        // flusher's own pass - instead of aborting at its next iteration. (The comparison
+        // can already be false only if the thread was retired before its first statement;
+        // the loop's first checkpoint then exits without ever running a pass.)
+        boolean amFlusher = flusher == Thread.currentThread();
         try {
             while (true) {
                 // Clear any stray interrupt that landed outside the wait() below (e.g. an
@@ -1133,7 +1184,7 @@ public final class FolesiumDatabase implements AutoCloseable {
                     flush();
                     // Off the region threads and rate-limited: this is the only thing that
                     // keeps an append-only store from growing without bound.
-                    compactIfNeededThrottled();
+                    compactIfNeededThrottled(amFlusher);
                 } catch (RuntimeException e) {
                     LOGGER.log(System.Logger.Level.ERROR, "Folesium group-commit failed for " + dir, e);
                 }

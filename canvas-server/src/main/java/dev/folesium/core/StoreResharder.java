@@ -444,6 +444,12 @@ final class StoreResharder {
                 try (Stream<Path> files = Files.list(staging)) {
                     List<Path> staged = files.filter(Files::isRegularFile)
                             .filter(p -> !COMMIT_MARKER.equals(p.getFileName().toString()))
+                            // Never move a crashed hint-write's staging residue into the store
+                            // root: ShardFile.writeHint stages to '<shard>.flog.fidx.tmp' before
+                            // its atomic rename, so a .fidx.tmp left in staging is inert crash
+                            // debris (nothing reads it, and in the store root it would only
+                            // accumulate); it is deleted with the staging tree below.
+                            .filter(p -> !p.getFileName().toString().endsWith(".fidx.tmp"))
                             .toList();
                     for (Path p : staged) {
                         Files.move(p, dir.resolve(p.getFileName().toString()),
@@ -716,17 +722,18 @@ final class StoreResharder {
      * files - else, once the backup is empty, the surviving shard files in {@code dir},
      * which are restored old files sharing the same count), and every shard file in
      * {@code dir} whose index is beyond that count (>= oldCount) cannot belong to the
-     * old layout, so it is an aborted new-layout leftover and is removed together with
-     * its index hint. The name set this replaces shrank across re-entries - a previous
+     * old layout, so it is an aborted new-layout leftover and is removed. The name set this replaces shrank across re-entries - a previous
      * invocation had moved some old files back, so their names were no longer in the
      * backup to be captured - which made a re-entry misidentify already-restored old
      * files as leftovers and delete the only surviving copies of their records. The
-     * header-derived count is stable across re-entries, and so is the orphan-hint
-     * cleanup that follows: a hint ({@code .fidx}) is dropped only when its shard index
-     * is beyond the old count <em>and</em> no shard file of that name exists in
-     * {@code dir} - a hint below the old count, or one whose old shard file is present
-     * (restored by this or a previous invocation), is kept, so a re-entry never deletes
-     * a hint that was already moved back.</p>
+     * header-derived count is stable across re-entries. Index hints ({@code .fidx}) are
+     * handled by wholesale replacement rather than a per-hint criterion: every hint in
+     * {@code dir} is deleted BEFORE the backup is moved back (hints are a rebuildable
+     * cache, so deleting them is always safe), and the backup's old-layout hints - which
+     * always match the restored logs - land on the emptied slots. This closes the orphan
+     * window a selective criterion leaves open: a new-layout hint at an index below the
+     * old count would otherwise survive, paired with the restored old shard log it does
+     * not describe, and misdirect reads until it is regenerated.</p>
      *
      * <p>Idempotent across crashes: a previous invocation may already have moved every
      * old shard back into {@code dir} and then crashed before the cleanup. The backup
@@ -747,12 +754,29 @@ final class StoreResharder {
         // The old layout's shard count, derived from file headers BEFORE the move-back
         // invalidates the backup paths. -1 when no readable header exists anywhere.
         int oldCount = oldLayoutShardCount(dir, backupShards);
+        // 0. Drop EVERY index hint ({@code *.fidx}) in dir before anything is moved back.
+        //    Hints are a rebuildable cache (regenerated from the logs), so deleting them
+        //    is always safe - and it is what closes the orphan window a selective
+        //    criterion cannot: a new-layout hint at an index BELOW the old count (one the
+        //    aborted swap wrote beside a new shard whose index the old layout also uses)
+        //    would otherwise survive the leftover cleanup below, paired with the restored
+        //    old shard log it does not describe, and misdirect reads until it is
+        //    regenerated. With every hint gone up front, the only hints that can remain
+        //    are the old-layout ones moved back from the backup below, which always match
+        //    the restored logs.
+        for (Path p : listShardFiles(dir)) {
+            if (p.getFileName().toString().endsWith(".fidx")) {
+                Files.deleteIfExists(p);
+            }
+        }
         // 1. Move every old shard file back from the backup FIRST, with REPLACE_EXISTING:
         //    an old file always wins over a same-named partial new file. On a re-entry
         //    (a previous invocation crashed mid-restore) this moves back whatever is
         //    still left there; the files already restored stay in place. The MOVED marker
         //    stays behind - it is not a shard file and must not be moved into the store
         //    root; the whole backup tree is dropped below, taking the marker with it.
+        //    Old-layout hints come back with their shard files (the backup holds each pair
+        //    as one set), landing on the slots step 0 just emptied.
         for (Path p : backupShards) {
             Files.move(p, dir.resolve(p.getFileName().toString()),
                     StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
@@ -762,35 +786,16 @@ final class StoreResharder {
         //    index, so any such file belongs to the aborted new layout; files already
         //    restored (by this or a previous invocation) all sit below the count and are
         //    kept, so a mid-restore crash followed by a retry never loses the records
-        //    already moved back. When the old count cannot be established (no readable
-        //    header anywhere), be conservative and delete nothing.
+        //    already moved back. (No hint cleanup is needed here: step 0 already removed
+        //    every hint, and the backup - which only ever holds old-layout files - has no
+        //    hint at an index beyond the old count.) When the old count cannot be
+        //    established (no readable header anywhere), be conservative and delete
+        //    nothing.
         if (oldCount > 0) {
             for (Path p : listShardFiles(dir)) {
                 String name = p.getFileName().toString();
                 Matcher m = SHARD_FILE.matcher(name);
                 if (m.matches() && Integer.parseInt(m.group(2)) >= oldCount) {
-                    Files.deleteIfExists(p);
-                    // Drop the rebuildable index hint of a removed shard with it.
-                    Files.deleteIfExists(dir.resolve(name + ".fidx"));
-                }
-            }
-            // Orphaned new-layout hints: a hint whose shard file was removed above (its
-            // index is beyond the old count and no shard file of that name exists in dir)
-            // must not survive to misdirect readers against the restored old shard at the
-            // same index. The criterion reads only the stable on-disk state - a hint
-            // below the old count is kept, and a hint whose old shard file is present in
-            // dir was moved back by this or a previous invocation (the pair must stay
-            // together) - never this invocation's backup snapshot, so a re-entry after a
-            // mid-restore crash cannot delete hints a previous invocation already restored.
-            for (Path p : listShardFiles(dir)) {
-                String n = p.getFileName().toString();
-                if (!n.endsWith(".fidx")) {
-                    continue;
-                }
-                String flogName = n.substring(0, n.length() - ".fidx".length());
-                Matcher m = SHARD_FILE.matcher(flogName);
-                if (m.matches() && Integer.parseInt(m.group(2)) >= oldCount
-                        && !Files.isRegularFile(dir.resolve(flogName))) {
                     Files.deleteIfExists(p);
                 }
             }

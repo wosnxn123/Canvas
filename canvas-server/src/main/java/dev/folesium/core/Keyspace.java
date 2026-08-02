@@ -56,7 +56,7 @@ public final class Keyspace implements AutoCloseable {
     /**
      * Set by {@link #close()} before any shard is torn down; the maintenance passes
      * guard on it so they never touch shards close() is closing (same contract as
-     * {@link FolesiumDatabase#compactIfNeeded()}).
+     * {@link FolesiumDatabase#compactIfNeeded(boolean)}).
      */
     private volatile boolean closed;
     /**
