@@ -240,7 +240,8 @@ public final class WorldConversionService {
         if (kept.isEmpty()) {
             return;
         }
-        System.out.println("Folesium: no files were deleted. The now-redundant Folesium stores were kept as a backup:");
+        System.out.println("Folesium: no Folesium store files were deleted. The now-redundant Folesium stores were");
+        System.out.println("Folesium: kept as a backup:");
         for (Path p : kept) {
             System.out.println("    " + p);
         }
@@ -381,7 +382,7 @@ public final class WorldConversionService {
     private static boolean isWellKnownDataDir(Path dir) {
         String name = dir.getFileName().toString();
         return name.equals("region") || name.equals("entities") || name.equals("poi")
-                || name.equals(PlayerDataConverter.DIR_PLAYERS_26)
+                || name.equalsIgnoreCase(PlayerDataConverter.DIR_PLAYERS_26)
                 || name.equals(FolesiumDatabase.STORE_DIR_NAME);
     }
 

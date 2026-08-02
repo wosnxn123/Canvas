@@ -155,7 +155,7 @@ public final class FolesiumPlayerStorage implements AutoCloseable {
         // playerdata directory), not the world root itself. Ascend one level so the
         // legacy <world>/folesium store of a pre-26-converted world is found too; a
         // caller that passes the true world root is unaffected.
-        if (DIR_PLAYERS_26.equals(root.getFileName() == null ? null : root.getFileName().toString())) {
+        if (DIR_PLAYERS_26.equalsIgnoreCase(root.getFileName() == null ? null : root.getFileName().toString())) {
             Path parent = root.getParent();
             if (parent != null) {
                 root = parent;

@@ -468,20 +468,23 @@ public final class PageIndex implements AutoCloseable {
             return !Files.exists(pagePath(regionX, regionZ));
         }
         try {
-            Files.deleteIfExists(pagePath(regionX, regionZ));
-            // The backing file is gone, so the next pageFor builds a fresh, empty page that
-            // knows nothing about the records written before this session - in PAGE mode
-            // every other live chunk of the region would then read as absent. The HashMap
-            // is always maintained on the write path (ShardFile.put's index.put runs
-            // unconditionally), so mark the region damaged: PAGE-mode readers fall back to
-            // the HashMap for it. The marker stays until the open-time rebuild completes
-            // ({@link #clearAllDamage()} clears it), {@link #invalidateAll()} or
-            // {@link #close()} - a runtime single-slot write cannot prove the page
-            // complete, so {@link #updateSlot} never clears it. The read-only branch
-            // above marks the region too: its corrupt file stays in place, so the page
-            // stays untrusted for the whole session and PAGE-mode readers fall back to
-            // the HashMap there as well.
+            // Mark the region damaged BEFORE deleting the file: the marker is what makes
+            // PAGE-mode readers fall back to the HashMap (pageOnly returns false for a
+            // marked region), so deleting first would leave a window in which the corrupt
+            // file is already gone but the region not yet marked - a concurrent pageFor
+            // would then build a fresh, empty page that knows nothing about the records
+            // written before this session, and in PAGE mode every other live chunk of the
+            // region would read as absent. The HashMap is always maintained on the write
+            // path (ShardFile.put's index.put runs unconditionally), so marking first
+            // routes every read through it for the whole repair. The marker stays until
+            // the open-time rebuild completes ({@link #clearAllDamage()} clears it),
+            // {@link #invalidateAll()} or {@link #close()} - a runtime single-slot write
+            // cannot prove the page complete, so {@link #updateSlot} never clears it.
+            // The read-only branch above marks the region too: its corrupt file stays in
+            // place, so the page stays untrusted for the whole session and PAGE-mode
+            // readers fall back to the HashMap there as well.
             damagedRegions.add(pack(regionX, regionZ));
+            Files.deleteIfExists(pagePath(regionX, regionZ));
             return true;
         } catch (IOException e) {
             // The corrupt file could not be removed, so it stays in place and a fresh

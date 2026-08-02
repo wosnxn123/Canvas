@@ -1271,8 +1271,17 @@ public final class ShardFile implements AutoCloseable {
      * successful compaction). The swap is only declared complete after the compacted file
      * has been reopened; if that reopen fails, the pre-compaction data is copied back over
      * the compacted file and the shard keeps serving its old state. A failure before the
-     * swap leaves the original channel untouched, so a shard that could not be compacted
+     * the swap leaves the original channel untouched, so a shard that could not be compacted
      * stays fully usable.</p>
+     *
+     * <p>Once the swap is complete, the region pages are invalidated and deleted (see
+     * {@link PageIndex#invalidateAll()} and {@link PageIndex#deleteAllPageFiles()}): every
+     * entry is stale because the compacted log assigns new offsets to all live records.
+     * While the index is invalidated, {@link #pageOnly} reports false, so reads - AUTO and
+     * PAGE modes alike - fall back to the HashMap, which the write path maintains
+     * unconditionally; PAGE-mode reads never treat keys as absent during the invalidation.
+     * The pages stay empty until the next open rebuilds them from the compaction-anchored
+     * log replay.</p>
      */
     public void compact() {
         lock.writeLock().lock();
@@ -1370,11 +1379,13 @@ public final class ShardFile implements AutoCloseable {
             swapped = true;
             if (pageIndex != null) {
                 // The compacted log assigns new offsets to every live record, so every page
-                // entry is stale; reads fall back to the HashMap (AUTO) or treat the key as
-                // absent (PAGE) while the index is invalidated. The write path leaves the
-                // pages alone during the invalidation (updateSlot is a no-op on an
-                // invalidated index), so the pages stay empty until the next open rebuilds
-                // them from the compaction-anchored log replay (buildPagesFromCompactionAnchor).
+                // entry is stale. While the index is invalidated pageOnly() reports false,
+                // so reads fall back to the HashMap in AUTO and PAGE modes alike - PAGE
+                // never treats keys as absent here (the HashMap is always maintained on the
+                // write path). The write path leaves the pages alone during the
+                // invalidation (updateSlot is a no-op on an invalidated index), so the
+                // pages stay empty until the next open rebuilds them from the
+                // compaction-anchored log replay (buildPagesFromCompactionAnchor).
                 pageIndex.invalidateAll();
                 // Delete the stale page files immediately instead of waiting for close():
                 // a crash between the swap above and close() used to leave page files

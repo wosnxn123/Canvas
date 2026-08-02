@@ -1005,15 +1005,33 @@ final class StoreResharder {
             // only after all of its entries were handled: files not named dict.bin are
             // deleted, and a directory is pruned iff it no longer contains anything (i.e.
             // it held no dict.bin). Directories still holding their dict.bin survive intact.
+            List<Path> survivingDirs = new ArrayList<>();
             for (Path p : walk.sorted(Comparator.reverseOrder()).toList()) {
                 if (Files.isDirectory(p)) {
                     try (Stream<Path> children = Files.list(p)) {
                         if (children.findAny().isEmpty()) {
                             Files.deleteIfExists(p);
+                        } else {
+                            survivingDirs.add(p);
                         }
                     }
                 } else if (!DICT_FILE.equals(p.getFileName().toString())) {
                     Files.deleteIfExists(p);
+                }
+            }
+            // Best-effort directory fsync so the deletions survive a power cut: page files
+            // are unlinked, not overwritten, so without it a crash could resurrect stale
+            // pages pointing at the wrong records in the new layout. The idx root covers
+            // the unlinks of pruned subdirectories (and of files directly under it); each
+            // surviving subdirectory covers the deletions inside it. fsyncDirectory
+            // swallows failures - Windows cannot open directories for reading - matching
+            // its use everywhere else.
+            if (Files.isDirectory(idx)) {
+                fsyncDirectory(idx);
+                for (Path d : survivingDirs) {
+                    if (!idx.equals(d)) {
+                        fsyncDirectory(d);
+                    }
                 }
             }
         } catch (IOException e) {

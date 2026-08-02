@@ -27,6 +27,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.channels.NonWritableChannelException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
@@ -87,6 +88,7 @@ public final class AnvilRegionFile implements Closeable {
 
     private final Path path;
     private final FileChannel channel;
+    private final boolean readOnly;
     private final int[] locations = new int[CHUNKS_PER_REGION];
     private final int[] timestamps = new int[CHUNKS_PER_REGION];
     private final BitSet usedSectors = new BitSet();
@@ -114,6 +116,7 @@ public final class AnvilRegionFile implements Closeable {
 
     private AnvilRegionFile(Path path, boolean readOnly) throws IOException {
         this.path = path;
+        this.readOnly = readOnly;
         FileChannel opened = null;
         try {
             opened = FileChannel.open(path, readOnly
@@ -203,6 +206,9 @@ public final class AnvilRegionFile implements Closeable {
         int idx = indexOf(localX, localZ);
         int oldLoc = locations[idx];
         if (oldLoc == 0) {
+            if (readOnly) {
+                throw new NonWritableChannelException();
+            }
             return;
         }
         int oldSectorOff = oldLoc >>> 8;
@@ -536,6 +542,9 @@ public final class AnvilRegionFile implements Closeable {
     }
 
     public void sync() throws IOException {
+        if (readOnly) {
+            throw new NonWritableChannelException();
+        }
         channel.force(false);
     }
 

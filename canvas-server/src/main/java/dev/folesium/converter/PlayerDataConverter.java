@@ -40,6 +40,7 @@ import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * Converts a world's player data between the vanilla per-player files
@@ -483,7 +484,30 @@ public final class PlayerDataConverter {
         Files.createDirectories(out);
         long[] inc = writeMapping(out, ks, m);
         prunePlayerFilesMissingFromStore(out, ks, m.extension());
+        cleanStagingAndBackupSiblings(out);
         return inc;
+    }
+
+    /**
+     * Best-effort removal of {@code .folesium-staging-*} / {@code .folesium-backup-*}
+     * siblings of {@code out} left behind by an earlier backup-mode run or an interrupted
+     * conversion. Only directories whose name starts with {@code <out-name>.folesium-} are
+     * touched, so unrelated data is never deleted; failures are ignored (the leftovers are
+     * inert and the backup-mode paths prune their own trees).
+     */
+    private static void cleanStagingAndBackupSiblings(Path out) {
+        Path parent = out.getParent();
+        if (parent == null) {
+            return;
+        }
+        String prefix = out.getFileName().toString() + ".folesium-";
+        try (Stream<Path> files = Files.list(parent)) {
+            files.filter(Files::isDirectory)
+                    .filter(p -> p.getFileName().toString().startsWith(prefix))
+                    .forEach(PlayerDataConverter::deleteTreeQuietly);
+        } catch (IOException ignored) {
+            // best-effort only
+        }
     }
 
     /**
