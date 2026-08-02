@@ -201,24 +201,25 @@ final class StoreResharder {
             }
         }
         if (!hasStaging && Files.isRegularFile(movedMarker)) {
-            // MOVED alone does not prove the swap completed: a crash mid-phase-3 can leave a
-            // staged shard lost, and an earlier open that discarded the staging directory
-            // would have recreated the missing shard empty. Only delete the backup - which
-            // may be the only surviving copy of those records - once the on-disk layout is
-            // the complete new set, i.e. the files uniformly hold the shard count the
-            // metadata names. Header-only shard files (empty, eagerly recreated on open) do
-            // not count as present: they mean the swap was never finished, so the backup
-            // (the only surviving copy of those records) must be kept.
+            // MOVED alone (staging gone): staging is only deleted by finishSwap after every
+            // staged shard was moved into dir and the directory fsynced, so the swap is
+            // already finished and the on-disk files are the complete new set. Header-only
+            // (legitimately empty) shard files are the finished swap's own output - a growth
+            // reshard leaves the empty shards of the new layout header-only - so they count
+            // as present here, and presence of all the shards the metadata names is enough
+            // to delete the backup. (Eager header-only recreation on open cannot mask an
+            // unfinished swap: recovery resolves the layout before any keyspace opens, so a
+            // state with staging gone is always a finished swap, never a recreated empty.)
             Integer metaCount = metadataShardCount(dir);
-            int fileCount = consistentPopulatedShardCount(dir);
+            int fileCount = consistentOnDiskShardCount(dir);
             if (metaCount != null && fileCount == metaCount) {
                 LOGGER.log(System.Logger.Level.INFO,
                         "Folesium: removing the backup of a completed reshard of {0}", dir);
                 deleteRecursively(backup);
             } else {
                 LOGGER.log(System.Logger.Level.WARNING,
-                        "Folesium: keeping the backup {0} of {1}: the reshard swap was never "
-                                + "completed (shard files hold {2}, metadata says {3})",
+                        "Folesium: keeping the backup {0} of {1}: the shard files hold {2} "
+                                + "shards but the metadata says {3}",
                         backup, dir, fileCount < 0 ? "no consistent layout" : Integer.toString(fileCount),
                         metaCount == null ? "nothing" : Integer.toString(metaCount));
             }
@@ -493,9 +494,21 @@ final class StoreResharder {
      * {@code staging}, i.e. the staged-to-dir move was interrupted rather than lost and
      * {@link #finishSwap} can drive it to completion. Only consulted once the {@code MOVED}
      * marker exists, so the shard files in {@code dir} are freshly swapped-in new files
-     * rather than the old set. A shard only counts as present when it actually holds
-     * records (see {@link #isPopulatedShard}): a header-only file is not evidence the
-     * swap reached that shard.
+     * rather than the old set.
+     *
+     * <p>Two completion rules apply. While staging still holds shard files of a keyspace
+     * the swap is provably unfinished there, and a shard only counts as swapped when
+     * {@code dir} actually holds its records (see {@link #isPopulatedShard}): a header-only
+     * file in {@code dir} may be an eagerly recreated empty shard after a crash mid-swap,
+     * which must not make a partial new layout look complete (that would let the backup -
+     * the only surviving copy of the records the missing shards should have held - be
+     * deleted). Once staging holds no shard file of a keyspace, every staged file has
+     * already been moved into {@code dir} - {@link #finishSwap} only empties staging after
+     * the last move and the directory fsync - so the swap is finished for that keyspace
+     * and mere presence of all {@code count} shards in {@code dir}, even header-only (the
+     * legitimate output of a finished growth reshard), proves it. Judging that state
+     * complete is what stops a crash in the cleanup window (between emptying and deleting
+     * staging) from rolling a finished swap back.
      */
     private static boolean completeNewLayout(Path dir, Path staging, int count) {
         try {
@@ -503,6 +516,18 @@ final class StoreResharder {
             names.addAll(discoverKeyspaces(dir));
             names.addAll(discoverKeyspaces(staging));
             for (String name : names) {
+                if (countStagedShardFiles(staging, name) == 0) {
+                    // Staging holds no shard file of this keyspace: all of them were moved
+                    // into dir before staging was emptied, so the swap reached every shard.
+                    // Header-only files count here - they are the moved-in output of the
+                    // finished swap, not eagerly recreated empties (see the method javadoc).
+                    for (int i = 0; i < count; i++) {
+                        if (!Files.isRegularFile(dir.resolve(String.format("%s-%04d.flog", name, i)))) {
+                            return false;
+                        }
+                    }
+                    continue;
+                }
                 for (int i = 0; i < count; i++) {
                     Path dirShard = dir.resolve(String.format("%s-%04d.flog", name, i));
                     Path stagingShard = staging.resolve(String.format("%s-%04d.flog", name, i));
@@ -663,10 +688,16 @@ final class StoreResharder {
         }
     }
 
-    /** Idempotently records {@code store.shardCount = newCount} (see {@link #recover}). */
+    /**
+     * Idempotently records {@code store.shardCount = newCount} (see {@link #recover}),
+     * preserving the existing {@code store.previousShardCount} when the metadata already
+     * names the new count - a previous recovery pass made it durable before its swap was
+     * interrupted, and rewriting it would clobber the record of the pre-reshard count
+     * with the same value.
+     */
     private static void applyShardCountMetadata(Path dir, int newCount) {
         Path meta = dir.resolve(FolesiumDatabase.METADATA_FILE);
-        int oldCount = newCount;
+        Integer oldCount = null;
         if (Files.isRegularFile(meta)) {
             Properties p = new Properties();
             try (var r = Files.newBufferedReader(meta, StandardCharsets.UTF_8)) {
@@ -679,12 +710,17 @@ final class StoreResharder {
                 try {
                     oldCount = Integer.parseInt(raw.trim());
                 } catch (RuntimeException ignore) {
-                    // keep newCount as both old and new; metadata remains complete.
+                    // treat as missing; the rewrite below repairs the metadata either way.
                 }
             }
         }
+        if (oldCount != null && oldCount == newCount) {
+            // store.shardCount already names the new layout; leave the metadata untouched
+            // so store.previousShardCount keeps the true pre-reshard count.
+            return;
+        }
         try {
-            updateShardCountMetadata(meta, oldCount, newCount);
+            updateShardCountMetadata(meta, oldCount == null ? newCount : oldCount, newCount);
         } catch (IOException e) {
             throw new FolesiumException("Cannot update shard count metadata in " + dir, e);
         }
@@ -765,16 +801,6 @@ final class StoreResharder {
      */
     private static int consistentOnDiskShardCount(Path dir) {
         return consistentShardCount(dir, Files::isRegularFile);
-    }
-
-    /**
-     * Like {@link #consistentOnDiskShardCount}, but header-only shard files do not count:
-     * a shard only proves the reshard swap reached it when it actually holds records. Used
-     * by the recovery guard that decides whether the backup (the only surviving copy of
-     * the records) may be deleted.
-     */
-    private static int consistentPopulatedShardCount(Path dir) {
-        return consistentShardCount(dir, StoreResharder::isPopulatedShard);
     }
 
     private static int consistentShardCount(Path dir, java.util.function.Predicate<Path> include) {

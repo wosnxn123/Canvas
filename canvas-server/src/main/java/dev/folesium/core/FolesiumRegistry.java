@@ -408,6 +408,16 @@ public final class FolesiumRegistry {
                     d.compression());
             compression = d.compression();
         }
+        // Cross-check with the dictionary flag (FolesiumConfig forbids codec 3 without
+        // dictionaryCompression): an operator typo of compression=ZSTD_DICT with the flag
+        // off must fall back like every other unusable value here, not abort server start
+        // (and never reach ShardFile's per-record ZSTD_DICT failure).
+        boolean dictionaryCompression = boolProperty("dictionaryCompression", d.dictionaryCompression());
+        if (compression == FolesiumConfig.Compression.ZSTD_DICT && !dictionaryCompression) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: compression=ZSTD_DICT requires dictionaryCompression=true, using ZSTD");
+            compression = FolesiumConfig.Compression.ZSTD;
+        }
         int shards = intProperty("shards", d.shardCount());
         if (Integer.bitCount(shards) != 1 || shards < 1 || shards > 1024) {
             LOGGER.log(System.Logger.Level.WARNING, "Folesium: invalid shards={0}, using {1}", shards, d.shardCount());
@@ -417,7 +427,10 @@ public final class FolesiumRegistry {
         int maxLevel = FolesiumConfig.maxCompressionLevel(compression);
         int level = intProperty("compressionLevel", d.compressionLevel());
         if (level < 1 || level > maxLevel) {
-            int fallback = FolesiumConfig.clampCompressionLevel(compression, d.compressionLevel());
+            // Clamp the operator's own value into the codec's valid range (same policy as
+            // FolesiumDatabase.applyRuntimeConfig) instead of substituting the auto-tuned
+            // default: 0 or 99 in the file becomes 1 or maxLevel for the codec in use.
+            int fallback = FolesiumConfig.clampCompressionLevel(compression, level);
             LOGGER.log(System.Logger.Level.WARNING,
                     "Folesium: compressionLevel={0} is out of range [1,{1}] for {2}, using {3}",
                     level, maxLevel, compression, fallback);
@@ -458,7 +471,6 @@ public final class FolesiumRegistry {
                     "Folesium: unknown indexMode ''{0}'', using {1}", indexModeName, d.indexMode());
             indexMode = d.indexMode();
         }
-        boolean dictionaryCompression = boolProperty("dictionaryCompression", d.dictionaryCompression());
         boolean workloadCompaction = boolProperty("workloadCompaction", d.workloadCompaction());
         long compactIoLimit = longProperty("compactIoLimit", d.compactIoLimit());
         if (compactIoLimit < 0) {

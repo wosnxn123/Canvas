@@ -190,6 +190,14 @@ public record FolesiumConfig(
         if (compactIoLimit < 0) {
             throw new IllegalArgumentException("compactIoLimit must be >= 0: " + compactIoLimit);
         }
+        // Codec 3 (ZSTD_DICT) only exists inside dictionary mode: ShardFile's write path falls
+        // back to Compressors.compress(config.compression(), ...) whenever the per-keyspace
+        // dictionary is unavailable, which would throw per record for a ZSTD_DICT config with
+        // the flag off. Reject the combination up front instead of failing record by record.
+        if (compression == Compression.ZSTD_DICT && !dictionaryCompression) {
+            throw new IllegalArgumentException(
+                    "compression=ZSTD_DICT requires dictionaryCompression=true");
+        }
     }
 
     public static FolesiumConfig defaults() {
@@ -222,11 +230,15 @@ public record FolesiumConfig(
     /**
      * Switches the algorithm used for <em>new</em> writes. The level is clamped into the
      * range valid for {@code c} (Deflate tops out at 9, zstd at 22), so switching back and
-     * forth never throws.
+     * forth never throws. {@link Compression#ZSTD_DICT} additionally implies dictionary
+     * mode: the constructor forbids codec 3 without {@code dictionaryCompression}, so
+     * switching to it turns the flag on (a store whose metadata records ZSTD_DICT must
+     * always be able to manage its per-keyspace dictionary).
      */
     public FolesiumConfig withCompression(Compression c) {
         return new FolesiumConfig(shardCount, durability, batchFlushMillis, c,
-                clampCompressionLevel(c, compressionLevel), compactRatio, compactMinBytes, verifyChecksums, backupOnConvert, indexCacheBytes, indexMode, dictionaryCompression, workloadCompaction, compactIoLimit);
+                clampCompressionLevel(c, compressionLevel), compactRatio, compactMinBytes, verifyChecksums, backupOnConvert, indexCacheBytes, indexMode,
+                dictionaryCompression || c == Compression.ZSTD_DICT, workloadCompaction, compactIoLimit);
     }
 
     public FolesiumConfig withCompressionLevel(int level) {

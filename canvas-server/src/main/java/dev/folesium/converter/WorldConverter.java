@@ -35,6 +35,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -133,13 +134,18 @@ public final class WorldConverter {
         // With backupOnConvert the existing store is moved aside first; the whole move +
         // rebuild runs inside the try below, so a failed conversion restores the backup
         // instead of leaving the canonical path missing or holding a half-written store.
+        // Only once the move succeeded (backedUp) may the rollback touch the canonical
+        // path: when the initial move itself failed, the original store is still in
+        // place and must not be deleted.
         Path backup = null;
+        boolean backedUp = false;
         if (config.backupOnConvert() && Files.isDirectory(folesiumDir)) {
             backup = backupPath(folesiumDir);
         }
         try {
             if (backup != null) {
                 movePath(folesiumDir, backup, false);
+                backedUp = true;
             }
 
             try (FolesiumDatabase db = FolesiumDatabase.open(folesiumDir,
@@ -206,7 +212,7 @@ public final class WorldConverter {
                 trainDictionariesIfMissing(folesiumDir, converted, config);
             }
         } catch (IOException | RuntimeException ex) {
-            if (backup != null) {
+            if (backedUp) {
                 rollbackFailedBackup(folesiumDir, backup, ex);
             }
             throw ex;
@@ -372,23 +378,45 @@ public final class WorldConverter {
         // Staging mode starts from an empty tree, so records absent from the store cannot
         // survive a rebuild; the in-place path reuses the existing .mca files and would
         // otherwise resurrect chunks that were deleted from the store. Zero the slots of
-        // every region the store holds records in that the store no longer contains.
+        // every existing region file in the target tree that the store no longer contains,
+        // including regions the store has dropped entirely (a shrunken or emptied store).
         pruneSlotsMissingFromStore(out, byRegion);
     }
 
     /**
      * In-place exports keep every chunk the store still has and delete the slots of chunks
      * the store dropped since the target .mca was written, mirroring the staging-mode
-     * semantics "records absent from the store cannot survive". Only the regions the store
-     * holds records in (the set {@link #writeKeyspace} just wrote) are swept: a full sweep
-     * of the whole target tree would rewrite every region on each conversion.
+     * semantics "records absent from the store cannot survive". Every region file already
+     * present in the target tree is swept -- including regions the store holds no records
+     * in any more (a shrunken or emptied store), whose stale chunks would otherwise be
+     * resurrected by the next conversion -- by comparing each region's live chunk slots
+     * against the full set of keys the store still holds. Regions are only touched when
+     * their .mca exists, so a fresh target tree stays untouched outside the regions
+     * {@link #writeKeyspace} just wrote.
      */
     private void pruneSlotsMissingFromStore(Path out, Map<Long, List<Long>> byRegion) throws IOException {
-        runParallel(new ArrayList<>(byRegion.keySet()), regionKey -> {
-            int rx = LongKeys.chunkX(regionKey);
-            int rz = LongKeys.chunkZ(regionKey);
-            Path mca = out.resolve("r." + rx + "." + rz + ".mca");
-            Set<Long> stored = Set.copyOf(byRegion.get(regionKey));
+        Set<Long> stored = new HashSet<>();
+        for (List<Long> keys : byRegion.values()) {
+            stored.addAll(keys);
+        }
+        List<Path> mcaFiles;
+        try (var s = Files.list(out)) {
+            mcaFiles = s.filter(p -> MCA.matcher(p.getFileName().toString()).matches()).toList();
+        }
+        runParallel(mcaFiles, mca -> {
+            Matcher m = MCA.matcher(mca.getFileName().toString());
+            int rx;
+            int rz;
+            try {
+                if (!m.matches()) {
+                    return;
+                }
+                rx = Integer.parseInt(m.group(1));
+                rz = Integer.parseInt(m.group(2));
+            } catch (NumberFormatException ex) {
+                // Foreign/corrupt name (out-of-range region coordinate); leave it alone.
+                return;
+            }
             try (AnvilRegionFile rf = new AnvilRegionFile(mca)) {
                 for (int[] xz : rf.listChunks()) {
                     long key = LongKeys.chunkKey((rx << 5) + xz[0], (rz << 5) + xz[1]);

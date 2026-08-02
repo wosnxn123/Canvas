@@ -104,8 +104,20 @@ public final class RegionPage {
      * @throws IOException if the file cannot be read
      */
     public static RegionPage read(Path file) throws IOException {
+        // Pre-check the exact size before loading the bytes: a stray or truncated page file
+        // is damaged, and a huge stray file would otherwise be read into memory whole before
+        // the length check could reject it - an OOM for what is a corrupted page anyway.
+        // Wrong-size files take the damaged-page path (callers repair in place / rebuild
+        // from the log), exactly as before.
+        long size = Files.size(file);
+        if (size != PAGE_SIZE) {
+            throw new FolesiumException("Bad region page size for " + file + ": " + size
+                    + " bytes, expected " + PAGE_SIZE + " (region " + regionFromBytes(readPageHeader(file, size)) + ")");
+        }
         byte[] bytes = Files.readAllBytes(file);
         if (bytes.length != PAGE_SIZE) {
+            // TOCTOU: the file changed between the size pre-check and the read - treat it
+            // as damaged exactly like any other wrong-size page.
             throw new FolesiumException("Bad region page size for " + file + ": " + bytes.length
                     + " bytes, expected " + PAGE_SIZE + " (region " + regionFromBytes(bytes) + ")");
         }
@@ -259,6 +271,26 @@ public final class RegionPage {
             return "(" + b.getInt() + ", " + b.getInt() + ")";
         }
         return "(unknown)";
+    }
+
+    /**
+     * Best-effort read of the 11 header bytes of a page file, enough for the region
+     * coordinates in a damaged-page error message. Never fails the caller: an unreadable
+     * header just yields "(unknown)".
+     */
+    private static byte[] readPageHeader(Path file, long size) {
+        byte[] header = new byte[(int) Math.min(11, size)];
+        try (FileChannel ch = FileChannel.open(file, StandardOpenOption.READ)) {
+            ByteBuffer bb = ByteBuffer.wrap(header);
+            while (bb.hasRemaining()) {
+                if (ch.read(bb) < 0) {
+                    break;
+                }
+            }
+        } catch (IOException ignored) {
+            // Best-effort only: the error message may omit the region coordinates.
+        }
+        return header;
     }
 
     /**

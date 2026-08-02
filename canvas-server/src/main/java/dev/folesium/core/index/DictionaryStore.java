@@ -156,7 +156,7 @@ public final class DictionaryStore {
             // contract), so surface the race as the same refusal as a pre-existing file.
             throw new FolesiumException("Dictionary file " + dictFile + " appeared concurrently; refusing to "
                     + "overwrite it (existing codec-3 records may depend on the trained dictionary). "
-                    + "Delete dict.bin first to retrain.");
+                    + "Delete dict.bin first to retrain.", e);
         } finally {
             Files.deleteIfExists(tmp);
         }
@@ -200,26 +200,39 @@ public final class DictionaryStore {
 
     /**
      * Moves {@code source} to {@code target} <em>without</em> replacing an existing file,
-     * preferring an atomic move but falling back to a plain move on filesystems that do not
-     * support atomic moves (reported either as {@link AtomicMoveNotSupportedException} or as a
-     * generic filesystem error). The fallback re-checks {@link Files#exists} first to narrow
-     * the check-then-act window; a target that appears anyway surfaces as
-     * {@link FileAlreadyExistsException} from the move itself.
+     * preferring an atomic move but falling back to a plain move on filesystems that
+     * report missing atomic-move support as {@link AtomicMoveNotSupportedException}. The
+     * fallback re-checks {@link Files#exists} first to narrow the check-then-act window; a
+     * target that appears anyway surfaces as {@link FileAlreadyExistsException} from the
+     * move itself. Any other {@link FileSystemException} is rethrown unchanged instead of
+     * being masked by a doomed retry - except that a target which genuinely exists is
+     * treated as the concurrent-appearance race and converted to
+     * {@link FileAlreadyExistsException} with the original error attached as suppressed
+     * to keep its diagnostics.
      */
     private static void moveIntoPlace(Path source, Path target) throws IOException {
         try {
             Files.move(source, target, StandardCopyOption.ATOMIC_MOVE);
         } catch (AtomicMoveNotSupportedException e) {
             if (Files.exists(target)) {
-                throw new FileAlreadyExistsException(target.toString());
+                FileAlreadyExistsException race = new FileAlreadyExistsException(target.toString());
+                race.addSuppressed(e);
+                throw race;
             }
             Files.move(source, target);
         } catch (FileSystemException e) {
-            // Some platforms report missing atomic-move support as a generic filesystem error.
+            // Some platforms report missing atomic-move support as a generic filesystem
+            // error; it is indistinguishable from a real one, so only the case that is
+            // provably the concurrent-appearance race - the target already exists - is
+            // converted to FileAlreadyExistsException. Any other failure is rethrown
+            // unchanged, keeping the original diagnostics instead of masking them behind
+            // a retry that would fail the same way.
             if (Files.exists(target)) {
-                throw new FileAlreadyExistsException(target.toString());
+                FileAlreadyExistsException race = new FileAlreadyExistsException(target.toString());
+                race.addSuppressed(e);
+                throw race;
             }
-            Files.move(source, target);
+            throw e;
         }
     }
 }

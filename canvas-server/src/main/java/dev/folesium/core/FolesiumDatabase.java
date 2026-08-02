@@ -241,8 +241,16 @@ public final class FolesiumDatabase implements AutoCloseable {
 
         this.config = reconcileMetadata(requested, applyLayoutChanges);
 
-        // Covers the read-as-is path, where the store's own codec wins.
-        requireCompressionUsable(config.compression());
+        // Covers the read-as-is path, where the store's own codec wins (reconcileMetadata
+        // keeps the on-disk codec for read-only opens). Skipped when the directory holds no
+        // metadata: there is no store and therefore no record to decode, so a read-only
+        // export pointed at an arbitrary path with a requested codec this environment
+        // cannot decode (e.g. ZSTD_DICT without the zstd-jni dictionary API) must not
+        // abort. Writable opens are already covered by the upfront check plus the
+        // on-disk-codec check in reconcileMetadata.
+        if (Files.isRegularFile(dir.resolve(METADATA_FILE))) {
+            requireCompressionUsable(config.compression());
+        }
 
         startFlusherIfNeeded();
     }
@@ -255,7 +263,7 @@ public final class FolesiumDatabase implements AutoCloseable {
                 || (compression == FolesiumConfig.Compression.ZSTD_DICT && !ZstdNative.dictAvailable())) {
             String reason = compression == FolesiumConfig.Compression.ZSTD_DICT
                     ? "the zstd-jni dictionary API is not available"
-                    : "zstd-jni is not available on the classpath";
+                    : "zstd-jni is not available";
             String remedy = compression == FolesiumConfig.Compression.ZSTD_DICT
                     ? "Run on a Folia/Canvas server with zstd-jni >= 1.5.x (which ships the dictionary API)"
                             + " or add com.github.luben:zstd-jni."
@@ -342,6 +350,10 @@ public final class FolesiumDatabase implements AutoCloseable {
         }
 
         if (comp != requested.compression()) {
+            // Existing records keep the on-disk codec, so it must stay decodable after the
+            // switch: e.g. switching a ZSTD_DICT store away in an environment without the
+            // zstd-jni dictionary API would make every old codec-3 record unreadable.
+            requireCompressionUsable(comp);
             LOGGER.log(System.Logger.Level.INFO,
                     "Folesium: {0} switches compression {1} -> {2}; existing records keep their own codec",
                     dir, comp, requested.compression());
@@ -515,6 +527,13 @@ public final class FolesiumDatabase implements AutoCloseable {
      */
     public ConfigReloadResult applyRuntimeConfig(FolesiumConfig next) {
         Objects.requireNonNull(next, "next");
+        // A read-only store must never be reconfigured: persisting a changed compression
+        // would materialize metadata (and with it a shard layout) on a directory that is
+        // not (yet) a store, silently corrupting an arbitrary export path into one. Read-only
+        // opens are for exporters/inspectors that keep the on-disk layout exactly as it lies.
+        if (readOnly) {
+            throw new FolesiumException("Cannot reconfigure read-only store " + dir + ": store is read-only");
+        }
         FolesiumConfig requestedBaseline = this.config;
         ConfigReloadResult result;
         synchronized (keyspaceLock) {

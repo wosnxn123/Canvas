@@ -58,8 +58,6 @@ import java.util.regex.Pattern;
  */
 public final class PlayerDataConverter {
 
-    private static final System.Logger LOGGER = System.getLogger("Folesium");
-
     /** Vanilla directory holding {@code <uuid>.dat} player NBT (pre-26.x layout). */
     public static final String DIR_PLAYERDATA = "playerdata";
     /** Vanilla directory holding {@code <uuid>.json} advancement progress. */
@@ -105,10 +103,11 @@ public final class PlayerDataConverter {
     public static Path playerRootFor(Path worldRoot) {
         Path players = worldRoot.resolve(DIR_PLAYERS_26);
         if (Files.isDirectory(players) && modernTreeIsEmpty(players) && legacyTreeHasData(worldRoot)) {
-            LOGGER.log(System.Logger.Level.WARNING,
-                    "Folesium: " + worldRoot + " has a players/ directory with no player files,"
-                            + " while the legacy root-level playerdata/advancements/stats directories hold data;"
-                            + " using the legacy layout for this world");
+            // Operator-facing: the decision changes which directories are read and where the
+            // store lives, so it must be visible even where the JUL logger is not wired up.
+            System.err.println("Folesium: " + worldRoot + " has a players/ directory with no player files,"
+                    + " while the legacy root-level playerdata/advancements/stats directories hold data;"
+                    + " using the legacy layout for this world");
             return worldRoot;
         }
         return Files.isDirectory(players) ? players : worldRoot;
@@ -147,6 +146,10 @@ public final class PlayerDataConverter {
             return s.anyMatch(p -> Files.isRegularFile(p)
                     && UUID_FILE.matcher(p.getFileName().toString()).matches());
         } catch (IOException e) {
+            // The layout decision in playerRootFor is made on incomplete data when a
+            // directory cannot be listed; say so instead of degrading silently.
+            System.err.println("Folesium: cannot list " + dir + " (" + e + ");"
+                    + " treating it as having no player files");
             return false;
         }
     }
@@ -212,7 +215,9 @@ public final class PlayerDataConverter {
      *
      * <p>With {@code backupOnConvert} an existing store is moved to a
      * {@code .folesium-backup-*} sibling first, turning the merge into a full rebuild of
-     * the store.</p>
+     * the store. If the rebuild fails, the backup is moved back to its original location,
+     * so a failed backup-mode conversion leaves the previous store in place instead of a
+     * half-written store.</p>
      */
     public static Stats anvilToFolesium(Path worldRoot, Path storeDir, FolesiumConfig config) throws IOException {
         return anvilToFolesium(worldRoot, storeDir, config, null);
@@ -221,7 +226,9 @@ public final class PlayerDataConverter {
     /**
      * Same as {@link #anvilToFolesium(Path, Path, FolesiumConfig)}, but reports the backup
      * sibling created for a pre-existing store (only when {@code backupOnConvert} is set)
-     * through {@code backupSink} once the conversion has succeeded.
+     * through {@code backupSink}, once the conversion has succeeded. The sink is never
+     * invoked when the conversion fails, because the backup is then moved back to its
+     * original location and the failed run leaves the canonical store untouched.
      *
      * @param backupSink receives the {@code .folesium-backup-*} sibling of {@code storeDir}
      *                   after a successful backup-mode rebuild; {@code null} to ignore
@@ -232,35 +239,52 @@ public final class PlayerDataConverter {
         long entries = 0;
         long bytes = 0;
 
+        // With backupOnConvert the existing store is moved aside first; the whole move +
+        // rebuild runs inside the try below, so a failed conversion restores the backup
+        // instead of leaving the canonical path missing or holding a half-written store.
+        // Only once the move succeeded (backedUp) may the rollback touch the canonical
+        // path: when the initial move itself failed, the original store is still in
+        // place and must not be deleted.
         Path backup = null;
+        boolean backedUp = false;
         if (config.backupOnConvert() && Files.isDirectory(storeDir)) {
             backup = backupPath(storeDir);
-            movePath(storeDir, backup, false);
         }
+        try {
+            if (backup != null) {
+                movePath(storeDir, backup, false);
+                backedUp = true;
+            }
 
-        Path playerRoot = playerRootFor(worldRoot);
-        try (FolesiumDatabase db = FolesiumDatabase.open(storeDir,
-                config.withDurability(FolesiumConfig.DurabilityMode.EXPLICIT),
-                FolesiumDatabase.StoreRole.PLAYERS)) {
-            for (Mapping m : mappingsFor(worldRoot, playerRoot)) {
-                Path src = playerRoot.resolve(m.dir());
-                if (!Files.isDirectory(src)) {
-                    continue;
-                }
-                Keyspace ks = db.keyspace(m.keyspace());
-                for (Path file : listPlayerFiles(src, m.extension())) {
-                    UUID id = uuidOf(file);
-                    if (id == null) {
+            Path playerRoot = playerRootFor(worldRoot);
+            try (FolesiumDatabase db = FolesiumDatabase.open(storeDir,
+                    config.withDurability(FolesiumConfig.DurabilityMode.EXPLICIT),
+                    FolesiumDatabase.StoreRole.PLAYERS)) {
+                for (Mapping m : mappingsFor(worldRoot, playerRoot)) {
+                    Path src = playerRoot.resolve(m.dir());
+                    if (!Files.isDirectory(src)) {
                         continue;
                     }
-                    byte[] payload = Files.readAllBytes(file);
-                    if (ks.putIfAbsent(id, payload)) {
-                        entries++;
-                        bytes += payload.length;
+                    Keyspace ks = db.keyspace(m.keyspace());
+                    for (Path file : listPlayerFiles(src, m.extension())) {
+                        UUID id = uuidOf(file);
+                        if (id == null) {
+                            continue;
+                        }
+                        byte[] payload = Files.readAllBytes(file);
+                        if (ks.putIfAbsent(id, payload)) {
+                            entries++;
+                            bytes += payload.length;
+                        }
                     }
                 }
+                db.flush();
             }
-            db.flush();
+        } catch (IOException | RuntimeException ex) {
+            if (backedUp) {
+                rollbackFailedBackup(storeDir, backup, ex);
+            }
+            throw ex;
         }
         if (backup != null && backupSink != null) {
             backupSink.accept(backup);
@@ -421,6 +445,33 @@ public final class PlayerDataConverter {
                 }
             }
             throw failure;
+        }
+    }
+
+    /**
+     * Restores the previous store after a failed backup-mode conversion, mirroring the
+     * rollback of {@link #replaceDirectory}: the half-written new store at the canonical
+     * path is removed and the backup is moved back into place. The original failure is
+     * rethrown by the caller; a restore failure is attached to it as suppressed, with the
+     * backup path in the message so the operator can find the retained data. When the
+     * initial backup move itself failed, the caller never reaches this method: the backup
+     * does not exist and the canonical path still holds the intact original.
+     */
+    private static void rollbackFailedBackup(Path destination, Path backup, Exception failure) {
+        if (Files.exists(destination)) {
+            // The new store may be only partially written; it must not survive next to the
+            // restored original.
+            deleteTreeQuietly(destination);
+        }
+        if (Files.exists(backup)) {
+            try {
+                movePath(backup, destination, false);
+            } catch (IOException restoreFailure) {
+                failure.addSuppressed(new IOException(
+                        "Failed restoring the previous player store from " + backup
+                                + " after a failed conversion; the backup is still there",
+                        restoreFailure));
+            }
         }
     }
 

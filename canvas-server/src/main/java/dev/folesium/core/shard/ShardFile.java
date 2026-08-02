@@ -582,14 +582,19 @@ public final class ShardFile implements AutoCloseable {
             }
             long dead = b.getLong();
             int count = b.getInt();
-            // Smallest conceivable entry is 2+0+8+4+4+1 = 19 bytes, so a count that cannot fit
-            // in the remaining bytes is nonsense - refuse it instead of pre-sizing a huge map.
+            // Smallest conceivable entry is 2+1+8+4+4+1 = 20 bytes (keyLen is at least 1,
+            // see the keyLen == 0 check below), so a count that cannot fit 19-byte entries
+            // is certainly nonsense - refuse it instead of pre-sizing a huge map.
             if (count < 0 || (long) count * 19L > b.remaining()) {
                 return false;
             }
             Map<Bytes, Loc> loaded = new HashMap<>(Math.max(16, count * 2));
             for (int i = 0; i < count; i++) {
                 int keyLen = b.getShort() & 0xFFFF;
+                // scanRange() rejects zero-length keys; a hint entry describing one is corrupt.
+                if (keyLen == 0) {
+                    return false;
+                }
                 byte[] key = new byte[keyLen];
                 b.get(key);
                 long off = b.getLong();
@@ -601,6 +606,14 @@ public final class ShardFile implements AutoCloseable {
                 // the full scan instead of indexing a bogus record size.
                 if (rawValLen < 0 || rawValLen > MAX_VALUE_LEN
                         || storedValLen < 0 || storedValLen > MAX_VALUE_LEN) {
+                    return false;
+                }
+                // A record offset must point inside the log exactly like every record
+                // scanRange() would validate: below the file header or at/past EOF is a
+                // stale or forged entry, and a record that would extend past the log is
+                // equally invalid - discard the hint and fall back to the full scan.
+                if (off < FILE_HEADER_LEN || off >= logLength
+                        || off + RECORD_HEADER_LEN + keyLen + storedValLen + 4L > logLength) {
                     return false;
                 }
                 loaded.put(new Bytes(key),
@@ -1044,7 +1057,26 @@ public final class ShardFile implements AutoCloseable {
         int storedValLen = h.getInt();
         if (magic != RECORD_MAGIC || (flags & FLAG_TOMBSTONE) != 0 || keyLen != 8
                 || rawValLen < 0 || rawValLen > MAX_VALUE_LEN
-                || storedValLen < 0 || storedValLen > MAX_VALUE_LEN) {
+                || storedValLen < 0 || storedValLen > MAX_VALUE_LEN
+                // The whole record must fit inside the valid log, the same bound scanRange()
+                // enforces: a stale slot pointing at a record that straddles the EOF (e.g. a
+                // torn tail left in place by a read-only open) must read as a miss, not as a
+                // damaged record.
+                || slotOffset + RECORD_HEADER_LEN + keyLen + storedValLen + 4L > writePos) {
+            return null;
+        }
+        // A validated header is not enough: a stale page slot can point at a perfectly legal
+        // record that belongs to a *different* key. This happens when a read-only open keeps
+        // pre-compaction page files (a .cwmk exists and read-only mode never deletes page
+        // files): compaction reassigned every record to a new offset, so a stale slot can
+        // land on a valid record of another key in the post-compaction log, and header
+        // validation alone would silently serve that record as the queried key's value.
+        // Verify the record's key matches the query and treat a mismatch as a miss - AUTO
+        // callers fall back to the HashMap, PAGE callers report the key absent. Never return
+        // another key's value.
+        byte[] recordKey = new byte[keyLen];
+        readFully(ByteBuffer.wrap(recordKey), slotOffset + RECORD_HEADER_LEN);
+        if (!java.util.Arrays.equals(recordKey, key.array())) {
             return null;
         }
         return new Loc(slotOffset, RECORD_HEADER_LEN + keyLen + storedValLen + 4, keyLen, rawValLen, storedValLen, flags);
@@ -1133,6 +1165,10 @@ public final class ShardFile implements AutoCloseable {
                         "Folesium: compaction of read-only shard {0} skipped", path);
                 return;
             }
+            // A shard whose channel was released by a failed compaction restore must fail
+            // loudly here instead of a bare NullPointerException deep inside the rewrite
+            // (readWholeRecord) or the swap (channel.close()) below.
+            ensureWritable();
             Map<Bytes, Loc> newIndex = new HashMap<>(Math.max(16, index.size() * 2));
             long pos = FILE_HEADER_LEN;
             try (FileChannel out = FileChannel.open(tmp,
@@ -1435,6 +1471,14 @@ public final class ShardFile implements AutoCloseable {
     }
 
     private void readFully(ByteBuffer buf, long pos) throws IOException {
+        if (channel == null) {
+            // Channel released by a failed compaction restore: every read through the
+            // orphaned channel would be a bare NullPointerException. Fail loudly with the
+            // same message the write path uses (see ensureWritable) so the get / contains /
+            // forEach read paths surface a clear error instead of an unexplained NPE.
+            throw new FolesiumException("Shard " + path
+                    + " is unusable: its file channel was closed after a failed compaction restore");
+        }
         long p = pos;
         while (buf.hasRemaining()) {
             int n = channel.read(buf, p);

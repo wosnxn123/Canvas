@@ -117,9 +117,24 @@ public final class ZstdNative {
                 && trainFromBuffer != null && compressBound != null;
     }
 
+    /**
+     * Test-visible override: setting {@code -Dfolesium.zstd.forceUnavailable=true} (or
+     * {@code System.setProperty} before the check) makes {@link #available()} and
+     * {@link #dictAvailable()} report {@code false} even when zstd-jni is loadable,
+     * deterministically exercising the "library absent / dictionary API missing" negative
+     * paths regardless of the test classpath. Unset in production, so the default
+     * behaviour is unchanged. Checked per call - never on a hot path - so the flag also
+     * works when the class was already loaded by an earlier test.
+     */
+    private static final String FORCE_UNAVAILABLE_PROPERTY = "folesium.zstd.forceUnavailable";
+
+    private static boolean forcedUnavailable() {
+        return Boolean.parseBoolean(System.getProperty(FORCE_UNAVAILABLE_PROPERTY));
+    }
+
     /** Whether {@code zstd-jni} is loadable on the current classpath. */
     public static boolean available() {
-        return AVAILABLE;
+        return !forcedUnavailable() && AVAILABLE;
     }
 
     public static byte[] compress(byte[] src, int level) {
@@ -160,7 +175,7 @@ public final class ZstdNative {
      * may expose the plain compress/decompress pair without the dictionary API.
      */
     public static boolean dictAvailable() {
-        return DICT_AVAILABLE;
+        return !forcedUnavailable() && DICT_AVAILABLE;
     }
 
     private static String dictUnavailableMessage() {

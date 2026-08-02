@@ -305,6 +305,16 @@ public final class PageIndex implements AutoCloseable {
                 cacheMisses.incrementAndGet();
                 Path file = pagePath(regionX, regionZ);
                 boolean exists = Files.exists(file);
+                // Loading an on-disk page here may load a *stale* page: when a .cwmk exists the
+                // page file can be a pre-compaction artifact (compaction deletes page files only
+                // after the swap, and a read-only open deliberately never deletes them, so a
+                // crash or a read-only session can leave pre-compaction pages on disk). The
+                // replay/merge into such a page is still done here (read-only mode must not
+                // delete or rebuild page files), and a stale slot whose offset now falls on a
+                // legal record of another key is guarded by the caller's key validation:
+                // ShardFile.pageIndexLoc verifies the record at the slot offset belongs to the
+                // queried key and treats a mismatch as a miss (HashMap fallback / absent),
+                // never serving another key's value.
                 RegionPage page = exists ? readPage(file, regionX, regionZ) : RegionPage.create(regionX, regionZ);
                 e = new Entry(page);
                 e.persisted = exists;

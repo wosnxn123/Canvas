@@ -50,8 +50,9 @@ public final class Keyspace implements AutoCloseable {
     /**
      * One slot per shard index of the on-disk layout, in routing order. Read-write
      * keyspaces eagerly open every shard of {@link FolesiumConfig#shardCount()};
-     * read-only keyspaces size the array from the shard files actually present on disk
-     * (see {@link #discoveredShardIndices(Path, String)}) and leave the slot of a
+     * read-only keyspaces size the array from the shard count recorded in the shard file
+     * headers on disk (see {@link #readRecordedShardCount}; the names-derived fallback
+     * only fires when every discovered header is unreadable) and leave the slot of a
      * missing shard {@code null}. Fixed at construction and never mutated.
      */
     private final ShardFile[] shards;
@@ -197,21 +198,25 @@ public final class Keyspace implements AutoCloseable {
 
     /**
      * Reads the authoritative shard count from a shard file header (shard count at
-     * offset 12, u32 big-endian, matching {@code ShardFile}'s file header). Validates
-     * the power-of-two invariant so the read-only routing mask is always legal.
+     * offset 12, u32 big-endian, matching {@code ShardFile}'s file header). Validates the
+     * header magic ({@code FLSM}) and format version (1) exactly like
+     * {@code StoreResharder}'s header reader, so a foreign or garbage file matching the
+     * {@code <name>-NNNN.flog} name pattern is never trusted, and validates the
+     * power-of-two invariant so the read-only routing mask is always legal.
      *
      * <p>Torn-header tolerant: the count is store-wide and stamped into every shard file
      * header, so any intact shard names the layout. Every discovered file is tried in
-     * ascending order - the lowest shard may be torn (a crash truncated it before its
-     * header was ever written; {@code ShardFile} itself tolerates this and treats such a
-     * shard as empty) while the higher shards are intact. Only when <em>every</em>
-     * discovered header is unreadable does the count fall back to the layout the file
-     * names imply: shard files are named by index under the store's power-of-two shard
-     * count, so {@code highest index + 1} reproduces the original count. This fallback is
-     * a tolerance path - the keyspace then opens with an empty slot per unreadable shard
-     * instead of failing the whole keyspace - and is only used when the derived count is
-     * itself a legal power of two (otherwise the layout is genuinely unreadable and the
-     * failure is reported).
+     * ascending order; a file whose header is unreadable, fails the magic/version check,
+     * or records an illegal count is skipped as untrusted - the lowest shard may be torn
+     * (a crash truncated it before its header was ever written; {@code ShardFile} itself
+     * tolerates this and treats such a shard as empty) while the higher shards are intact.
+     * Only when <em>every</em> discovered header is unreadable does the count fall back to
+     * the layout the file names imply: shard files are named by index under the store's
+     * power-of-two shard count, so {@code highest index + 1} reproduces the original
+     * count. This fallback is a tolerance path - the keyspace then opens with an empty
+     * slot per unreadable shard instead of failing the whole keyspace - and is only used
+     * when the derived count is itself a legal power of two (otherwise the layout is
+     * genuinely unreadable and the failure is reported).
      */
     private static int readRecordedShardCount(Path dir, String name, int[] discovered) {
         RuntimeException lastFailure = null;
@@ -224,7 +229,14 @@ public final class Keyspace implements AutoCloseable {
                     throw new FolesiumException("Shard file too short to read its header: " + shardFile);
                 }
                 header.flip();
-                header.position(12);
+                byte[] magic = new byte[4];
+                header.get(magic);
+                if (!Arrays.equals(magic, new byte[]{'F', 'L', 'S', 'M'}) || header.getShort() != 1) {
+                    throw new FolesiumException(
+                            "Not a Folesium shard file (bad magic or unsupported version): " + shardFile);
+                }
+                header.getShort(); // reserved
+                header.getInt();   // shardIndex
                 int count = header.getInt();
                 if (count < 1 || count > 1024 || Integer.bitCount(count) != 1) {
                     throw new FolesiumException("Invalid shard count " + count + " in header of " + shardFile);
@@ -324,11 +336,12 @@ public final class Keyspace implements AutoCloseable {
 
     /**
      * Number of shard slots in this keyspace's layout. Read-write keyspaces return
-     * {@link FolesiumConfig#shardCount()}; read-only keyspaces return the on-disk layout
-     * discovered at open - the highest present shard index plus one, {@code 0} when no
-     * shard file exists. Slots whose file is missing on disk are {@code null} (see
-     * {@link #shards}); routing via {@link #shardIndexFor(byte[])} never exceeds this
-     * count.
+     * {@link FolesiumConfig#shardCount()}; read-only keyspaces return the shard count
+     * recorded in the on-disk shard file headers - the authoritative physical topology,
+     * with the names-derived count used only when every discovered header is unreadable,
+     * and {@code 0} when no shard file exists. Slots whose file is missing on disk are
+     * {@code null} (see {@link #shards}); routing via {@link #shardIndexFor(byte[])}
+     * never exceeds this count.
      */
     public int shardCount() {
         return shards.length;
