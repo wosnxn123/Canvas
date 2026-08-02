@@ -32,8 +32,10 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Properties;
+import java.util.Set;
 import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -228,7 +230,14 @@ final class StoreResharder {
             invalidatePageIndex(dir);
             Integer metaCount = metadataShardCount(dir);
             int fileCount = consistentOnDiskShardCount(dir);
-            if (metaCount != null && fileCount == metaCount) {
+            // The name-derived layout must also match the file headers, mirroring
+            // completeNewLayout's staging-empty branch (Branch A): every shard the metadata
+            // names must exist AND carry the committed count in its header. A file stamped
+            // with any other count is a leftover of a different layout, so the set is mixed
+            // and the backup - the only surviving copy of the records of the shards that
+            // were never swapped - must not be deleted.
+            boolean headersMatch = metaCount != null && completeNewLayoutInDir(dir, metaCount);
+            if (metaCount != null && fileCount == metaCount && headersMatch) {
                 LOGGER.log(System.Logger.Level.INFO,
                         "Folesium: removing the backup of a completed reshard of {0}", dir);
                 deleteRecursively(backup);
@@ -239,6 +248,13 @@ final class StoreResharder {
                 // power cut could resurrect the MOVED marker and the swapped-out old
                 // shards, which recovery would then mistake for a layout in flight.
                 fsyncDirectory(dir);
+            } else if (metaCount != null && fileCount == metaCount) {
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Folesium: keeping the backup {0} of {1}: the shard files span the {2} "
+                                + "indices the metadata names, but at least one file header records "
+                                + "a different shard count - the set is mixed with leftovers of "
+                                + "another layout, not the finished new one",
+                        backup, dir, metaCount);
             } else {
                 LOGGER.log(System.Logger.Level.WARNING,
                         "Folesium: keeping the backup {0} of {1}: the shard files hold {2} "
@@ -637,6 +653,39 @@ final class StoreResharder {
     }
 
     /**
+     * True when {@code dir} holds the complete layout named by {@code count}, judged like
+     * the staging-empty branch of {@link #completeNewLayout} (Branch A): every shard index
+     * {@code 0..count-1} of every keyspace must exist as a regular file whose header
+     * records {@code count}. A file stamped with any other shard count is a leftover of a
+     * different layout, so the set is mixed and the layout is not the finished new one.
+     * Header-only files count - they are the legitimate output of a finished growth
+     * reshard, already moved in from staging. Consulted by the MOVED-alone branch of
+     * {@link #recover}, where staging is gone and this is the only way to confirm the
+     * files really are the new set before the backup - the sole surviving copy of the
+     * old records - is deleted.
+     */
+    private static boolean completeNewLayoutInDir(Path dir, int count) {
+        try {
+            for (String name : discoverKeyspaces(dir)) {
+                for (int i = 0; i < count; i++) {
+                    Path shard = dir.resolve(String.format("%s-%04d.flog", name, i));
+                    // Every file the layout names must carry the layout's count in its
+                    // header: a file stamped with any other shard count (or whose header
+                    // shardIndex disagrees with its name) is a leftover of a different
+                    // layout, so the set is mixed and the swap must not be considered
+                    // finished over it.
+                    if (!Files.isRegularFile(shard) || recordedShardCount(shard) != count) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
      * True for a shard file that demonstrably holds records: strictly larger than the
      * file header. {@link Keyspace} eagerly creates header-only shard files on open, so
      * their mere presence does not prove a reshard swap was completed - after a crash
@@ -692,6 +741,17 @@ final class StoreResharder {
      */
     private static void restoreOldLayout(Path dir, Path backup, Path staging) throws IOException {
         List<Path> backupShards = Files.isDirectory(backup) ? listShardFiles(backup) : List.of();
+        // The old layout's hint names, captured BEFORE step 1 moves the backup files back:
+        // a hint in dir that the old set did not hold belongs to a new-layout shard file
+        // and must be dropped with it (step 2), or readers would pair it with the restored
+        // old shard and follow record offsets written against the new-layout file.
+        Set<String> oldHintNames = new HashSet<>();
+        for (Path p : backupShards) {
+            String n = p.getFileName().toString();
+            if (n.endsWith(".fidx")) {
+                oldHintNames.add(n);
+            }
+        }
         // The old layout's shard count, derived from file headers BEFORE the move-back
         // invalidates the backup paths. -1 when no readable header exists anywhere.
         int oldCount = oldLayoutShardCount(dir, backupShards);
@@ -720,6 +780,18 @@ final class StoreResharder {
                     Files.deleteIfExists(p);
                     // Drop the rebuildable index hint of a removed shard with it.
                     Files.deleteIfExists(dir.resolve(name + ".fidx"));
+                }
+            }
+            // Orphaned new-layout hints: any .fidx in dir whose name the old set did not
+            // back up belongs to a new-layout shard file (the old shard at that index had
+            // no hint of its own, so step 1 had nothing to overwrite the leftover with).
+            // Mirroring the .flog pairing rule - hints of old files are kept, hints
+            // without a corresponding old .flog are removed - drop them so they cannot
+            // misdirect readers against the restored old shard at the same index.
+            for (Path p : listShardFiles(dir)) {
+                String n = p.getFileName().toString();
+                if (n.endsWith(".fidx") && !oldHintNames.contains(n)) {
+                    Files.deleteIfExists(p);
                 }
             }
         } else {
@@ -816,7 +888,12 @@ final class StoreResharder {
      * its header is invalid. Mirrors {@link ShardFile}'s header layout ({@code "FLSM" |
      * u16 version=1 | u16 reserved | u32 shardIndex | u32 shardCount}); the magic and
      * version are checked locally because {@link ShardFile}'s constants are
-     * package-private to {@code dev.folesium.core.shard}.
+     * package-private to {@code dev.folesium.core.shard}. Like
+     * {@code ShardFile#validateFileHeader}, the header's {@code shardIndex} must match the
+     * index in the file name: a file whose header names a different shard than its name
+     * claims is not the shard it pretends to be (a stale copy of another layout), so it is
+     * treated as unreadable. Names that do not match the shard naming pattern carry no
+     * expected index and cannot be checked.
      */
     private static int recordedShardCount(Path shardFile) {
         if (!Files.isRegularFile(shardFile)) {
@@ -840,9 +917,15 @@ final class StoreResharder {
             return -1;
         }
         header.getShort(); // reserved
-        header.getInt();   // shardIndex
+        int shardIndex = header.getInt();
         int count = header.getInt();
         if (Integer.bitCount(count) != 1 || count < 1 || count > 1024) {
+            return -1;
+        }
+        // A header whose shardIndex disagrees with the file name's index is not the shard
+        // the name claims - a stale copy of another layout - so treat it as unreadable.
+        Matcher m = SHARD_FILE.matcher(shardFile.getFileName().toString());
+        if (m.matches() && shardIndex != Integer.parseInt(m.group(2))) {
             return -1;
         }
         return count;

@@ -611,8 +611,11 @@ public final class AnvilRegionFile implements Closeable {
      * Mirrors {@link Lz4Native}'s reflection bridge (lz4-java is an optional runtime
      * dependency) but reads through a {@link LimitedInputStream}, because
      * {@link Lz4Native#decompress} has no size bound and would materialize the whole
-     * expansion before returning. The error behavior for a missing or broken lz4
-     * library matches {@link Lz4Native} exactly.
+     * expansion before returning. The error behavior for a missing lz4 library matches
+     * {@link Lz4Native} (an {@link UnsupportedOperationException}); corrupt data, which
+     * {@code Lz4Native} reports as an unchecked {@code LZ4Exception}, is wrapped in an
+     * {@link IOException} here so that every decode failure of {@link #readChunk} is a
+     * checked one.
      */
     private static byte[] decompressLz4Bounded(byte[] data) throws IOException {
         try {
@@ -622,10 +625,15 @@ public final class AnvilRegionFile implements Closeable {
             return readBounded(in, MAX_CHUNK_PAYLOAD_BYTES);
         } catch (IOException e) {
             throw e; // includes the bounded-read limit violation
-        } catch (RuntimeException e) {
-            throw e; // LZ4Exception on corrupt data, exactly like Lz4Native
         } catch (java.lang.reflect.InvocationTargetException e) {
-            throw new IllegalStateException("LZ4 decompression failed", e.getCause());
+            // The reflective constructor wrapped a failure from the lz4 layer itself:
+            // surface it as an IOException so readChunk's decode-failure contract stays
+            // uniform (callers of readChunk expect IOException, never an unchecked leak).
+            throw new IOException("LZ4 decompression failed", e.getCause());
+        } catch (RuntimeException e) {
+            // LZ4Exception on corrupt data: Lz4Native throws it unchecked, but this path
+            // feeds readChunk, which promises IOException for chunk read/decode failures.
+            throw new IOException("LZ4 decompression failed", e);
         } catch (ClassNotFoundException e) {
             throw new UnsupportedOperationException(
                     "Cannot read LZ4-compressed Anvil chunk: lz4-java is not on the classpath. "

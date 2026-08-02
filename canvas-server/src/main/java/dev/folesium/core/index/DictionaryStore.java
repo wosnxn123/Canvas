@@ -383,7 +383,11 @@ public final class DictionaryStore {
      * consistent only when the file identities match - the exception is JVM-wide rather than
      * inode-scoped, so in the same JVM it also fires when a peer thread holds a live lock on a
      * recreated file while we hold the orphaned inode, which must retry instead of being misread
-     * as our own lock. Orphaned acquisitions are released and retried, bounded by
+     * as our own lock. When either file key is unavailable (some filesystems return {@code null}
+     * file keys, and a file deleted between the anchor and the probe has no key either) a
+     * mismatch cannot be proven, so the {@code tryLock} result is accepted as consistent rather
+     * than burning the retries on a race that cannot be detected. Orphaned acquisitions are
+     * released and retried, bounded by
      * {@link #LOCK_ACQUIRE_ATTEMPTS}.
      * Retries that exhaust without resolving are reported as an {@link IOException}: after three
      * attempts the delete churn is indistinguishable from a real race, and reporting it as
@@ -452,10 +456,18 @@ public final class DictionaryStore {
                     // the same JVM it also fires when a peer thread holds a live lock on a
                     // recreated file while we hold the orphaned inode - mistaking that for
                     // consistent would let both threads train and silently overwrite each
-                    // other's dictionary. Judge by file identity: same inode -> our lock,
-                    // hold it; different (or unknown) -> orphaned, release and retry against
-                    // the current file.
-                    if (openedFileKey != null && openedFileKey.equals(fileKeyOf(lockFile))) {
+                    // other's dictionary. Judge by file identity, but only when the identity
+                    // is actually provable: fileKey() is null on filesystems without
+                    // file-key support (and a missing file cannot be attributed either), so
+                    // with either key unavailable a mismatch cannot be proven and the
+                    // tryLock result is accepted as consistent (the pre-file-key behavior;
+                    // treating unknown as consistent is also what keeps acquisition from
+                    // deterministically retrying to exhaustion on such filesystems). Only a
+                    // proven mismatch - both keys available and different - is an orphaned
+                    // inode, released and retried against the current file.
+                    Object currentFileKey = fileKeyOf(lockFile);
+                    if (openedFileKey == null || currentFileKey == null
+                            || openedFileKey.equals(currentFileKey)) {
                         return channel;
                     }
                     channel.close();

@@ -108,27 +108,31 @@ public final class WorldConversionService {
      */
     public Report convertWorld(Path worldRoot, Direction dir, FolesiumConfig config) throws IOException {
         long t0 = System.nanoTime();
-        // Stores moved aside by backupOnConvert during this run, so the retention note can
-        // point the operator at their backup locations.
+        // Stores and vanilla trees moved aside by backupOnConvert during this run, so the
+        // retention note can point the operator at their backup locations. Both directions
+        // feed this list (TO_FOLESIUM via the anvilToFolesium sinks, TO_ANVIL via the
+        // folesiumToAnvil sinks below); the finally below reports it even when a later
+        // step fails mid-run.
         List<Path> movedStores = new ArrayList<>();
-        long players = convertPlayerData(worldRoot, dir, config, movedStores);
 
         WorldConverter converter = new WorldConverter(threads);
+        long players = 0;
         long chunks = 0;
         long bytes = 0;
         int converted = 0;
         Set<Path> keptStores = new LinkedHashSet<>();
-        if (dir == Direction.TO_ANVIL) {
-            // Problem B: list the PLAYER store whenever it actually exists as a PLAYERS
-            // store -- even when it holds zero records. Judging by the conversion record
-            // count (players > 0) would hide an empty-but-real store from the log.
-            Path playerStore = PlayerDataConverter.storeDirectoryFor(worldRoot);
-            if (Files.isDirectory(playerStore)
-                    && FolesiumDatabase.readRole(playerStore) == FolesiumDatabase.StoreRole.PLAYERS) {
-                keptStores.add(playerStore);
-            }
-        }
         try {
+            players = convertPlayerData(worldRoot, dir, config, movedStores);
+            if (dir == Direction.TO_ANVIL) {
+                // Problem B: list the PLAYER store whenever it actually exists as a PLAYERS
+                // store -- even when it holds zero records. Judging by the conversion record
+                // count (players > 0) would hide an empty-but-real store from the log.
+                Path playerStore = PlayerDataConverter.storeDirectoryFor(worldRoot);
+                if (Files.isDirectory(playerStore)
+                        && FolesiumDatabase.readRole(playerStore) == FolesiumDatabase.StoreRole.PLAYERS) {
+                    keptStores.add(playerStore);
+                }
+            }
             List<Path> dimensionDirs = discoverDimensions(worldRoot);
             for (Path dim : dimensionDirs) {
                 Path folesiumStore = dim.resolve(FolesiumDatabase.STORE_DIR_NAME);
@@ -179,7 +183,14 @@ public final class WorldConversionService {
                     }
                     case TO_ANVIL -> {
                         if (!hasFolesium) continue;
-                        stats = converter.folesiumToAnvil(folesiumStore, dim, config);
+                        // backupOnConvert moves the replaced vanilla trees (region/, entities/,
+                        // poi/) aside into .folesium-backup-* siblings via replaceDirectory;
+                        // report their exact paths too, so the operator knows which vanilla
+                        // trees were kept - the same precise-path reporting TO_FOLESIUM gets
+                        // from the anvilToFolesium sink, on the success path and (via the
+                        // finally below) when a later dimension fails mid-run.
+                        stats = converter.folesiumToAnvil(folesiumStore, dim, config,
+                                FolesiumDatabase.StoreRole.DIMENSION, movedStores::add);
                         keptStores.add(folesiumStore);
                     }
                     default -> throw new IllegalStateException();
@@ -193,10 +204,10 @@ public final class WorldConversionService {
             }
             printRetentionNote(worldRoot, dir, converted, players, keptStores, config.backupOnConvert());
         } finally {
-            // A dimension failing mid-way must not leave the operator without the locations
-            // of the stores backupOnConvert already moved aside and rebuilt during this run:
-            // report them on both paths (the success path prints them right after the
-            // retention note).
+            // A player-data or dimension step failing mid-way must not leave the operator
+            // without the locations of the stores and vanilla trees backupOnConvert already
+            // moved aside and rebuilt during this run: report them on both paths (the
+            // success path prints them right after the retention note).
             printMovedStores(movedStores, config.backupOnConvert());
         }
         long millis = (System.nanoTime() - t0) / 1_000_000L;
@@ -223,18 +234,19 @@ public final class WorldConversionService {
     }
 
     /**
-     * Prints the {@code .folesium-backup-*} stores {@code backupOnConvert} moved aside
-     * and rebuilt during this run. Invoked from a {@code finally} of
-     * {@link #convertWorld}, so a dimension failing mid-way still reports the stores
-     * that were already moved -- otherwise their backups would be silently pruned by
-     * a later successful run and the operator could lose the pre-conversion copies
-     * without ever knowing where they were kept.
+     * Prints the {@code .folesium-backup-*} stores and vanilla trees {@code backupOnConvert}
+     * moved aside and rebuilt during this run. Invoked from a {@code finally} of
+     * {@link #convertWorld}, so a dimension failing mid-way still reports the trees that were
+     * already moved - otherwise their backups would be silently pruned by a later successful
+     * run and the operator could lose the pre-conversion copies without ever knowing where
+     * they were kept. Both directions collect into the same list: TO_FOLESIUM moves
+     * pre-existing stores aside, TO_ANVIL moves the replaced vanilla trees aside.
      */
     private static void printMovedStores(List<Path> movedStores, boolean backupOnConvert) {
         if (!backupOnConvert || movedStores.isEmpty()) {
             return;
         }
-        System.out.println("Folesium: the pre-existing stores were moved aside and kept as backups:");
+        System.out.println("Folesium: the pre-existing stores and vanilla trees were moved aside and kept as backups:");
         for (Path p : movedStores) {
             System.out.println("    " + p.toAbsolutePath().normalize());
         }
@@ -308,7 +320,10 @@ public final class WorldConversionService {
                 if (FolesiumDatabase.readRole(store) != FolesiumDatabase.StoreRole.PLAYERS) {
                     return 0;
                 }
-                stats = PlayerDataConverter.folesiumToAnvil(store, worldRoot, config);
+                // Same precise-path reporting as the dimension export: the replaced vanilla
+                // player directories (players/data, players/advancements, players/stats or
+                // the legacy playerdata/... roots) are collected through the backup sink.
+                stats = PlayerDataConverter.folesiumToAnvil(store, worldRoot, config, movedStores::add);
             }
             default -> throw new IllegalStateException();
         }

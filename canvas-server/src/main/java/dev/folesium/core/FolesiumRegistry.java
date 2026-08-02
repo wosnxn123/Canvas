@@ -606,12 +606,26 @@ public final class FolesiumRegistry {
         List<FolesiumDatabase> snapshot;
         FolesiumConfig cfg;
         boolean enabledBefore;
-        synchronized (FolesiumRegistry.class) {
-            enabledBefore = isEnabled();
-            fileProperties = null;
-            enabledCache = null;
-            cfg = configFromProperties();
-            snapshot = openDatabases();
+        try {
+            synchronized (FolesiumRegistry.class) {
+                enabledBefore = isEnabled();
+                fileProperties = null;
+                enabledCache = null;
+                cfg = configFromProperties();
+                snapshot = openDatabases();
+            }
+        } catch (UncheckedIOException e) {
+            // The reload re-reads the file inside the lock (configFromProperties() ->
+            // property() -> fileProperties(), whose cache was cleared above), and a file
+            // that exists but cannot be read right now throws UncheckedIOException. That
+            // must not escape a programmatic reload: the watcher guards its own reload()
+            // call with the same catch, and a direct caller gets the same treatment here
+            // - keep the previous configuration and report an empty result instead of
+            // throwing (the change is retried the next time reload() is called).
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: cannot read {0} for reload; keeping the previous configuration: {1}",
+                    configFilePath().toAbsolutePath(), e.toString());
+            return List.of();
         }
         boolean enabledAfter = isEnabled();
         if (enabledBefore != enabledAfter) {
@@ -1016,7 +1030,23 @@ public final class FolesiumRegistry {
 
     public static synchronized FolesiumDatabase acquire(Path dir, FolesiumConfig config, FolesiumDatabase.StoreRole role) {
         ensureShutdownHook();
-        ensureConfigWatcher();
+        try {
+            ensureConfigWatcher();
+        } catch (UncheckedIOException e) {
+            // ensureConfigWatcher() -> boolProperty("autoReload", ...) -> property() ->
+            // fileProperties() re-reads the config file, which throws UncheckedIOException
+            // when the file exists but cannot be read. The property-reading acquire()
+            // forms never reach this point with an unreadable file (configuredOrDefault()
+            // already degraded to null), but this explicit-config form has no such guard:
+            // treat the read failure as disabled (Folesium is opt-in - a config read
+            // failure must never crash the world load path), with a WARNING, exactly like
+            // configuredOrDefault().
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: cannot read {0} ({1}); treating Folesium as disabled (opt-in:"
+                            + " a config read failure must not crash the server)",
+                    configFilePath().toAbsolutePath(), e.toString());
+            return null;
+        }
         Path key = canonical(dir);
         Entry entry = OPEN.get(key);
         if (entry == null || entry.db.isClosed()) {

@@ -131,7 +131,7 @@ public final class FolesiumDatabase implements AutoCloseable {
     /**
      * The group-commit thread, or {@code null} when group commit is not running.
      * Volatile because the compaction pass reads it without {@link #flusherLock} (the
-     * pass-start snapshot and each post-sleep checkpoint below); every write happens
+     * pass-start snapshot and each per-iteration checkpoint below); every write happens
      * under the lock, so a volatile read always sees the latest retirement decision.
      */
     private volatile Thread flusher;
@@ -860,9 +860,19 @@ public final class FolesiumDatabase implements AutoCloseable {
         }
     }
 
-    public void compactIfNeeded() {
+    /**
+     * Rewrites every shard that currently needs it (see {@link ShardFile#needsCompaction()}),
+     * ordered by workload priority and rate-limited by {@code compactIoLimit}.
+     *
+     * @return {@code true} when the pass ran to completion, {@code false} when it aborted
+     *         early at the retirement/closed checkpoint (or was never started because the
+     *         store is closed) - the caller ({@link #compactIfNeededThrottled()}) treats an
+     *         aborted pass as if no check ran, so the next driver retries immediately
+     *         instead of burning the five-minute throttle on a pass that stopped early
+     */
+    public boolean compactIfNeeded() {
         if (closed.get()) {
-            return; // do not touch shards that close() is tearing down
+            return false; // do not touch shards that close() is tearing down
         }
         // Collect every shard that needs a rewrite first, so the pass can be ordered
         // (workload mode) and rate-limited (compactIoLimit) without interleaving the
@@ -911,7 +921,11 @@ public final class FolesiumDatabase implements AutoCloseable {
             // latest retirement decision. Abort the pass here - before compact(), whose channel
             // I/O may hit channels close() is closing.
             if (closed.get() || (callerIsFlusher && flusher != Thread.currentThread())) {
-                break;
+                // Aborted early: a store that was closed (close() is tearing shards down) or a
+                // flusher that was retired/replaced must not keep compacting. Report the early
+                // abort so compactIfNeededThrottled() can retry immediately once the store is
+                // healthy again instead of waiting out the whole throttle interval.
+                return false;
             }
             s.compact();
             // compactIoLimit: cap compaction I/O near `limit` bytes/second. Simple
@@ -927,6 +941,7 @@ public final class FolesiumDatabase implements AutoCloseable {
                 }
             }
         }
+        return true;
     }
 
     /**
@@ -973,7 +988,14 @@ public final class FolesiumDatabase implements AutoCloseable {
         if (now - previous < COMPACT_CHECK_INTERVAL_NANOS || !lastCompactCheck.compareAndSet(previous, now)) {
             return false;
         }
-        compactIfNeeded();
+        if (!compactIfNeeded()) {
+            // The pass aborted before rewriting every candidate - the retirement/closed
+            // checkpoint fired, or the store was closed the moment the pass started. The
+            // five-minute throttle must not be spent on a pass that never ran: reset the
+            // check slot so the next driver (a fresh flusher, the next flushAll) retries
+            // immediately instead of waiting out the interval.
+            lastCompactCheck.set(0);
+        }
         return true;
     }
 

@@ -166,6 +166,14 @@ public final class Compressors {
             if (n != 0) {
                 throw new IllegalStateException("Compressed record exceeds declared size: " + rawLen);
             }
+            if (inf.finished()) {
+                // The inflate() call just consumed the final block and turned the stream
+                // finished without producing output: the legal end of a multi-block
+                // DEFLATE stream whose last blocks are empty. Same re-check as the main
+                // loop in inflate() - without it a legal empty trailing block would be
+                // misreported as a no-progress corrupt record.
+                break;
+            }
             if (inf.needsDictionary()) {
                 throw new IllegalStateException("Compressed record requires a preset dictionary");
             }

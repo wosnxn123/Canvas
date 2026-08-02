@@ -310,7 +310,8 @@ public final class WorldConverter {
      * tree.</p>
      */
     public Stats folesiumToAnvil(Path folesiumDir, Path dimensionDir, FolesiumConfig config) throws IOException {
-        return folesiumToAnvil(folesiumDir, dimensionDir, config, FolesiumDatabase.StoreRole.DIMENSION);
+        return folesiumToAnvil(folesiumDir, dimensionDir, config,
+                FolesiumDatabase.StoreRole.DIMENSION, null);
     }
 
     /**
@@ -329,6 +330,26 @@ public final class WorldConverter {
      */
     public Stats folesiumToAnvil(Path folesiumDir, Path dimensionDir, FolesiumConfig config,
                                  FolesiumDatabase.StoreRole role) throws IOException {
+        return folesiumToAnvil(folesiumDir, dimensionDir, config, role, null);
+    }
+
+    /**
+     * Same as {@link #folesiumToAnvil(Path, Path, FolesiumConfig, FolesiumDatabase.StoreRole)},
+     * but reports each {@code .folesium-backup-*} sibling actually created by a backup-mode
+     * swap through {@code backupSink}, once the export has succeeded. The sink is invoked only
+     * when a pre-existing vanilla directory was moved aside (an empty store replaces nothing),
+     * so callers can tell the operator exactly which vanilla trees were kept.
+     *
+     * @param role       the store role to open {@code folesiumDir} as
+     * @param backupSink receives the {@code .folesium-backup-*} sibling of each replaced
+     *                   vanilla directory after a successful backup-mode swap;
+     *                   {@code null} to ignore
+     * @throws FolesiumException if {@code role} is not
+     *         {@link FolesiumDatabase.StoreRole#DIMENSION}: a PLAYERS store holds no chunk
+     *         data, so exporting it to Anvil region files would silently write nothing
+     */
+    public Stats folesiumToAnvil(Path folesiumDir, Path dimensionDir, FolesiumConfig config,
+                                 FolesiumDatabase.StoreRole role, Consumer<Path> backupSink) throws IOException {
         if (role != FolesiumDatabase.StoreRole.DIMENSION) {
             throw new FolesiumException("to-anvil export requires a DIMENSION store; "
                     + "use the world convert command for PLAYERS stores");
@@ -353,7 +374,7 @@ public final class WorldConverter {
                     continue;
                 }
                 if (config.backupOnConvert()) {
-                    convertKeyspaceViaStaging(out, ks, chunkCount, byteCount);
+                    convertKeyspaceViaStaging(out, ks, chunkCount, byteCount, backupSink);
                 } else {
                     convertKeyspaceInPlace(out, ks, chunkCount, byteCount);
                 }
@@ -362,9 +383,13 @@ public final class WorldConverter {
         return new Stats(chunkCount.get(), byteCount.get(), (System.nanoTime() - start) / 1_000_000);
     }
 
-    /** Backup-mode path: write a clean staging tree, swap it in, keep the old tree as backup. */
-    private void convertKeyspaceViaStaging(Path out, Keyspace ks, AtomicLong chunkCount, AtomicLong byteCount)
-            throws IOException {
+    /**
+     * Backup-mode path: write a clean staging tree, swap it in, keep the old tree as backup.
+     * The created {@code .folesium-backup-*} sibling (or {@code null} when the target did
+     * not exist) is reported through {@code backupSink} so callers can print its exact path.
+     */
+    private void convertKeyspaceViaStaging(Path out, Keyspace ks, AtomicLong chunkCount, AtomicLong byteCount,
+                                           Consumer<Path> backupSink) throws IOException {
         // This path only runs under backupOnConvert, so crash leftovers of an earlier
         // backup-mode run (a crash between staging and swap) must be collected before a
         // new staging tree is created - otherwise they accumulate next to the restored
@@ -374,7 +399,10 @@ public final class WorldConverter {
         Files.createDirectories(staging);
         try {
             writeKeyspace(staging, ks, chunkCount, byteCount);
-            replaceDirectory(out, staging);
+            Path backup = replaceDirectory(out, staging);
+            if (backup != null && backupSink != null) {
+                backupSink.accept(backup);
+            }
         } catch (RuntimeException | IOException ex) {
             deleteTreeQuietly(staging);
             throw ex;
@@ -559,8 +587,12 @@ public final class WorldConverter {
         return siblingPath(destination, ".folesium-backup-");
     }
 
-    /** Replaces a destination directory while retaining the previous tree as a backup. */
-    private static void replaceDirectory(Path destination, Path staging) throws IOException {
+    /**
+     * Replaces a destination directory while retaining the previous tree as a backup.
+     * Returns the {@code .folesium-backup-*} sibling the previous tree was moved to, or
+     * {@code null} when the destination did not exist (nothing was moved aside).
+     */
+    private static Path replaceDirectory(Path destination, Path staging) throws IOException {
         Files.createDirectories(destination.toAbsolutePath().normalize().getParent());
         Path backup = siblingPath(destination, ".folesium-backup-");
         pruneOldBackups(destination);
@@ -588,6 +620,7 @@ public final class WorldConverter {
             }
             throw failure;
         }
+        return backedUp ? backup : null;
     }
 
     /**
