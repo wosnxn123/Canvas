@@ -637,6 +637,17 @@ public final class ShardFile implements AutoCloseable {
         channel.truncate(pos);
         channel.force(false);
         writePos = pos;
+        // The hint file describes the pre-truncation log; drop it now. Its logLength check
+        // would normally self-invalidate it on the next open (the file is shorter), but that
+        // check is defeated once the log later regrows to the same length: the stale hint
+        // would then pass and load entries pointing past the truncation point. Deleting it
+        // outright forces a full scan on the next open - mirrors discardTornShard().
+        try {
+            Files.deleteIfExists(hintPath);
+        } catch (IOException e) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium recovery: could not delete stale hint {0}: {1}", hintPath, e.toString());
+        }
         if (hintLoaded) {
             // The index was loaded from the hint, which described the pre-truncation log:
             // every entry at or past the truncation point is now a ghost pointing past EOF.
@@ -645,8 +656,7 @@ public final class ShardFile implements AutoCloseable {
             // index from the surviving prefix with a full rescan - the prefix precedes the
             // first invalid record, so this scan cannot truncate again (worst case it finds
             // another torn record below pos and truncates further, which is equally correct).
-            // The stale hint self-invalidates on the next open via its logLength check (the
-            // file is shorter now), so it does not need deleting here.
+            // (The hint itself is already deleted above, so the next open rescans regardless.)
             hintLoaded = false;
             index = new HashMap<>();
             deadBytes = 0;

@@ -691,15 +691,19 @@ public final class PageIndex implements AutoCloseable {
 
     /**
      * Best-effort sweep of stale staging files left by a crash between a staging write and
-     * its atomic rename: {@code <page>.idx.tmp-<uuid>} (RegionPage.write) and
-     * {@code dict.bin.tmp-<uuid>} (DictionaryStore.train). They are inert (never read by
-     * any load path) but accumulate across crashes. Runs on every hint write - the
-     * {@link #close()} path - so keyspaces that never compact, which never reach the sweep
-     * in {@link #deleteAllPageFiles()}, still get cleaned up. Sweeping the dictionary
-     * staging file is safe: training only happens during conversion, when the store is
-     * closed and this keyspace's page index is not live, so a {@code dict.bin.tmp-*} seen
-     * here is always a crash leftover, never a write in flight. Failures are logged, never
-     * thrown.
+     * its atomic rename: {@code <page>.idx.tmp-<uuid>} (RegionPage.write). They are inert
+     * (never read by any load path) but accumulate across crashes. Runs on every hint write -
+     * the {@link #close()} path - so keyspaces that never compact, which never reach the sweep
+     * in {@link #deleteAllPageFiles()}, still get cleaned up.
+     *
+     * <p>{@code dict.bin.tmp-<uuid>} (DictionaryStore.train) is deliberately NOT swept:
+     * training runs during conversion, while the store is open and this keyspace's page index
+     * is live, so a {@link #close()} racing training would unlink a staging file that is
+     * actively being written - a real delete of a live file, not a crash leftover. A leftover
+     * {@code dict.bin.tmp-*} is inert and harmless (never read by any load path), the trainer
+     * removes its own staging file in a finally, and it is left in place - the same treatment
+     * as the watermark {@code .tmp-<uuid>} staging files, which are also never swept.
+     * Failures are logged, never thrown.
      */
     private void sweepStaleTmpFiles() {
         if (!Files.isDirectory(idxDir)) {
@@ -707,12 +711,7 @@ public final class PageIndex implements AutoCloseable {
         }
         try (var stream = Files.list(idxDir)) {
             stream.filter(p -> p.getFileName().toString().endsWith(PAGE_SUFFIX + ".tmp-")
-                    || p.getFileName().toString().matches(".*\\.idx\\.tmp-[0-9a-fA-F-]+$")
-                    // dict.bin.tmp-<uuid>: DictionaryStore.train's staging file, orphaned
-                    // by a crash between its staging write and the atomic rename. Training
-                    // only runs during conversion, with the store closed, so this is always
-                    // a crash leftover here - never a live write.
-                    || p.getFileName().toString().startsWith("dict.bin.tmp-")).forEach(p -> {
+                    || p.getFileName().toString().matches(".*\\.idx\\.tmp-[0-9a-fA-F-]+$")).forEach(p -> {
                 try {
                     Files.deleteIfExists(p);
                 } catch (IOException e) {

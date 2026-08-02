@@ -23,6 +23,7 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -622,6 +623,19 @@ public final class FolesiumRegistry {
             if (!parsesAsProperties(content)) {
                 return List.of();
             }
+            // Same regenerated-file protection as the watcher (see watchConfigFile): a file
+            // our own machinery recreated (the previous file was deleted and fileProperties()
+            // regenerated the auto-tuned default) is not an operator edit. Applying the
+            // defaults would silently override the running server's current configuration,
+            // so skip it exactly like the watcher does. The generated content is
+            // deterministic per machine, so this comparison is exact.
+            if (content.equals(defaultConfigContent())) {
+                LOGGER.log(System.Logger.Level.INFO,
+                        "Folesium: {0} is the auto-generated default (previously deleted?);"
+                                + " keeping the running configuration",
+                        configFile.toAbsolutePath());
+                return List.of();
+            }
         } else if (!hasSystemPropertyOverrides()) {
             // A missing config file is not an operator edit: proceeding would make
             // fileProperties() regenerate the auto-tuned default file and push those
@@ -715,7 +729,15 @@ public final class FolesiumRegistry {
     private static long configFileTimestamp() {
         Path file = configFilePath();
         try {
-            return Files.isRegularFile(file) ? Files.getLastModifiedTime(file).toMillis() : -1L;
+            if (!Files.isRegularFile(file)) {
+                return -1L;
+            }
+            // Nanosecond-precision epoch: toMillis() truncates, so two writes within the
+            // same millisecond would be indistinguishable and the change would be missed
+            // by the watcher and configFileChanged(). Preserving the Instant's nanos makes
+            // same-millisecond writes visible. (Epoch nanos fit comfortably in a long.)
+            Instant t = Files.getLastModifiedTime(file).toInstant();
+            return t.getEpochSecond() * 1_000_000_000L + t.getNano();
         } catch (IOException e) {
             return -1L;
         }
@@ -861,12 +883,16 @@ public final class FolesiumRegistry {
                 // fileProperties() recreated the auto-tuned default) is not an operator edit:
                 // applying the defaults would silently override the running server's current
                 // configuration. Recognise it by its exact generated content (deterministic
-                // per machine) and skip the reload, leaving the stamp stale so the skip is
-                // re-evaluated on every poll until the operator actually edits the file.
+                // per machine) and skip the reload. The stamp is committed so the skip is not
+                // re-evaluated - and the message re-logged - on every poll until the
+                // operator actually edits the file.
                 if (after.equals(defaultConfigContent())) {
                     LOGGER.log(System.Logger.Level.INFO,
                             "Folesium: {0} was regenerated (previously deleted?); keeping the running configuration",
                             configFilePath().toAbsolutePath());
+                    synchronized (FolesiumRegistry.class) {
+                        configFileStamp = stamp;
+                    }
                     continue;
                 }
                 LOGGER.log(System.Logger.Level.INFO,

@@ -168,8 +168,18 @@ public final class FolesiumRegionStorage implements AutoCloseable {
         return keyspace.contains(LongKeys.chunkKey(chunkX, chunkZ));
     }
 
-    public byte[] readRaw(int chunkX, int chunkZ) {
-        return keyspace.get(LongKeys.chunkKey(chunkX, chunkZ));
+    public byte[] readRaw(int chunkX, int chunkZ) throws IOException {
+        try {
+            return keyspace.get(LongKeys.chunkKey(chunkX, chunkZ));
+        } catch (RuntimeException e) {
+            // The engine signals store failures as FolesiumException (a RuntimeException),
+            // which the synchronous callers (read(ChunkPos), scanChunk, moonrise$readData,
+            // the world upgrader) declare as IOException but never catch unchecked. Surface
+            // it as an IOException so the caller's existing IOException handling applies
+            // instead of an unchecked escape aborting the DFU upgrade / chunk load.
+            throw new IOException("Folesium: failed to read chunk " + chunkX + "," + chunkZ
+                    + " from keyspace '" + keyspaceName + "'", e);
+        }
     }
 
     public CompoundTag read(int chunkX, int chunkZ) throws IOException {
@@ -183,8 +193,20 @@ public final class FolesiumRegionStorage implements AutoCloseable {
         return deserialise(data);
     }
 
-    public void writeRaw(int chunkX, int chunkZ, byte[] data) {
-        keyspace.put(LongKeys.chunkKey(chunkX, chunkZ), data);
+    public void writeRaw(int chunkX, int chunkZ, byte[] data) throws IOException {
+        try {
+            keyspace.put(LongKeys.chunkKey(chunkX, chunkZ), data);
+        } catch (RuntimeException e) {
+            // The engine signals store failures as FolesiumException (a RuntimeException),
+            // which Moonrise's failedWrite check (instanceof IOException) would miss: the
+            // task would be recorded as successfully written and the chunk/entity/POI
+            // silently dropped. Surface it as an IOException so Moonrise marks the write
+            // as failed and keeps the task for retry -- the same conversion the
+            // player-side StoreWriter applies to engine failures (warn + surface through
+            // the caller's IOException handling instead of leaking unchecked).
+            throw new IOException("Folesium: failed to write chunk " + chunkX + "," + chunkZ
+                    + " to keyspace '" + keyspaceName + "'", e);
+        }
     }
 
     public void write(int chunkX, int chunkZ, CompoundTag tag) throws IOException {
@@ -195,22 +217,43 @@ public final class FolesiumRegionStorage implements AutoCloseable {
         }
     }
 
-    public void delete(int chunkX, int chunkZ) {
-        keyspace.delete(LongKeys.chunkKey(chunkX, chunkZ));
+    public void delete(int chunkX, int chunkZ) throws IOException {
+        try {
+            keyspace.delete(LongKeys.chunkKey(chunkX, chunkZ));
+        } catch (RuntimeException e) {
+            // Same contract as writeRaw: a failed deletion must surface as an IOException
+            // so Moonrise's failedWrite handling (instanceof IOException) retries the task
+            // instead of recording the deletion as successful.
+            throw new IOException("Folesium: failed to delete chunk " + chunkX + "," + chunkZ
+                    + " from keyspace '" + keyspaceName + "'", e);
+        }
     }
 
     /** fsyncs every dirty shard of this keyspace. */
-    public void flush() {
-        keyspace.flush();
+    public void flush() throws IOException {
+        try {
+            keyspace.flush();
+        } catch (RuntimeException e) {
+            // Engine failures are FolesiumException (RuntimeException); the caller
+            // (rfs-flush hook -> vanilla save path) only handles IOException.
+            throw new IOException("failed to flush Folesium store of " + storeDir, e);
+        }
     }
 
     @Override
-    public void close() {
+    public void close() throws IOException {
         if (!closed.compareAndSet(false, true)) {
             return;
         }
         try {
             keyspace.flush();
+        } catch (RuntimeException e) {
+            // The engine signals flush failures as FolesiumException (a RuntimeException),
+            // which would escape the world-unload / shutdown path unchecked and abort it.
+            // Surface it as an IOException, the exception type the vanilla close() already
+            // declares.
+            throw new IOException("Folesium: failed to flush keyspace '" + keyspaceName
+                    + "' on close", e);
         } finally {
             // release() must always run: if flush() throws and the registry reference were
             // skipped, the store, its shards and the group-commit thread would leak until

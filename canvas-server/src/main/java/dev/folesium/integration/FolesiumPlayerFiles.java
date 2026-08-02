@@ -124,21 +124,31 @@ public final class FolesiumPlayerFiles {
         if (t == null) {
             return Files.isRegularFile(path);
         }
+        final boolean present;
         try {
             // `true` means "there is data to read" in the store; there is no
             // vanilla-file fallback (no lazy migration).
-            return load(t) != null;
-        } catch (IOException | RuntimeException e) {
-            // The engine reports store failures as FolesiumException (a
-            // RuntimeException) and the store is the only source of truth while Folesium
-            // is active (no lazy migration), so any read failure means "no data" --
-            // never fall back to the vanilla file, which would resurrect pre-conversion
-            // data. WARN so a failing store is visible instead of silently behaving
-            // like an empty one.
+            present = load(t) != null;
+        } catch (IOException e) {
+            // load() only declares IOException (the store path never throws it today);
+            // still, never turn a read failure into "no data".
+            throw new java.io.UncheckedIOException(
+                    "failed to read stored player JSON for " + t.player(), e);
+        } catch (RuntimeException e) {
+            // The engine reports store failures as FolesiumException (a RuntimeException).
+            // Returning false here would make the vanilla call site treat the player as
+            // new, and the next autosave would overwrite the stored progress JSON with
+            // the fresh state -- permanent data loss. Surface the failure instead: the
+            // vanilla call sites (PlayerAdvancements.load / ServerStatsCounter ctor)
+            // cannot take a checked IOException at this position (their try-with-resources
+            // starts after the isRegularFile call and neither method declares throws), so
+            // the engine exception propagates unchecked and aborts the load, leaving the
+            // stored record untouched. WARN so the failing store is visible.
             LOGGER.log(System.Logger.Level.WARNING,
                     "Folesium: failed to read stored player JSON for " + t.player(), e);
-            return false;
+            throw e;
         }
+        return present;
     }
 
     /** Replacement for {@code Files.newBufferedReader(path, UTF_8)}. */

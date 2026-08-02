@@ -502,13 +502,19 @@ public final class FolesiumDatabase implements AutoCloseable {
     /** Records a runtime compression switch so the next open does not report it again. */
     private void persistCompression(FolesiumConfig.Compression compression) {
         Path meta = dir.resolve(METADATA_FILE);
+        if (!Files.isRegularFile(meta)) {
+            // No metadata file: writing one now would create an incomplete properties file
+            // (store.compression only - the open path also requires store.version, store.role
+            // and store.shardCount), which the next open would reject and thereby lock the
+            // store. Skip the persist; diskCompression() keeps reporting null, so the persist
+            // gate in applyRuntimeConfig simply retries once the metadata exists.
+            return;
+        }
         Properties p = new Properties();
-        if (Files.isRegularFile(meta)) {
-            try (var reader = Files.newBufferedReader(meta, StandardCharsets.UTF_8)) {
-                p.load(reader);
-            } catch (IOException e) {
-                throw new FolesiumException("Cannot read " + meta, e);
-            }
+        try (var reader = Files.newBufferedReader(meta, StandardCharsets.UTF_8)) {
+            p.load(reader);
+        } catch (IOException e) {
+            throw new FolesiumException("Cannot read " + meta, e);
         }
         p.setProperty("store.compression", compression.name());
         writeMetadataAtomically(meta, p);
@@ -1185,7 +1191,12 @@ public final class FolesiumDatabase implements AutoCloseable {
                     // Off the region threads and rate-limited: this is the only thing that
                     // keeps an append-only store from growing without bound.
                     compactIfNeededThrottled(amFlusher);
-                } catch (RuntimeException e) {
+                } catch (RuntimeException | Error e) {
+                    // Error is caught too: compactIfNeededThrottled() rethrows Error (e.g. a
+                    // native zstd failure) after recording the failure slot, and an uncaught
+                    // Error would kill this thread silently - BATCH group commit would stop
+                    // with nothing logged. Log it; the finally below clears `flusher`, so the
+                    // next driver starts a fresh thread instead of degrading to no flusher.
                     LOGGER.log(System.Logger.Level.ERROR, "Folesium group-commit failed for " + dir, e);
                 }
             }

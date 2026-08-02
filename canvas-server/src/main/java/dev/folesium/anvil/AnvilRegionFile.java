@@ -334,8 +334,16 @@ public final class AnvilRegionFile implements Closeable {
         if (!m.matches()) {
             return null;
         }
-        long chunkX = Long.parseLong(m.group(1)) * 32 + (localX & 31);
-        long chunkZ = Long.parseLong(m.group(2)) * 32 + (localZ & 31);
+        long chunkX;
+        long chunkZ;
+        try {
+            chunkX = Long.parseLong(m.group(1)) * 32 + (localX & 31);
+            chunkZ = Long.parseLong(m.group(2)) * 32 + (localZ & 31);
+        } catch (NumberFormatException e) {
+            // A name like r.9223372036854775808.0.mca cannot encode valid coordinates;
+            // treat it the same as an unparseable file name.
+            return null;
+        }
         return path.resolveSibling("c." + chunkX + "." + chunkZ + ".mcc");
     }
 
