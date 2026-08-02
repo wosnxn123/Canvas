@@ -26,8 +26,11 @@ import dev.folesium.core.util.LongKeys;
 import dev.folesium.core.util.UuidKeys;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.Objects;
 import java.util.UUID;
@@ -81,9 +84,21 @@ public final class Keyspace implements AutoCloseable {
     Keyspace(Path dir, String name, FolesiumConfig config, boolean readOnly) {
         this.name = name;
         int[] discovered = readOnly ? discoveredShardIndices(dir, name) : null;
-        int shardCount = readOnly
-                ? (discovered.length == 0 ? 0 : discovered[discovered.length - 1] + 1)
-                : config.shardCount();
+        int shardCount;
+        if (readOnly) {
+            if (discovered.length == 0) {
+                shardCount = 0;
+            } else {
+                // Routing must match the power-of-two mask the store was written with,
+                // not the count of files found: a sparse or torn layout (missing shard
+                // files) must still route every present file to itself. The shard file
+                // header records the authoritative shard count; absent slots stay null.
+                shardCount = readRecordedShardCount(
+                        dir.resolve(String.format("%s-%04d.flog", name, discovered[0])));
+            }
+        } else {
+            shardCount = config.shardCount();
+        }
         this.shards = new ShardFile[shardCount];
         this.shardMask = shardCount - 1;
         this.pageIndex = createPageIndex(dir, name, config, readOnly);
@@ -154,6 +169,30 @@ public final class Keyspace implements AutoCloseable {
         }
     }
 
+    /**
+     * Reads the authoritative shard count from a shard file header (shard count at
+     * offset 12, u32 big-endian, matching {@code ShardFile}'s file header). Validates
+     * the power-of-two invariant so the read-only routing mask is always legal.
+     */
+    private static int readRecordedShardCount(Path shardFile) {
+        try (FileChannel ch = FileChannel.open(shardFile, StandardOpenOption.READ)) {
+            ByteBuffer header = ByteBuffer.allocate(16);
+            int n = ch.read(header, 0);
+            if (n < 16) {
+                throw new FolesiumException("Shard file too short to read its header: " + shardFile);
+            }
+            header.flip();
+            header.position(12);
+            int count = header.getInt();
+            if (count < 1 || count > 1024 || Integer.bitCount(count) != 1) {
+                throw new FolesiumException("Invalid shard count " + count + " in header of " + shardFile);
+            }
+            return count;
+        } catch (IOException e) {
+            throw new FolesiumException("Cannot read shard header " + shardFile, e);
+        }
+    }
+
     private static boolean isDecimalIndex(String s) {
         if (s.isEmpty()) {
             return false;
@@ -217,7 +256,8 @@ public final class Keyspace implements AutoCloseable {
         } catch (FolesiumException e) {
             throw new FolesiumException("Dictionary of keyspace '" + name + "' in " + dictFile
                     + " is corrupt; codec-3 (ZSTD_DICT) records cannot be read without it. "
-                    + "Delete dict.bin and rebuild the store, or disable dictionaryCompression.", e);
+                    + "Restore dict.bin from a backup, or delete it and re-run the conversion "
+                    + "(dictionary compression must be re-enabled to write codec-3 records).", e);
         } catch (IOException e) {
             throw new FolesiumException("Cannot load the dictionary of keyspace '" + name + "' from " + dictFile, e);
         }

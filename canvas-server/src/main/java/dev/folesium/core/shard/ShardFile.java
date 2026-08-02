@@ -481,6 +481,15 @@ public final class ShardFile implements AutoCloseable {
         if (shardName == null) {
             return; // defensive: without a shard name there is no watermark file to anchor on
         }
+        // A completed compaction (a .cwmk file exists) means page files may hold
+        // pre-compaction log offsets - the deletion after the swap is a separate step,
+        // so a crash between the two leaves stale pages on disk. Discard them so the
+        // replay below rebuilds every page from the (post-compaction) log instead of
+        // merging into stale slots. Without a .cwmk the pages on disk were written by
+        // ordinary checkpoints and stay valid.
+        if (pageIndex.compactionWatermarkExists(shardName)) {
+            pageIndex.deleteAllPageFiles();
+        }
         long eof = channel.size();
         long anchor = Math.max(FILE_HEADER_LEN, Math.min(pageIndex.compactionWatermark(shardName), eof));
         Set<Long> corruptRegions = new HashSet<>();
@@ -497,7 +506,7 @@ public final class ShardFile implements AutoCloseable {
                 return;
             }
             try {
-                pageIndex.updateSlot(regionX, regionZ, slot, (flags & FLAG_TOMBSTONE) != 0 ? 0 : (int) recordOffset);
+                pageIndex.updateSlot(regionX, regionZ, slot, (flags & FLAG_TOMBSTONE) != 0 ? 0 : pageSlotOffset(recordOffset));
             } catch (RuntimeException e) {
                 // A damaged or unreadable page file must not fail the open. Repair it in
                 // place: drop any cached entry and delete the corrupt file, so the next
@@ -512,7 +521,7 @@ public final class ShardFile implements AutoCloseable {
                     corruptRegions.add(region);
                 } else {
                     pageIndex.updateSlot(regionX, regionZ, slot,
-                            (flags & FLAG_TOMBSTONE) != 0 ? 0 : (int) recordOffset);
+                            (flags & FLAG_TOMBSTONE) != 0 ? 0 : pageSlotOffset(recordOffset));
                 }
                 LOGGER.log(System.Logger.Level.WARNING,
                         "Folesium: page build for {0} repaired damaged page of region ({1}, {2}): {3}",
@@ -867,6 +876,16 @@ public final class ShardFile implements AutoCloseable {
      * {@code tombstone} clears the slot (offset 0), otherwise the new record offset is
      * stored. No-op when the page index is disabled. Caller holds the write lock.
      */
+    /**
+     * Page slots hold u32 offsets. An offset at or above 2^32 cannot be represented:
+     * writing the truncated int could make a read land on a different record's bytes,
+     * so the slot is cleared (absent) instead - reads then fall back to the HashMap
+     * (AUTO) or report absent (PAGE), never garbage.
+     */
+    private static int pageSlotOffset(long off) {
+        return off >= (1L << 32) ? 0 : (int) off;
+    }
+
     private void updatePageIndex(Bytes key, long off, boolean tombstone) {
         if (pageIndex == null || key.length() != 8) {
             return;
@@ -879,7 +898,7 @@ public final class ShardFile implements AutoCloseable {
             regionX = RegionPage.regionXFromChunk(chunkKey);
             regionZ = RegionPage.regionZFromChunk(chunkKey);
             slot = RegionPage.slotIndex(LongKeys.chunkX(chunkKey), LongKeys.chunkZ(chunkKey));
-            pageIndex.updateSlot(regionX, regionZ, slot, tombstone ? 0 : (int) off);
+            pageIndex.updateSlot(regionX, regionZ, slot, tombstone ? 0 : pageSlotOffset(off));
         } catch (RuntimeException e) {
             // The page index is a disposable cache: a slot update failure (e.g. a corrupt
             // page file) must never fail a write that is already durable in the log and
@@ -893,7 +912,7 @@ public final class ShardFile implements AutoCloseable {
                     "Folesium: page index update failed for {0} (key {1}): {2}", path, key, e.toString());
             if (pageIndex.rebuildPageFrom(regionX, regionZ)) {
                 try {
-                    pageIndex.updateSlot(regionX, regionZ, slot, tombstone ? 0 : (int) off);
+                    pageIndex.updateSlot(regionX, regionZ, slot, tombstone ? 0 : pageSlotOffset(off));
                 } catch (RuntimeException retryFailure) {
                     LOGGER.log(System.Logger.Level.WARNING,
                             "Folesium: page index update retry failed for {0} (key {1}): {2}",
@@ -974,7 +993,11 @@ public final class ShardFile implements AutoCloseable {
         // written earlier; a garbage slot read from a damaged page is treated the same).
         // A u32 can never reach 2^32, so no slot value is a miss on its face.
         long slotOffset = Integer.toUnsignedLong(off);
-        if (slotOffset >= channel.size()) {
+        // Trim against the logical EOF: in read-only mode a torn tail is deliberately
+        // left on disk (writePos < channel.size()), and a stale slot pointing into it
+        // must read as absent rather than as a damaged record. In read-write mode
+        // writePos == channel.size(), so the behavior is unchanged.
+        if (slotOffset >= writePos) {
             return null;
         }
         // The slot stores only the offset; keyLen/rawValLen/storedValLen/flags live in the

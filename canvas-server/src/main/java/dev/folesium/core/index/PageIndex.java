@@ -598,6 +598,18 @@ public final class PageIndex implements AutoCloseable {
     }
 
     /**
+     * Whether a compaction anchor file exists for this shard. A present {@code .cwmk}
+     * means a compaction completed at some point - and with it, page files that may
+     * still hold pre-compaction log offsets (the deletion in {@link #deleteAllPageFiles()}
+     * happens right after the swap, so a crash between the two leaves stale pages on
+     * disk). The open-time page build uses this to decide whether on-disk pages must be
+     * discarded and rebuilt from the log instead of being trusted.
+     */
+    public boolean compactionWatermarkExists(String shardName) {
+        return Files.isRegularFile(idxDir.resolve(shardName + COMPACTION_WATERMARK_SUFFIX));
+    }
+
+    /**
      * Returns the compaction anchor for a shard: the log EOF at the last completed
      * compaction, used as the rebuild start for damaged region pages. Served from the
      * in-memory cache; on a miss the {@code <shardName>.cwmk} file is read (missing or

@@ -84,8 +84,8 @@ public final class DictionaryStore {
         if (!hasDictionaryMagic(bytes)) {
             throw new FolesiumException(
                     "Dictionary file " + dictFile + " is corrupt: not a valid zstd dictionary "
-                            + "(missing or wrong magic header). Delete dict.bin and rebuild the store, "
-                            + "or disable dictionaryCompression; codec-3 records in this keyspace are "
+                            + "(missing or wrong magic header). Restore dict.bin from a backup, or delete "
+                            + "it and re-run the conversion; codec-3 records in this keyspace are "
                             + "not decodable without the dictionary.");
         }
         return bytes;
