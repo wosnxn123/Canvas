@@ -1141,7 +1141,17 @@ public final class FolesiumDatabase implements AutoCloseable {
                 t.join(1000);
             }
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+            // Deliberately do NOT re-assert the interrupt status: both callers resume
+            // blocking FileChannel I/O right after this returns (applyRuntimeConfig's
+            // post-retirement flush, close()'s per-keyspace close) and a set status would
+            // make the next blocking channel operation throw ClosedByInterruptException,
+            // permanently closing that shard channel (the same hazard flushLoop defends
+            // against by clearing the status). The join was already interrupted - the
+            // flusher either exited or will be retired on its next checkpoint - so the
+            // remaining teardown must proceed with a clean status. (An external interrupt
+            // aimed at this thread is consumed; that is the accepted cost of finishing the
+            // teardown safely.)
+            Thread.interrupted();
         }
     }
 
@@ -1273,7 +1283,18 @@ public final class FolesiumDatabase implements AutoCloseable {
                         // to kill the shard. Reopen the affected shard's channel so the
                         // store keeps serving; the fresh group-commit thread started below
                         // resumes flushing on it.
-                        reopenInterruptClosedShards();
+                        try {
+                            reopenInterruptClosedShards();
+                        } catch (RuntimeException reopenFailure) {
+                            // The reopen itself failed (e.g. an IOException re-opening a
+                            // shard): log it and continue the ERROR path. A throw here
+                            // would skip the ERROR log AND the startFlusherIfNeeded()
+                            // restart at the method tail, silently stopping BATCH group
+                            // commit - exactly what the restart exists to prevent.
+                            LOGGER.log(System.Logger.Level.ERROR,
+                                    "Folesium: failed to reopen shard channels after a"
+                                            + " channel-closing flush failure", reopenFailure);
+                        }
                     }
                     LOGGER.log(System.Logger.Level.ERROR, "Folesium group-commit failed for " + dir, e);
                     break;

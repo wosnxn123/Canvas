@@ -166,6 +166,16 @@ public final class FolesiumRegistry {
         // (e.g. after the file was deleted and regenerated with the defaults).
         fileProperties = p;
         filePropertiesStamp = configFileTimestamp();
+        if (enabledCache != null) {
+            // A re-read overwrote the value worlds actually bound: keep the old one for
+            // reload()'s enabled-flip warning. isEnabled() saves on refresh the same way;
+            // this covers the watcher's poll head, which re-reads the file (via
+            // intProperty -> property -> fileProperties) WITHOUT going through isEnabled
+            // - without the save here, the default operator flow (edit the file, the
+            // watcher applies it, no world load in between) would see enabledBefore ==
+            // enabledAfter in reload() and the warning would stay dead code.
+            enabledBeforeEdit = enabledCache;
+        }
         enabledCache = null;
         return fileProperties;
     }
@@ -692,6 +702,8 @@ public final class FolesiumRegistry {
         List<FolesiumDatabase> snapshot;
         FolesiumConfig cfg;
         boolean enabledBefore;
+        Boolean beforeEdit = null;
+        Boolean cachedBefore = null;
         try {
             synchronized (FolesiumRegistry.class) {
                 // Capture the previous effective value from the cache BEFORE isEnabled()
@@ -704,7 +716,8 @@ public final class FolesiumRegistry {
                 // edit and this reload refreshes enabledCache to the new value - the
                 // pre-edit value is then taken from enabledBeforeEdit, saved by isEnabled()
                 // exactly for this warning.
-                Boolean beforeEdit = enabledBeforeEdit;
+                beforeEdit = enabledBeforeEdit;
+                cachedBefore = enabledCache;
                 enabledBeforeEdit = null;
                 enabledBefore = beforeEdit != null
                         ? beforeEdit
@@ -722,6 +735,16 @@ public final class FolesiumRegistry {
             // call with the same catch, and a direct caller gets the same treatment here
             // - keep the previous configuration and report an empty result instead of
             // throwing (the change is retried the next time reload() is called).
+            // Restore the pre-edit enabled state consumed above: the edit-triggering
+            // reload failed, so the enabled-flip warning must still fire on the retry
+            // (and a later isEnabled() refresh would otherwise overwrite the saved
+            // pre-edit value).
+            if (beforeEdit != null) {
+                enabledBeforeEdit = beforeEdit;
+            }
+            if (cachedBefore != null) {
+                enabledCache = cachedBefore;
+            }
             LOGGER.log(System.Logger.Level.WARNING,
                     "Folesium: cannot read {0} for reload; keeping the previous configuration: {1}",
                     configFilePath().toAbsolutePath(), e.toString());
@@ -787,6 +810,15 @@ public final class FolesiumRegistry {
         long appliedStamp = filePropertiesStamp;
         if (!boolProperty("autoReload", true)) {
             return;
+        }
+        if (appliedStamp == 0L) {
+            // The file was never read through fileProperties() (the explicit-config
+            // acquire(dir, cfg) path, currently tests/embeddings only): the probe just
+            // absorbed it, so baseline at that stamp. A zero baseline would make the
+            // first poll treat a pre-existing operator file as an unapplied edit and
+            // reload() would override the explicitly passed configuration with the
+            // file's values.
+            appliedStamp = filePropertiesStamp;
         }
         configFileStamp = appliedStamp;
         Thread t = Thread.ofPlatform().daemon().name("folesium-config-watch")

@@ -25,6 +25,8 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -294,7 +296,7 @@ final class StoreResharder {
             for (Path old : listShardFiles(backup)) {
                 Path target = dir.resolve(old.getFileName().toString());
                 if (!Files.exists(target)) {
-                    Files.move(old, target, StandardCopyOption.ATOMIC_MOVE);
+                    moveReplacing(old, target);
                 }
             }
             fsyncDirectory(dir);
@@ -441,8 +443,7 @@ final class StoreResharder {
             if (!Files.isRegularFile(movedMarker)) {
                 Files.createDirectories(backup);
                 for (Path old : listShardFiles(dir)) {
-                    Files.move(old, backup.resolve(old.getFileName().toString()),
-                            StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                    moveReplacing(old, backup.resolve(old.getFileName().toString()));
                 }
                 FolesiumDatabase.writeAtomically(movedMarker, "ok");
                 fsyncDirectory(backup);
@@ -460,8 +461,7 @@ final class StoreResharder {
                             .filter(p -> !p.getFileName().toString().endsWith(".fidx.tmp"))
                             .toList();
                     for (Path p : staged) {
-                        Files.move(p, dir.resolve(p.getFileName().toString()),
-                                StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                        moveReplacing(p, dir.resolve(p.getFileName().toString()));
                     }
                 }
                 fsyncDirectory(dir);
@@ -805,8 +805,7 @@ final class StoreResharder {
         //    Old-layout hints come back with their shard files (the backup holds each pair
         //    as one set), landing on the slots step 0 just emptied.
         for (Path p : backupShards) {
-            Files.move(p, dir.resolve(p.getFileName().toString()),
-                    StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            moveReplacing(p, dir.resolve(p.getFileName().toString()));
         }
         // 2. Remove the new-layout leftovers from dir: every shard file whose index is
         //    beyond the old layout's count. The old layout has no shard with such an
@@ -1156,6 +1155,25 @@ final class StoreResharder {
         p.setProperty("store.previousShardCount", Integer.toString(oldCount));
         p.setProperty("store.reshardedAt", Long.toString(System.currentTimeMillis()));
         FolesiumDatabase.writeMetadataAtomically(meta, p);
+    }
+
+    /**
+     * Moves {@code source} over {@code target}, preferring an atomic replace but falling back
+     * to a plain replace move on filesystems that do not support atomic moves (reported either
+     * as {@link AtomicMoveNotSupportedException} or as a generic filesystem error). Mirrors
+     * {@code ShardFile.moveReplacing}: without the fallback, a reshard (or its recovery) would
+     * fail permanently - and every later open would retry the same failing recovery - on such
+     * filesystems.
+     */
+    private static void moveReplacing(Path source, Path target) throws IOException {
+        try {
+            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException e) {
+            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
+        } catch (FileSystemException e) {
+            // Some platforms report missing atomic-replace support as a generic filesystem error.
+            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
+        }
     }
 
     private static void closeQuietly(ShardFile[] shards) {

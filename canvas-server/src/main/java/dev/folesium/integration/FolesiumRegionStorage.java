@@ -89,6 +89,7 @@ public final class FolesiumRegionStorage implements AutoCloseable {
         if (!FolesiumRegistry.isEnabled()) {
             return null;
         }
+        checkNotShadowingVanillaChunks(folder);
         Path storeDir = storeDirectoryFor(folder);
         String keyspaceName = keyspaceFor(folder);
         FolesiumDatabase db = FolesiumRegistry.acquire(storeDir);
@@ -99,6 +100,35 @@ public final class FolesiumRegionStorage implements AutoCloseable {
         }
         LOGGER.log(System.Logger.Level.INFO, "Folesium: {0} -> {1}#{2}", folder, storeDir, keyspaceName);
         return new FolesiumRegionStorage(storeDir, keyspaceName, db);
+    }
+
+    /**
+     * Refuses to bind a dimension folder whose vanilla data would silently disappear:
+     * once the region hooks take over a folder's reads, the existing {@code .mca}
+     * payloads are never read again, so an empty store where real chunks exist means
+     * the dimension regenerates from seed (or the overworld is lost entirely). This
+     * covers both the pre-26 root dimension ({@code <world>/region} - whose store path
+     * {@code <world>/folesium} also collides with the legacy PLAYERS store) and a
+     * 26.x dimension that was never converted. A store that already exists is
+     * converted (or deliberately empty) and proceeds; a role conflict on the same
+     * path is left for acquire() to surface loudly.
+     */
+    private static void checkNotShadowingVanillaChunks(Path folder) {
+        Path storeDir = storeDirectoryFor(folder);
+        if (Files.exists(storeDir) || !Files.isDirectory(folder)) {
+            return;
+        }
+        try (var s = Files.list(folder)) {
+            if (s.anyMatch(p -> p.getFileName().toString().endsWith(".mca"))) {
+                throw new FolesiumException("Vanilla region data found at " + folder
+                        + " but its Folesium store does not exist yet: enabling Folesium here would"
+                        + " shadow those chunks and they would be lost (the region hooks take over"
+                        + " the folder's reads). Convert this world first (see MIGRATION.md), or"
+                        + " move/delete the old .mca files.");
+            }
+        } catch (IOException e) {
+            // Unreadable folder: let the open proceed; any real problem surfaces loudly later.
+        }
     }
 
     /**

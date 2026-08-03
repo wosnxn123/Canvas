@@ -138,7 +138,11 @@ public final class WorldConverter {
         // place and must not be deleted.
         Path backup = null;
         boolean backedUp = false;
-        if (config.backupOnConvert() && Files.isDirectory(folesiumDir)) {
+        // Read once up front: the per-region worker below needs the effective flag to
+        // decide whether a corrupt region aborts (backup mode: rollback protects the
+        // pre-existing store) or is skipped (first conversion: the source keeps the data).
+        boolean backupOnConvert = config.backupOnConvert();
+        if (backupOnConvert && Files.isDirectory(folesiumDir)) {
             backup = backupPath(folesiumDir);
         }
         try {
@@ -203,7 +207,24 @@ public final class WorldConverter {
                                 }
                             }
                         } catch (IOException ex) {
-                            throw new UncheckedIOException("Failed converting " + mca, ex);
+                            if (backupOnConvert) {
+                                // Backup mode must abort on a corrupt region: the rollback
+                                // restores the pre-existing store, whose data for this
+                                // region would otherwise be silently lost when the backup
+                                // tree is pruned after a "successful" rebuild.
+                                throw new UncheckedIOException("Failed converting " + mca, ex);
+                            }
+                            // Mirror the export side (the TO_ANVIL pass skips unreadable
+                            // records): a corrupt or torn region file must not abort the
+                            // whole world adoption - skip it with a loud warning and
+                            // convert what is readable. This is safe only on a first
+                            // conversion: the source world keeps the data, so the region
+                            // can be re-converted after a repair. The conversion is
+                            // non-destructive (the source world is untouched), and a
+                            // skipped region simply stays absent from the store, exactly
+                            // like the export-side skip semantics.
+                            System.err.println("Folesium: skipping corrupt region file " + mca
+                                    + " (" + ex + "); its chunks stay absent from the store");
                         }
                     });
                 }
@@ -794,21 +815,32 @@ public final class WorldConverter {
             futures.forEach(f -> f.cancel(true));
         } finally {
             if (failure != null) {
+                // A task failed (or was interrupted): cancel the rest and stop waiting
+                // promptly. A worker stuck in uninterruptible I/O would otherwise keep
+                // the awaitTermination(1, DAYS) retry loop below spinning forever,
+                // hanging a server-start conversion flag indefinitely instead of
+                // surfacing the failure.
                 futures.forEach(f -> f.cancel(true));
                 pool.shutdownNow();
+                try {
+                    pool.awaitTermination(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e2) {
+                    interrupted = true;
+                    Thread.currentThread().interrupt();
+                }
             } else {
                 pool.shutdown();
-            }
-            for (;;) {
-                try {
-                    if (pool.awaitTermination(1, TimeUnit.DAYS)) {
-                        break;
+                for (;;) {
+                    try {
+                        if (pool.awaitTermination(1, TimeUnit.DAYS)) {
+                            break;
+                        }
+                    } catch (InterruptedException e) {
+                        interrupted = true;
+                        failure = failure != null ? failure : new RuntimeException("Conversion interrupted", e);
+                        futures.forEach(f -> f.cancel(true));
+                        pool.shutdownNow();
                     }
-                } catch (InterruptedException e) {
-                    interrupted = true;
-                    failure = failure != null ? failure : new RuntimeException("Conversion interrupted", e);
-                    futures.forEach(f -> f.cancel(true));
-                    pool.shutdownNow();
                 }
             }
             if (interrupted) {

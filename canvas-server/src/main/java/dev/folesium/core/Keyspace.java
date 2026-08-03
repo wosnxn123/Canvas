@@ -661,12 +661,15 @@ public final class Keyspace implements AutoCloseable {
         // Log-first, best-effort: dirty pages must not be persisted ahead of the log data
         // they reference, so the shard forces run first. This is an ordering preference,
         // not the correctness mechanism - a concurrent writer can dirty a shard after its
-        // flushIfDirty() above (the two phases take different locks), and flushIfDirty()
-        // early-returns with dirty still set when the shard channel is closed, so the page
-        // flush can still outrun the log force. Correctness is enforced by the read-path
-        // slot trimming instead: a page persisted ahead of its log data holds slots at or
-        // past the log EOF, which pageIndexLoc rejects as misses (and the record key must
-        // match the slot's key), so such a page reads as absent until the log catches up.
+        // flushIfDirty() above (the two phases take different locks), so the page
+        // flush can still outrun the log force. (A shard whose channel an interrupt
+        // closed makes flushIfDirty() throw, aborting this flush before the page phase;
+        // the group-commit loop reopens the channel and retries - only a channel==null
+        // shard, a failed compaction restore, early-returns.) Correctness is enforced by
+        // the read-path slot trimming instead: a page persisted ahead of its log data
+        // holds slots at or past the log EOF, which pageIndexLoc rejects as misses (and
+        // the record key must match the slot's key), so such a page reads as absent until
+        // the log catches up.
         if (pageIndex != null) {
             pageIndex.flush();
         }

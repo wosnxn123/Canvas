@@ -308,6 +308,14 @@ public final class DictionaryStore {
             throw new FolesiumException("Cannot train a dictionary from " + samples.size()
                     + " samples; zstd requires at least " + MIN_SAMPLES);
         }
+        // A null element would be handed straight to the native trainFromBuffer downcall
+        // as an empty pointer (JNI NPE or worse) instead of a clean rejection - validate
+        // up front like every other public-API input.
+        for (int i = 0; i < samples.size(); i++) {
+            if (samples.get(i) == null) {
+                throw new FolesiumException("Cannot train a dictionary: sample " + i + " is null");
+            }
+        }
         byte[] trained = ZstdNative.trainDict(samples.toArray(new byte[0][]), DICT_SIZE);
         // Symmetric with load(): never persist a dictionary that load() would reject, or
         // every existing codec-3 record of this keyspace would become undecodable. The size
@@ -504,6 +512,17 @@ public final class DictionaryStore {
                         FileLock verifyLock = verify.tryLock();
                         if (verifyLock == null) {
                             // Another process holds the recreated file: orphaned inode.
+                            channel.close();
+                            continue;
+                        }
+                        // Re-check the identity while holding the verify lock: the path
+                        // may have been deleted and recreated between the fileKeyOf above
+                        // and this open - verify would then have locked the NEW file
+                        // while our first channel still locks the deleted orphan, and
+                        // the path's file would be unprotected (a concurrent trainer
+                        // could take it and both would overwrite dict.bin).
+                        Object verifyKey = fileKeyOf(lockFile);
+                        if (verifyKey == null || !verifyKey.equals(currentFileKey)) {
                             channel.close();
                             continue;
                         }

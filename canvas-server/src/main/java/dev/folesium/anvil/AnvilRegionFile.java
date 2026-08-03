@@ -148,6 +148,17 @@ public final class AnvilRegionFile implements Closeable {
                         if (count == 0 || off < 2
                                 || (long) off + count > availableSectors
                                 || (firstUsed >= 0 && firstUsed < off + count)) {
+                            if (readOnly) {
+                                // Tolerate a torn/invalid header entry on the read-only
+                                // conversion path: treat the slot as absent (vanilla
+                                // tolerates per-chunk damage the same way) instead of
+                                // rejecting the whole region file and making every other
+                                // chunk in it unreadable. The writable path still rejects
+                                // - the strictness protects the sector allocator, and a
+                                // writable open is where a repair would happen.
+                                loadedLocations[i] = 0;
+                                continue;
+                            }
                             throw new IOException("Invalid chunk location 0x"
                                     + Integer.toHexString(loc) + " at header index " + i);
                         }
@@ -205,6 +216,7 @@ public final class AnvilRegionFile implements Closeable {
     public void deleteChunk(int localX, int localZ) throws IOException {
         int idx = indexOf(localX, localZ);
         int oldLoc = locations[idx];
+        int oldTimestamp = timestamps[idx];
         if (oldLoc == 0) {
             if (readOnly) {
                 throw new NonWritableChannelException();
@@ -229,7 +241,20 @@ public final class AnvilRegionFile implements Closeable {
         // Commit point: the chunk is gone from the region once the zeroed header entry
         // is forced.
         writeHeaderEntry(0, 0, idx);
-        channel.force(false);
+        try {
+            channel.force(false);
+        } catch (IOException failure) {
+            // Roll the header back: the force failed, so the deletion never committed.
+            // Without the rollback the in-memory slots would keep reporting the chunk
+            // (and holding its sectors) while the file header already says it is gone -
+            // the same memory/file divergence writeChunk's failure path avoids.
+            try {
+                writeHeaderEntry(oldLoc, oldTimestamp, idx);
+            } catch (IOException rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            throw failure;
+        }
         locations[idx] = 0;
         timestamps[idx] = 0;
         usedSectors.clear(oldSectorOff, oldSectorOff + oldSectorCount);
@@ -427,6 +452,7 @@ public final class AnvilRegionFile implements Closeable {
         Path backup = null;
         boolean externalPublished = false;
         boolean headerWriteStarted = false;
+        boolean keepBackup = false;
         try {
             writeFully(out, (long) sectorOff * SECTOR_BYTES);
             channel.force(false);
@@ -500,6 +526,12 @@ public final class AnvilRegionFile implements Closeable {
                         backup = null;
                     }
                 } catch (IOException rollbackFailure) {
+                    // The published .mcc was deleted and the old payload could not be
+                    // restored: keep the backup file - it is the only surviving copy of
+                    // the old payload, and the finally block would otherwise delete it,
+                    // permanently losing the chunk's data (the region header stub still
+                    // references the external file).
+                    keepBackup = true;
                     failure.addSuppressed(rollbackFailure);
                 }
             } else if (backup != null) {
@@ -511,13 +543,18 @@ public final class AnvilRegionFile implements Closeable {
                             java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                     backup = null;
                 } catch (IOException rollbackFailure) {
+                    // Same protection as above: the restore failed, so the backup must
+                    // survive the finally block or the old payload is gone for good.
+                    keepBackup = true;
                     failure.addSuppressed(rollbackFailure);
                 }
             }
             throw failure;
         } finally {
             deleteQuietly(staged);
-            deleteQuietly(backup);
+            if (!keepBackup) {
+                deleteQuietly(backup);
+            }
         }
     }
 
