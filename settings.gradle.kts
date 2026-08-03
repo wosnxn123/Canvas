@@ -3,6 +3,8 @@ import java.util.*
 pluginManagement {
     repositories {
         mavenLocal()
+        maven("https://maven.aliyun.com/repository/gradle-plugin") // Maven Central blocks CNB/CN hosts (HTTP 403)
+        maven("https://maven.aliyun.com/repository/public")
         gradlePluginPortal()
         maven {
             name = "canvasmc"
