@@ -297,10 +297,16 @@ public final class FolesiumDatabase implements AutoCloseable {
         this.dir = dir;
         this.role = requestedRole;
         this.readOnly = !applyLayoutChanges;
-        try {
-            Files.createDirectories(dir);
-        } catch (IOException e) {
-            throw new FolesiumException("Cannot create store directory " + dir, e);
+        // Only a writable open may create the directory: a read-only open (converter
+        // export / inspect) must never write, and creating an empty dir tree on a path
+        // it was pointed at by mistake would violate that contract (the callers validate
+        // the target exists first via requireStore / the CLI guards).
+        if (!readOnly) {
+            try {
+                Files.createDirectories(dir);
+            } catch (IOException e) {
+                throw new FolesiumException("Cannot create store directory " + dir, e);
+            }
         }
 
         // Checked before reconcileMetadata so an unusable codec cannot be recorded in the

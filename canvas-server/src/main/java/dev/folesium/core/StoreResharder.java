@@ -147,7 +147,7 @@ final class StoreResharder {
             // is only finished once every new shard is present in dir.
             boolean swappable = newCount != null && (moved
                     ? completeNewLayout(dir, staging, backup, newCount)
-                    : validStagedLayout(dir, staging, newCount));
+                    : validStagedLayout(dir, staging, backup, newCount));
             if (swappable) {
                 LOGGER.log(System.Logger.Level.WARNING,
                         "Folesium: resuming an interrupted reshard of {0}", dir);
@@ -608,7 +608,7 @@ final class StoreResharder {
      * staged set that silently dropped a whole keyspace must be judged invalid - otherwise
      * that keyspace's records would have no surviving copy.
      */
-    private static boolean validStagedLayout(Path dir, Path staging, int count) {
+    private static boolean validStagedLayout(Path dir, Path staging, Path backup, int count) {
         try {
             // An empty staging directory is never a valid staged layout: the checks below
             // all pass vacuously when it holds no shard files, and recover() would then
@@ -621,14 +621,26 @@ final class StoreResharder {
                 }
             }
             // The staged set must cover every keyspace the store has - the coverage check
-            // mirroring completeNewLayout's union of discoverKeyspaces(dir) and
-            // discoverKeyspaces(staging). The per-keyspace completeness checks below only
-            // look at keyspaces that ARE staged, so they cannot catch one that is missing
-            // entirely: a staged set that dropped a whole keyspace must be judged invalid
-            // so recover() rolls the swap back / discards it instead of finishSwap deleting
-            // the only surviving copy of that keyspace's records.
+            // mirroring completeNewLayout's union of discoverKeyspaces(dir),
+            // discoverKeyspaces(staging) and discoverKeyspaces(backup). The per-keyspace
+            // completeness checks below only look at keyspaces that ARE staged, so they
+            // cannot catch one that is missing entirely: a staged set that dropped a whole
+            // keyspace must be judged invalid so recover() rolls the swap back / discards
+            // it instead of finishSwap deleting the only surviving copy of that keyspace's
+            // records. The backup tree is covered too: a crash inside finishSwap's
+            // old-files-move loop (before MOVED) leaves old files in backup while COMMIT
+            // is present and MOVED is absent, and a keyspace whose old files were ALL
+            // moved there while its staged files were lost would otherwise be invisible to
+            // both the dir and staging checks - judged complete vacuously and its backup -
+            // the only surviving copy of its records - deleted by finishSwap. Guarding the
+            // backup set is what completeNewLayout (line ~704) and movedAloneBackupDeletable
+            // already do; this closes the one COMMIT path that could delete the backup
+            // without proving every backup keyspace is staged.
             TreeSet<String> stagedNames = new TreeSet<>(discoverKeyspaces(staging));
             if (!stagedNames.containsAll(discoverKeyspaces(dir))) {
+                return false;
+            }
+            if (backup != null && !stagedNames.containsAll(discoverKeyspaces(backup))) {
                 return false;
             }
             for (String name : stagedNames) {
@@ -1106,7 +1118,9 @@ final class StoreResharder {
             Properties p = new Properties();
             try (var r = Files.newBufferedReader(meta, StandardCharsets.UTF_8)) {
                 p.load(r);
-            } catch (IOException e) {
+            } catch (IOException | IllegalArgumentException e) {
+                // Properties.load throws IllegalArgumentException for a malformed \\uXXXX
+                // escape - surface it as the FolesiumException every metadata site uses.
                 throw new FolesiumException("Cannot read " + meta, e);
             }
             String raw = p.getProperty("store.shardCount");
@@ -1150,7 +1164,10 @@ final class StoreResharder {
         Properties p = new Properties();
         try (var reader = Files.newBufferedReader(meta, StandardCharsets.UTF_8)) {
             p.load(reader);
-        } catch (IOException e) {
+        } catch (IOException | IllegalArgumentException e) {
+            // Properties.load throws IllegalArgumentException for a malformed \\uXXXX
+            // escape - wrap it as the FolesiumException every other metadata read site
+            // uses, not as a bare IAE escaping the recover() write path.
             throw new FolesiumException("Cannot read " + meta, e);
         }
         String raw = p.getProperty("store.shardCount");
@@ -1246,6 +1263,11 @@ final class StoreResharder {
         if (Files.isRegularFile(meta)) {
             try (var reader = Files.newBufferedReader(meta, StandardCharsets.UTF_8)) {
                 p.load(reader);
+            } catch (IllegalArgumentException e) {
+                // Properties.load throws IllegalArgumentException for a malformed \\uXXXX
+                // escape - surface it as an IOException so the caller's existing
+                // FolesiumException wrapping (which catches IOException) applies.
+                throw new IOException("Malformed metadata escape in " + meta, e);
             }
         }
         p.setProperty("store.shardCount", Integer.toString(newCount));
