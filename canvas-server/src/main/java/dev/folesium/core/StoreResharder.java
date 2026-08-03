@@ -292,6 +292,12 @@ final class StoreResharder {
                 LOGGER.log(System.Logger.Level.WARNING,
                         "Folesium: removing the backup of an incomplete reshard of {0}"
                                 + " (the complete new layout in place is kept)", dir);
+            } else if (hasBackup) {
+                // Old files are moved back from the backup tree; the final state equals
+                // the pre-reshard layout, but the operation itself is a restore.
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Folesium: discarding an incomplete reshard of {0} and restoring the"
+                                + " previous layout from the backup", dir);
             } else {
                 LOGGER.log(System.Logger.Level.WARNING,
                         "Folesium: discarding an incomplete reshard of {0} (store is unchanged)", dir);

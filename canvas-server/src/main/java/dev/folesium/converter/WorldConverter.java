@@ -425,6 +425,13 @@ public final class WorldConverter {
                     // Keep brand-new worlds free of meaningless empty Anvil roots.
                     continue;
                 }
+                // An EMPTY existing directory (e.g. an empty region/ root) holds nothing
+                // to preserve: backing it up would create a permanent empty
+                // .folesium-backup-* tree (pruneOldBackups keeps the newest of each
+                // class) and a misleading 'kept as backups' log entry.
+                if (ks.count() == 0 && WorldConverter.isEmptyDirectory(out)) {
+                    continue;
+                }
                 if (config.backupOnConvert()) {
                     convertKeyspaceViaStaging(out, ks, chunkCount, byteCount, sink);
                 } else {

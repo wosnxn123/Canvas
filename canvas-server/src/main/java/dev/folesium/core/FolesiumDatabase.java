@@ -203,7 +203,10 @@ public final class FolesiumDatabase implements AutoCloseable {
         Properties p = new Properties();
         try (var reader = Files.newBufferedReader(meta, java.nio.charset.StandardCharsets.UTF_8)) {
             p.load(reader);
-        } catch (IOException e) {
+        } catch (IOException | IllegalArgumentException e) {
+            // Properties.load throws IllegalArgumentException for a malformed \\uXXXX
+            // escape - the one corruption mode that must surface as the same
+            // FolesiumException as every other metadata failure, not as a bare IAE.
             throw new FolesiumException("Cannot read " + meta, e);
         }
         return parseRole(p.getProperty("store.role"), meta);
@@ -229,7 +232,10 @@ public final class FolesiumDatabase implements AutoCloseable {
         Properties p = new Properties();
         try (var reader = Files.newBufferedReader(meta, java.nio.charset.StandardCharsets.UTF_8)) {
             p.load(reader);
-        } catch (IOException e) {
+        } catch (IOException | IllegalArgumentException e) {
+            // Properties.load throws IllegalArgumentException for a malformed \\uXXXX
+            // escape - the one corruption mode that must surface as the same
+            // FolesiumException as every other metadata failure, not as a bare IAE.
             throw new FolesiumException("Cannot read " + meta, e);
         }
         // Validate like reconcileMetadata does (role, version, shardCount range), so a
@@ -413,7 +419,9 @@ public final class FolesiumDatabase implements AutoCloseable {
 
         try (var reader = Files.newBufferedReader(meta, StandardCharsets.UTF_8)) {
             p.load(reader);
-        } catch (IOException e) {
+        } catch (IOException | IllegalArgumentException e) {
+            // Properties.load throws IllegalArgumentException for a malformed \\uXXXX
+            // escape (see the other metadata read sites).
             throw new FolesiumException("Cannot read " + meta, e);
         }
         int version;
@@ -589,7 +597,9 @@ public final class FolesiumDatabase implements AutoCloseable {
         Properties p = new Properties();
         try (var reader = Files.newBufferedReader(meta, StandardCharsets.UTF_8)) {
             p.load(reader);
-        } catch (IOException e) {
+        } catch (IOException | IllegalArgumentException e) {
+            // Properties.load throws IllegalArgumentException for a malformed \\uXXXX
+            // escape (see the other metadata read sites).
             throw new FolesiumException("Cannot read " + meta, e);
         }
         p.setProperty("store.compression", compression.name());
@@ -613,7 +623,9 @@ public final class FolesiumDatabase implements AutoCloseable {
         Properties p = new Properties();
         try (var reader = Files.newBufferedReader(meta, StandardCharsets.UTF_8)) {
             p.load(reader);
-        } catch (IOException e) {
+        } catch (IOException | IllegalArgumentException e) {
+            // Properties.load throws IllegalArgumentException for a malformed \\uXXXX
+            // escape (see the other metadata read sites).
             throw new FolesiumException("Cannot read " + meta, e);
         }
         String raw = p.getProperty("store.compression");
@@ -645,9 +657,34 @@ public final class FolesiumDatabase implements AutoCloseable {
     }
 
     /** Returns (creating on first use) the named keyspace. */
+    /**
+     * A keyspace name is embedded in file names ({@code <name>-NNNN.flog}, {@code idx/<name>/}),
+     * so it must be a single path segment without dots (a name like {@code .} or {@code ..}
+     * would escape the store directory).
+     */
+    private static boolean isValidKeyspaceName(String name) {
+        if (name == null || name.isEmpty() || name.equals(".") || name.equals("..")) {
+            return false;
+        }
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            if (c == '/' || c == '\\' || c == '.') {
+                return false;
+            }
+        }
+        return true;
+    }
+
     public Keyspace keyspace(String name) {
         if (closed.get()) {
             throw new FolesiumException("Database is closed: " + dir);
+        }
+        // The keyspace name is embedded in shard-file and idx/ directory names: a name
+        // containing separators or '..' would silently write files OUTSIDE the store
+        // directory on a writable open. Only a plain name is legal.
+        if (!isValidKeyspaceName(name)) {
+            throw new FolesiumException("Invalid keyspace name '" + name + "' for store " + dir
+                    + " (must be a plain name without path separators or dots)");
         }
         Keyspace existing = keyspaces.get(name);
         if (existing != null) {

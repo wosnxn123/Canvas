@@ -525,6 +525,13 @@ public final class FolesiumRegistry {
                 }
                 enabledCache = false;
                 degradedEnabled = true;
+                // The re-read failed, but the pre-outage value (captured before the
+                // attempt) is a real bound value: save it so an enabled flip that landed
+                // on disk during the outage still triggers reload()'s warning once the
+                // file is readable again (the degraded false itself is never saved).
+                if (enabledCacheBefore != null && !degradedBefore) {
+                    enabledBeforeEdit = enabledCacheBefore;
+                }
             }
         }
         return enabledCache;
@@ -1312,7 +1319,11 @@ public final class FolesiumRegistry {
         ensureShutdownHook();
         Path key = canonical(dir);
         Entry entry = OPEN.get(key);
-        if (entry != null && !entry.db.isClosed()) {
+        // A zero-reference entry whose close() once failed is a zombie: its keyspaces are
+        // partly closed and torn, and joining it would serve a half-closed store (and bump
+        // its refCount away from 0, defeating the 'a later release/closeAll retries the
+        // close' design). Only join live stores; a zombie is replaced by a fresh open.
+        if (entry != null && !entry.db.isClosed() && entry.refCount > 0) {
             // Join an already-open store before any config file access. The watcher restart
             // must not fail the join either: a transient read failure here logs and joins
             // anyway (the watcher retries on its own polling).

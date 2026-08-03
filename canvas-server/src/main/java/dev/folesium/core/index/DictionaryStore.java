@@ -324,10 +324,14 @@ public final class DictionaryStore {
         }
         // A null element would be handed straight to the native trainFromBuffer downcall
         // as an empty pointer (JNI NPE or worse) instead of a clean rejection - validate
-        // up front like every other public-API input.
+        // up front like every other public-API input. Zero-length samples are rejected
+        // too: they reach the downcall fine but contribute nothing (silently weakening
+        // the dictionary) or fail it with an undocumented native error.
         for (int i = 0; i < samples.size(); i++) {
-            if (samples.get(i) == null) {
-                throw new FolesiumException("Cannot train a dictionary: sample " + i + " is null");
+            byte[] sample = samples.get(i);
+            if (sample == null || sample.length == 0) {
+                throw new FolesiumException("Cannot train a dictionary: sample " + i
+                        + (sample == null ? " is null" : " is empty"));
             }
         }
         byte[] trained = ZstdNative.trainDict(samples.toArray(new byte[0][]), DICT_SIZE);
@@ -717,10 +721,19 @@ public final class DictionaryStore {
      * than masked by a doomed retry.</p>
      */
     private static void moveIntoPlace(Path source, Path target) throws IOException {
+        // NOFOLLOW check immediately before the move: the primary ATOMIC_MOVE path never
+        // surfaces an existing target (silent replace on POSIX and Windows), so without
+        // this the documented no-replace defense only ran in the fallback branches. A
+        // dangling symlink counts as present (it exists as a link) - the fallback exists()
+        // checks below follow links and would miss it, letting the move replace the link
+        // and orphan codec-3 records written against its target.
+        if (Files.exists(target, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            throw new FileAlreadyExistsException(target.toString());
+        }
         try {
             Files.move(source, target, StandardCopyOption.ATOMIC_MOVE);
         } catch (AtomicMoveNotSupportedException e) {
-            if (Files.exists(target)) {
+            if (Files.exists(target, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
                 FileAlreadyExistsException race = new FileAlreadyExistsException(target.toString());
                 race.addSuppressed(e);
                 throw race;
@@ -733,7 +746,7 @@ public final class DictionaryStore {
             // converted to FileAlreadyExistsException. Any other failure is rethrown
             // unchanged, keeping the original diagnostics instead of masking them behind
             // a retry that would fail the same way.
-            if (Files.exists(target)) {
+            if (Files.exists(target, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
                 FileAlreadyExistsException race = new FileAlreadyExistsException(target.toString());
                 race.addSuppressed(e);
                 throw race;

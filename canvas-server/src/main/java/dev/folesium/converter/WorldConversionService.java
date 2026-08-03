@@ -211,14 +211,22 @@ public final class WorldConversionService {
                         stats = converter.anvilToFolesium(dim, folesiumStore, config, movedStores::add);
                     }
                     case TO_ANVIL -> {
-                        if (!hasFolesium) continue;
-                        // A folesium/ directory that is not a DIMENSION store (e.g. a
-                        // foreign or PLAYERS store) must be skipped loudly, mirroring the
-                        // TO_FOLESIUM refusal of the same case: silently ignoring it would
-                        // hide that this dimension was never exported.
+                        // A folesium/ directory that is not a DIMENSION store (a foreign
+                        // non-store directory, or a PLAYERS store misplaced outside the
+                        // root dimension) must be skipped loudly - silently ignoring it
+                        // would hide that this dimension was never exported. The root
+                        // dimension's PLAYERS store is the one legitimate case: player
+                        // data is handled by convertPlayerData, so skip it quietly.
+                        // (hasFolesium can't gate this: it is false for exactly the
+                        // foreign/non-store cases that must be reported.)
+                        if (!Files.exists(folesiumStore)) {
+                            continue;
+                        }
                         if (FolesiumDatabase.readRole(folesiumStore) != FolesiumDatabase.StoreRole.DIMENSION) {
-                            System.err.println("Folesium: skipped dimension " + dim + ": " + folesiumStore
-                                    + " is not a DIMENSION store; its data was not exported");
+                            if (!dim.equals(worldRoot)) {
+                                System.err.println("Folesium: skipped dimension " + dim + ": " + folesiumStore
+                                        + " is not a DIMENSION store; its data was not exported");
+                            }
                             continue;
                         }
                         // backupOnConvert moves the replaced vanilla trees (region/, entities/,

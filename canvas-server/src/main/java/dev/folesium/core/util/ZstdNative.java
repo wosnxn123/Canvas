@@ -229,7 +229,7 @@ public final class ZstdNative {
             // engine's own failure type so the write path never leaks the optional
             // dependency's exception class (Compressors applies the same normalization
             // on the read side).
-            if (e.getClass().getName().equals("com.github.luben.zstd.ZstdException")) {
+            if (Compressors.isZstdException(e)) {
                 throw new IllegalStateException("zstd compression failed", e);
             }
             throw e;
@@ -247,13 +247,11 @@ public final class ZstdNative {
             return (byte[]) mh.invokeExact(src, rawLen);
         } catch (RuntimeException | Error e) {
             // zstd-jni signals native failures as com.github.luben.zstd.ZstdException (a
-            // RuntimeException) rather than negative return codes; normalize it to the
-            // engine's own failure type so the write path never leaks the optional
-            // dependency's exception class (Compressors applies the same normalization
-            // on the read side).
-            if (e.getClass().getName().equals("com.github.luben.zstd.ZstdException")) {
-                throw new IllegalStateException("zstd decompression failed", e);
-            }
+            // RuntimeException) rather than negative return codes. On the READ path the
+            // caller (Compressors.zstdInflate / decompressWithDict) normalizes it to
+            // "Corrupt compressed record" itself, so rethrow as-is; only the WRITE path
+            // (below) converts it, so the optional dependency's exception type never
+            // escapes a store write.
             throw e;
         } catch (Throwable t) {
             throw new IllegalStateException("zstd decompression failed", t);
@@ -316,7 +314,7 @@ public final class ZstdNative {
             // engine's own failure type so the write path never leaks the optional
             // dependency's exception class (Compressors applies the same normalization
             // on the read side).
-            if (e.getClass().getName().equals("com.github.luben.zstd.ZstdException")) {
+            if (Compressors.isZstdException(e)) {
                 throw new IllegalStateException("zstd dictionary compression failed", e);
             }
             throw e;
@@ -352,13 +350,11 @@ public final class ZstdNative {
             return dst;
         } catch (RuntimeException | Error e) {
             // zstd-jni signals native failures as com.github.luben.zstd.ZstdException (a
-            // RuntimeException) rather than negative return codes; normalize it to the
-            // engine's own failure type so the write path never leaks the optional
-            // dependency's exception class (Compressors applies the same normalization
-            // on the read side).
-            if (e.getClass().getName().equals("com.github.luben.zstd.ZstdException")) {
-                throw new IllegalStateException("zstd dictionary decompression failed", e);
-            }
+            // RuntimeException) rather than negative return codes. On the READ path the
+            // caller (Compressors.decompressWithDict) normalizes it to "Corrupt
+            // compressed record" itself, so rethrow as-is; only the WRITE path
+            // (compressUsingDict) converts it, so the optional dependency's exception
+            // type never escapes a store write.
             throw e;
         } catch (Throwable t) {
             throw new IllegalStateException("zstd dictionary decompression failed", t);
@@ -428,7 +424,7 @@ public final class ZstdNative {
             // engine's own failure type so the write path never leaks the optional
             // dependency's exception class (Compressors applies the same normalization
             // on the read side).
-            if (e.getClass().getName().equals("com.github.luben.zstd.ZstdException")) {
+            if (Compressors.isZstdException(e)) {
                 throw new IllegalStateException("zstd dictionary training failed", e);
             }
             throw e;

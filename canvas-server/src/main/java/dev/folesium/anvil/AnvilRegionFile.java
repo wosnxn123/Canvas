@@ -247,9 +247,12 @@ public final class AnvilRegionFile implements Closeable {
             // Roll the header back: the force failed, so the deletion never committed.
             // Without the rollback the in-memory slots would keep reporting the chunk
             // (and holding its sectors) while the file header already says it is gone -
-            // the same memory/file divergence writeChunk's failure path avoids.
+            // the same memory/file divergence writeChunk's failure path avoids. Force
+            // again so the rollback itself is durable (a transient force failure must
+            // not leave the zeroed entry committed on disk after a reported failure).
             try {
                 writeHeaderEntry(oldLoc, oldTimestamp, idx);
+                channel.force(false);
             } catch (IOException rollbackFailure) {
                 failure.addSuppressed(rollbackFailure);
             }
@@ -562,6 +565,12 @@ public final class AnvilRegionFile implements Closeable {
                             java.nio.file.Files.move(backup, externalPath,
                                     java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                         }
+                        // Force the directory so the RESTORED name is durable: the publish
+                        // path forced the new payload, and without this force a crash could
+                        // replay to the published state (canonical = new payload, backup
+                        // inode consumed) while the rolled-back header stub references the
+                        // same path - serving uncommitted data after a reported failure.
+                        forceParentDirectory(externalPath);
                         backup = null;
                     } catch (IOException rollbackFailure) {
                         // The published .mcc could not be replaced with the old payload:
@@ -597,6 +606,9 @@ public final class AnvilRegionFile implements Closeable {
                         java.nio.file.Files.move(backup, externalPath,
                                 java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                     }
+                    // Force the directory so the restored name is durable (same crash
+                    // replay concern as the published-branch rollback above).
+                    forceParentDirectory(externalPath);
                     backup = null;
                 } catch (IOException rollbackFailure) {
                     // Same protection as above: the restore failed, so the backup must

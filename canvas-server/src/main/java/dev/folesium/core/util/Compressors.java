@@ -237,9 +237,11 @@ public final class Compressors {
      * Whether {@code t} is (a subclass of) {@code com.github.luben.zstd.ZstdException} -
      * zstd-jni's runtime exception for corrupt/truncated frames. Matched by class name
      * because zstd-jni is an optional runtime dependency: the main source set must not
-     * reference its types at compile time (see {@link ZstdNative}).
+     * reference its types at compile time (see {@link ZstdNative}). Shared with
+     * {@link ZstdNative} so the write path normalizes subclasses too (a shaded or upgraded
+     * zstd-jni may throw a subclass).
      */
-    private static boolean isZstdException(Throwable t) {
+    static boolean isZstdException(Throwable t) {
         Class<?> c = t.getClass();
         while (c != null && c != Object.class) {
             if ("com.github.luben.zstd.ZstdException".equals(c.getName())) {

@@ -578,6 +578,12 @@ public final class PlayerDataConverter {
                     // Do not create empty vanilla roots on a brand-new world.
                     continue;
                 }
+                // An EMPTY existing directory holds nothing to preserve: backing it up
+                // would create a permanent empty .folesium-backup-* tree and a
+                // misleading 'kept as backups' log entry (mirrors the dimension side).
+                if (ks.count() == 0 && WorldConverter.isEmptyDirectory(out)) {
+                    continue;
+                }
                 long[] inc = config.backupOnConvert()
                         ? convertMappingViaStaging(out, ks, m, sink)
                         : convertMappingInPlace(out, ks, m);

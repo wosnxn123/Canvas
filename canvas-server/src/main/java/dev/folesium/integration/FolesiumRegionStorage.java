@@ -180,8 +180,10 @@ public final class FolesiumRegionStorage implements AutoCloseable {
 
     /**
      * Serialises a chunk tag to uncompressed NBT bytes. Compression is Folesium's job
-     * (per-record, configurable), which keeps this step allocation-cheap and lets the
-     * caller run it off the region thread exactly like Moonrise does today.
+     * (per-record, configurable), which keeps this step allocation-cheap. Currently
+     * called inline from the startWrite hook (on the region thread, like vanilla's own
+     * serialise); the resulting bytes are handed to the finishWrite callback, which the
+     * region I/O system runs off the region thread.
      */
     public static byte[] serialise(CompoundTag tag) throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream(64 * 1024);
