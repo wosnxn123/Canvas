@@ -345,6 +345,26 @@ public final class WorldConversionService {
                     System.out.println("Folesium: files (playerdata/advancements/stats) are left unconverted.");
                     return 0;
                 }
+                // Same non-empty-non-store refusal the dimension paths apply: a foreign
+                // non-empty directory at the player-store location (leftover files,
+                // another product's data) must not get a store materialized inside it -
+                // in default mode the metadata+shards would mix with the existing files,
+                // and with backupOnConvert the whole directory would be moved aside and
+                // replaced. A store already recorded there (readRole != null) or a
+                // missing directory (first conversion) passes.
+                if (FolesiumDatabase.readRole(store) == null && Files.exists(store)) {
+                    try (var s = Files.list(store)) {
+                        if (s.findFirst().isPresent()) {
+                            System.out.println("Folesium: skipped player data conversion of " + worldRoot + ": "
+                                    + store + " is not empty and not a store; remove or move the");
+                            System.out.println("Folesium: existing files first, then re-run; the vanilla player");
+                            System.out.println("Folesium: files (playerdata/advancements/stats) are left unconverted.");
+                            return 0;
+                        }
+                    } catch (IOException listFailure) {
+                        throw new IOException("cannot inspect " + store, listFailure);
+                    }
+                }
                 stats = PlayerDataConverter.anvilToFolesium(worldRoot, store, config, movedStores::add);
             }
             case TO_ANVIL -> {

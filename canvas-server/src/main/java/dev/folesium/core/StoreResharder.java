@@ -146,7 +146,7 @@ final class StoreResharder {
             // the new layout is judged across dir and staging together. Either way the swap
             // is only finished once every new shard is present in dir.
             boolean swappable = newCount != null && (moved
-                    ? completeNewLayout(dir, staging, newCount)
+                    ? completeNewLayout(dir, staging, backup, newCount)
                     : validStagedLayout(dir, staging, newCount));
             if (swappable) {
                 LOGGER.log(System.Logger.Level.WARNING,
@@ -514,6 +514,11 @@ final class StoreResharder {
                             // debris (nothing reads it, and in the store root it would only
                             // accumulate); it is deleted with the staging tree below.
                             .filter(p -> !p.getFileName().toString().endsWith(".fidx.tmp"))
+                            // Same for writeAtomically's marker temp ('.COMMIT.<rand>.tmp'):
+                            // it is only deleted on a live call's finally, so a crash between
+                            // temp creation and rename leaves residue that must not be moved
+                            // into the store root either.
+                            .filter(p -> !p.getFileName().toString().startsWith("." + COMMIT_MARKER + "."))
                             .toList();
                     for (Path p : staged) {
                         moveReplacing(p, dir.resolve(p.getFileName().toString()));
@@ -661,11 +666,19 @@ final class StoreResharder {
      * incomplete and {@link #recover} rolls it back via {@link #restoreOldLayout}, which
      * converges on the consistent old layout.</p>
      */
-    private static boolean completeNewLayout(Path dir, Path staging, int count) {
+    private static boolean completeNewLayout(Path dir, Path staging, Path backup, int count) {
         try {
             TreeSet<String> names = new TreeSet<>();
             names.addAll(discoverKeyspaces(dir));
             names.addAll(discoverKeyspaces(staging));
+            // A keyspace whose shard files survive only in the backup tree (its staged
+            // files were lost - staging partially destroyed or externally removed) must
+            // not pass the per-keyspace checks vacuously: finishSwap would then delete
+            // the backup - the sole surviving copy of that keyspace's records. Same
+            // guard backupKeyspacesCovered applies to the MOVED-alone branch.
+            if (backup != null && !names.containsAll(discoverKeyspaces(backup))) {
+                return false;
+            }
             for (String name : names) {
                 if (countStagedShardFiles(staging, name) == 0) {
                     // Staging holds no shard file of this keyspace: all of them were moved

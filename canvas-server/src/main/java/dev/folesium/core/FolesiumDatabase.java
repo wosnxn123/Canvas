@@ -232,11 +232,29 @@ public final class FolesiumDatabase implements AutoCloseable {
         } catch (IOException e) {
             throw new FolesiumException("Cannot read " + meta, e);
         }
+        // Validate like reconcileMetadata does (version, shardCount range), so a corrupt
+        // metadata file fails here with the same FolesiumException the open would raise -
+        // not with a bare IllegalArgumentException from the FolesiumConfig constructor or
+        // a confusing "Unsupported store version" one step later.
+        int version;
+        try {
+            version = Integer.parseInt(p.getProperty("store.version", "0"));
+        } catch (NumberFormatException e) {
+            throw new FolesiumException("Corrupt store.version in " + meta
+                    + ": '" + p.getProperty("store.version") + "' is not a number", e);
+        }
+        if (version != STORE_VERSION) {
+            throw new FolesiumException("Unsupported Folesium store version " + version + " at " + dir
+                    + " (this build supports " + STORE_VERSION + ")");
+        }
         int shards;
         try {
             shards = Integer.parseInt(p.getProperty("store.shardCount", "").trim());
         } catch (RuntimeException e) {
             throw new FolesiumException("Missing/invalid store.shardCount in " + meta, e);
+        }
+        if (Integer.bitCount(shards) != 1 || shards < 1 || shards > 1024) {
+            throw new FolesiumException("Invalid store.shardCount " + shards + " in " + meta);
         }
         FolesiumConfig.Compression comp;
         try {
@@ -244,6 +262,15 @@ public final class FolesiumDatabase implements AutoCloseable {
                     p.getProperty("store.compression", "").trim().toUpperCase(java.util.Locale.ROOT));
         } catch (RuntimeException e) {
             throw new FolesiumException("Missing/unknown store.compression in " + meta, e);
+        }
+        // Keep the requested codec when the on-disk one is unusable in THIS environment
+        // (e.g. a ZSTD_DICT store on a host without the zstd-jni dictionary API): a merge
+        // import must not be locked out by a disk codec it can never satisfy - the
+        // writable open's upfront usability check would otherwise throw before
+        // reconcileMetadata's graceful switch (which records the usable requested codec
+        // and lets the merge proceed, exactly as before this alignment existed).
+        if (compressionUnusableReason(comp) != null) {
+            return requested.withShardCount(shards);
         }
         return requested.withShardCount(shards).withCompression(comp);
     }

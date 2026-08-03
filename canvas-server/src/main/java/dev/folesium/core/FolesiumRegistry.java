@@ -471,15 +471,21 @@ public final class FolesiumRegistry {
      */
     public static synchronized boolean isEnabled() {
         if (enabledCache == null || configFileChanged()) {
-            if (enabledCache != null) {
-                // An edit landed since the last query and the cache held the value
-                // worlds actually bound: keep it for reload()'s enabled-flip warning
-                // (see enabledBeforeEdit).
-                enabledBeforeEdit = enabledCache;
-            }
+            // The old value is NOT saved into enabledBeforeEdit up front: the re-read
+            // below may degrade to a fabricated false (unreadable file), which is not a
+            // value worlds bound - saving it would poison the enabled-flip warning with
+            // a false comparison (and clobber the real pre-outage value). The save
+            // happens only after a successful re-read, and only when the previous
+            // cached value was a real one (not the degraded false of the outage that
+            // just ended - configReadFailureLogged is reset by the successful re-read
+            // below, so at that point it still reflects the LAST read having failed).
+            Boolean enabledCacheBefore = enabledCache;
             enabledCache = null;
             try {
                 enabledCache = boolProperty("enabled", false);
+                if (enabledCacheBefore != null && !configReadFailureLogged) {
+                    enabledBeforeEdit = enabledCacheBefore;
+                }
             } catch (UncheckedIOException e) {
                 // A config file that exists but cannot be read (fileProperties() throws
                 // UncheckedIOException) must not crash the world load path: Folesium is
@@ -1132,7 +1138,10 @@ public final class FolesiumRegistry {
                 return abs;
             }
             try {
-                return p.toRealPath().resolve(missing);
+                // missing stays null when the path materialized between the first
+                // toRealPath() failure and the exists() check (a concurrent creator):
+                // nothing to append then.
+                return missing == null ? p.toRealPath() : p.toRealPath().resolve(missing);
             } catch (IOException e2) {
                 return abs;
             }

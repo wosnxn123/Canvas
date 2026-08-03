@@ -1760,11 +1760,14 @@ public final class ShardFile implements AutoCloseable {
                     channel.close();
                     dirty = false;
                 } catch (IOException reopenFailure) {
-                    // Close the channel we did manage to reopen: a leaked open handle
-                    // would keep the file locked and confuse the next open.
-                    if (reopened != null) {
+                    // Close the handle we did manage to reopen: a leaked open handle
+                    // would keep the file locked and confuse the next open. (When the
+                    // force/hint failed AFTER the assignment, this.channel holds the
+                    // reopened handle and reopened is null - close it via this.channel.)
+                    FileChannel toClose = reopened != null ? reopened : channel;
+                    if (toClose != null) {
                         try {
-                            reopened.close();
+                            toClose.close();
                         } catch (IOException closeFailure) {
                             reopenFailure.addSuppressed(closeFailure);
                         }

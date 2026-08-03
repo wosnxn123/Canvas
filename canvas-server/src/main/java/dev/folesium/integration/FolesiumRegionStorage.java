@@ -19,6 +19,7 @@
 package dev.folesium.integration;
 
 import dev.folesium.core.FolesiumDatabase;
+import dev.folesium.core.FolesiumException;
 import dev.folesium.core.FolesiumRegistry;
 import dev.folesium.core.Keyspace;
 import dev.folesium.core.util.LongKeys;
@@ -28,6 +29,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
 

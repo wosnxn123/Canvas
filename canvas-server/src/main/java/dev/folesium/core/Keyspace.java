@@ -445,9 +445,10 @@ public final class Keyspace implements AutoCloseable {
             return null;
         }
         Path dictFile = dir.resolve("idx").resolve(name).resolve("dict.bin");
-        if (!Files.exists(dictFile)) {
-            return null;
-        }
+        // No exists() pre-check: DictionaryStore.load handles the missing-file case
+        // itself (returning null), and a FOLLOWING exists() here would silently map a
+        // dangling symlink to "no dictionary" - defeating load()'s NOFOLLOW corruption
+        // contract, which fails loudly for exactly that state.
         try {
             return DictionaryStore.load(dictFile);
         } catch (FolesiumException e) {
