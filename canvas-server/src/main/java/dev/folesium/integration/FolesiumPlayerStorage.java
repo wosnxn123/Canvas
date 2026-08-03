@@ -277,6 +277,11 @@ public final class FolesiumPlayerStorage implements AutoCloseable {
         return loadJson(advancements, id);
     }
 
+    /** True when the store holds an advancement record for {@code id} (no payload read). */
+    public boolean hasAdvancements(UUID id) {
+        return advancements.contains(id);
+    }
+
     public void saveAdvancements(UUID id, String json) {
         saveJson(advancements, id, json);
     }
@@ -284,6 +289,11 @@ public final class FolesiumPlayerStorage implements AutoCloseable {
     /** @return the stored statistics JSON, or {@code null} */
     public String loadStats(UUID id) throws IOException {
         return loadJson(stats, id);
+    }
+
+    /** True when the store holds a statistics record for {@code id} (no payload read). */
+    public boolean hasStats(UUID id) {
+        return stats.contains(id);
     }
 
     public void saveStats(UUID id, String json) {

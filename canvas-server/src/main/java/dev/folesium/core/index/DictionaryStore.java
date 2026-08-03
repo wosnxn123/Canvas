@@ -515,36 +515,34 @@ public final class DictionaryStore {
                             channel.close();
                             continue;
                         }
-                        // Re-check the identity while holding the verify lock: the path
-                        // may have been deleted and recreated between the fileKeyOf above
-                        // and this open - verify would then have locked the NEW file
-                        // while our first channel still locks the deleted orphan, and
-                        // the path's file would be unprotected (a concurrent trainer
-                        // could take it and both would overwrite dict.bin).
-                        Object verifyKey = fileKeyOf(lockFile);
-                        if (verifyKey == null || !verifyKey.equals(currentFileKey)) {
-                            channel.close();
-                            continue;
-                        }
+                        // tryLock SUCCEEDED: no lock is held on the file the path
+                        // currently names - but our first channel's lock is held
+                        // somewhere. A same-JVM tryLock on the very inode our channel
+                        // holds always throws OverlappingFileLockException instead, so
+                        // success here is proof that the path now names a DIFFERENT
+                        // file than the one we locked (deleted, possibly recreated with
+                        // a reused inode number): our lock is the orphaned inode.
+                        // Release the probe lock and retry against the current file.
                         verifyLock.release();
+                        channel.close();
+                        continue;
                     } catch (OverlappingFileLockException ignored) {
-                        // Same-JVM lock on the file the path names. If that file is NOT
+                        // Same-JVM lock on the file the path names: this is the ONLY
+                        // consistent outcome - our own channel holds that file (a peer
+                        // holding a recreated file with a reused inode stays
+                        // indistinguishable, an accepted limitation). If the file is NOT
                         // the one we locked (delete+recreate between the key capture and
                         // the verify open, with a peer thread holding the new file), the
-                        // path's file is unprotected while we hold the orphaned inode -
-                        // the same double-trainer outcome the re-check above prevents.
+                        // path's file is unprotected while we hold the orphaned inode.
                         // The mismatch is provable here even though tryLock cannot
-                        // succeed, so verify it the same way.
+                        // succeed, so verify it: a proven mismatch means our lock is the
+                        // orphan - release and retry against the current file.
                         Object peerKey = fileKeyOf(lockFile);
                         if (peerKey != null && !peerKey.equals(currentFileKey)) {
                             channel.close();
                             continue;
                         }
-                        // Keys match (or are unprovable): our own lock - or the accepted
-                        // inode-reuse variant, which stays indistinguishable. (A peer
-                        // thread holding a live lock on a recreated file with a reused
-                        // inode remains indistinguishable from our own lock - an accepted
-                        // limitation with an astronomically narrow trigger window.)
+                        // Keys match (or are unprovable): our own lock.
                     } catch (IOException e2) {
                         // The path vanished or became unreadable between the probe and
                         // the verify: the current file is not the one we locked - retry.

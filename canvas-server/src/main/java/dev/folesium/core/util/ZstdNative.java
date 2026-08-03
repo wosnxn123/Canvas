@@ -154,6 +154,9 @@ public final class ZstdNative {
                 && trainFromBuffer != null && compressBound != null;
     }
 
+    /** Minimum samples zstd's {@code trainFromBuffer} accepts (COVER). */
+    private static final int MIN_TRAIN_SAMPLES = 11;
+
     /**
      * Test-visible override: setting {@code -Dfolesium.zstd.forceUnavailable=true} (or
      * {@code System.setProperty} before the first probe) makes {@link #available()} and
@@ -169,9 +172,6 @@ public final class ZstdNative {
      * that flip the switch after the class was already probed refresh the cached value
      * with {@link #setForcedUnavailable(boolean)} instead of relying on the property.</p>
      */
-    /** Minimum samples zstd's {@code trainFromBuffer} accepts (COVER). */
-    private static final int MIN_TRAIN_SAMPLES = 11;
-
     private static final String FORCE_UNAVAILABLE_PROPERTY = "folesium.zstd.forceUnavailable";
 
     /** Lazily probed from {@link #FORCE_UNAVAILABLE_PROPERTY}; {@code null} until first use. */

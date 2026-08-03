@@ -230,7 +230,7 @@ final class StoreResharder {
             invalidatePageIndex(dir);
             Integer metaCount = metadataShardCount(dir);
             int fileCount = consistentOnDiskShardCount(dir);
-            if (movedAloneBackupDeletable(dir, metaCount, fileCount)) {
+            if (movedAloneBackupDeletable(dir, backup, metaCount, fileCount)) {
                 LOGGER.log(System.Logger.Level.INFO,
                         "Folesium: removing the backup of a completed reshard of {0}", dir);
                 deleteRecursively(backup);
@@ -249,11 +249,21 @@ final class StoreResharder {
                                 + "another layout, not the finished new one",
                         backup, dir, metaCount);
             } else {
-                LOGGER.log(System.Logger.Level.WARNING,
-                        "Folesium: keeping the backup {0} of {1}: the shard files hold {2} "
-                                + "shards but the metadata says {3}",
-                        backup, dir, fileCount < 0 ? "no consistent layout" : Integer.toString(fileCount),
-                        metaCount == null ? "nothing" : Integer.toString(metaCount));
+                // The on-disk set matches no layout (name-derived count disagrees with
+                // the metadata): the swap was partial. reconcileStaleMetadata would
+                // rewrite the shard count from the partial file names - a false "repair"
+                // that then serves only the swapped-in fraction of records (or fails
+                // the header topology check on the next writable open). Refuse to open
+                // and let the operator restore from the kept backup.
+                LOGGER.log(System.Logger.Level.ERROR,
+                        "Folesium: refusing to open {0}: the shard files hold {1} shards but"
+                                + " the metadata says {2}, and the backup {3} was kept - restore it"
+                                + " by hand or delete the partial set and re-run",
+                        dir, fileCount < 0 ? "no consistent layout" : Integer.toString(fileCount),
+                        metaCount == null ? "nothing" : Integer.toString(metaCount), backup);
+                throw new FolesiumException("Store " + dir + " holds a partial resharded layout"
+                        + " (backup kept at " + backup + "); refusing to open - restore the backup by"
+                        + " hand or delete the partial shard set and re-run");
             }
             // The swap evidence is gone, so bring the metadata in line with the files
             // before the store is opened.
@@ -276,7 +286,7 @@ final class StoreResharder {
         deleteRecursively(staging);
         if (!hasBackup) {
             // Nothing to preserve.
-        } else if (!moved || movedAloneBackupDeletable(dir,
+        } else if (!moved || movedAloneBackupDeletable(dir, backup,
                 metadataShardCount(dir), consistentOnDiskShardCount(dir))) {
             // No MOVED marker (the old set was restored above, so dir holds the complete
             // old layout), or the MOVED marker plus a complete new set in dir - in both
@@ -286,15 +296,20 @@ final class StoreResharder {
             // MOVED exists but dir does not hold the complete new set (verified the same
             // way the MOVED-alone branch does): the swap was partially applied, the
             // COMMIT marker is missing, and the backup is the only remaining copy of the
-            // old records. Deleting it here would destroy those records while dir holds
-            // only a partial new set - keep it and warn instead. (A normal crash sequence
+            // old records. Deleting it would destroy those records while dir holds only
+            // a partial new set - and opening would serve just the swapped-in fraction
+            // (reconcileStaleMetadata would even rewrite the shard count from the
+            // partial file names). Refuse to open instead. (A normal crash sequence
             // cannot produce this state; it needs a lost/corrupted COMMIT marker, e.g.
             // bitrot or antivirus quarantine.)
-            LOGGER.log(System.Logger.Level.WARNING,
-                    "Folesium: keeping the backup {0} of {1}: an interrupted swap left the new"
-                            + " set incomplete and the COMMIT marker is missing - the backup is"
-                            + " the only remaining copy of the old shards",
-                    backup, dir);
+            LOGGER.log(System.Logger.Level.ERROR,
+                    "Folesium: refusing to open {0}: an interrupted swap left the new set"
+                            + " incomplete and the COMMIT marker is missing - the backup {1} is"
+                            + " the only remaining copy of the old shards; restore it by hand or"
+                            + " delete the partial set and re-run", dir, backup);
+            throw new FolesiumException("Store " + dir + " holds a partial resharded layout"
+                    + " (COMMIT marker lost, backup kept at " + backup + "); refusing to open -"
+                    + " restore the backup by hand or delete the partial shard set and re-run");
         }
         // Persist the scratch-tree deletions like the MOVED-alone branch above: the unlink
         // of the staging/backup directories lives in the store directory's entry, and
@@ -358,7 +373,7 @@ final class StoreResharder {
         // the reshard instead, so the operator resolves the leftover layout first.
         if (Files.isDirectory(backup) && Files.isRegularFile(backup.resolve(MOVED_MARKER))) {
             Integer metaCount = metadataShardCount(dir);
-            if (!movedAloneBackupDeletable(dir, metaCount, consistentOnDiskShardCount(dir))) {
+            if (!movedAloneBackupDeletable(dir, backup, metaCount, consistentOnDiskShardCount(dir))) {
                 throw new FolesiumException("Cannot reshard " + dir + ": the backup directory " + backup
                         + " still holds the only surviving copy of the previous layout's records"
                         + " (an interrupted reshard never finished its swap). Resolve the leftover"
@@ -701,8 +716,27 @@ final class StoreResharder {
      * Shared by recover() and reshard() so the two never disagree about when the backup is
      * deletable.
      */
-    private static boolean movedAloneBackupDeletable(Path dir, Integer metaCount, int fileCount) {
-        return metaCount != null && fileCount == metaCount && completeNewLayoutInDir(dir, metaCount);
+    private static boolean movedAloneBackupDeletable(Path dir, Path backup, Integer metaCount, int fileCount) {
+        return metaCount != null && fileCount == metaCount
+                && backupKeyspacesCovered(dir, backup)
+                && completeNewLayoutInDir(dir, metaCount);
+    }
+
+    /**
+     * Every keyspace present in the backup tree must also be present in {@code dir}:
+     * {@link #completeNewLayoutInDir} only iterates the keyspaces discoverable in dir, so a
+     * keyspace whose shard files are entirely absent from dir (still in staging when the
+     * staging tree was destroyed, or externally removed) would pass the completeness check
+     * vacuously - and the backup, the only surviving copy of that keyspace's records,
+     * would be deleted. Unreadable trees count as not covered (never delete the backup on
+     * uncertain evidence).
+     */
+    private static boolean backupKeyspacesCovered(Path dir, Path backup) {
+        try {
+            return discoverKeyspaces(dir).containsAll(discoverKeyspaces(backup));
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     /**

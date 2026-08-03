@@ -127,8 +127,14 @@ public final class FolesiumPlayerFiles {
         final boolean present;
         try {
             // `true` means "there is data to read" in the store; there is no
-            // vanilla-file fallback (no lazy migration).
-            present = load(t) != null;
+            // vanilla-file fallback (no lazy migration). Answer with a keyspace
+            // contains() probe instead of loading the whole record: the vanilla call
+            // site immediately follows with newBufferedReader(), which loads it anyway,
+            // so loading here would read every advancements+stats record twice per
+            // player login (4 store reads instead of 2).
+            present = t.directory().equals(PlayerPathRecognizer.DIR_ADVANCEMENTS)
+                    ? t.storage().hasAdvancements(t.player())
+                    : t.storage().hasStats(t.player());
         } catch (IOException e) {
             // load() only declares IOException (the store path never throws it today);
             // still, never turn a read failure into "no data".

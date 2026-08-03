@@ -1052,15 +1052,15 @@ public final class ShardFile implements AutoCloseable {
     }
 
     public void delete(Bytes key) {
+        // Same key-length validation put()/putIfAbsent() enforce, with the same exception
+        // type and BEFORE the write lock (a tombstone with an invalid key length would
+        // write a record the recovery scan rejects as corrupt and truncate the shard at
+        // it on the next open, silently dropping every subsequent record).
+        if (key.length() == 0 || key.length() > MAX_KEY_LEN) {
+            throw new IllegalArgumentException("Invalid key length " + key.length() + " for delete in " + path);
+        }
         lock.writeLock().lock();
         try {
-            // Same key-length validation put()/putIfAbsent() enforce: a tombstone with an
-            // invalid key length would write a record the recovery scan rejects as
-            // corrupt and truncate the shard at it on the next open, silently dropping
-            // every subsequent record.
-            if (key.length() == 0 || key.length() > MAX_KEY_LEN) {
-                throw new FolesiumException("Invalid key length " + key.length() + " for delete in " + path);
-            }
             ensureWritable();
             Loc old = index.get(key);
             if (old == null) {
@@ -1714,6 +1714,22 @@ public final class ShardFile implements AutoCloseable {
                     writeHint();
                 }
                 channel.close();
+            } else if (channel != null && dirty && !readOnly) {
+                // The channel was closed by an interrupt (the group-commit retirement's
+                // last-resort interrupt landing on a blocking force): the final fsync
+                // never completed. close() is the last chance to persist the dirty tail
+                // - reopen, force, write the hint, close again. (channel == null means a
+                // failed compaction restore: the on-disk state is inconsistent, so never
+                // force against it.)
+                try {
+                    channel = FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE);
+                    channel.force(false);
+                    writeHint();
+                    channel.close();
+                } catch (IOException reopenFailure) {
+                    throw new FolesiumException("Close failed for " + path
+                            + " (could not re-fsync a channel an interrupt closed)", reopenFailure);
+                }
             }
         } catch (IOException e) {
             throw new FolesiumException("Close failed for " + path, e);

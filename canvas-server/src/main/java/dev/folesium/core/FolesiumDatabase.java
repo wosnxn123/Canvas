@@ -1311,6 +1311,19 @@ public final class FolesiumDatabase implements AutoCloseable {
                                     "Folesium: failed to reopen shard channels after a"
                                             + " channel-closing flush failure", reopenFailure);
                         }
+                        // The reopened channels still carry their dirty state: flush once
+                        // more NOW so the interrupted force completes before the fresh
+                        // thread's first pass (which waits a full batchFlushMillis). A
+                        // second channel-closing failure is logged and left for the fresh
+                        // thread's retry - never a reason to skip the ERROR path.
+                        try {
+                            flush();
+                        } catch (RuntimeException flushRetryFailure) {
+                            LOGGER.log(System.Logger.Level.ERROR,
+                                    "Folesium: flush after reopening shard channels failed"
+                                            + " (will retry on the fresh group-commit thread)",
+                                    flushRetryFailure);
+                        }
                     }
                     LOGGER.log(System.Logger.Level.ERROR, "Folesium group-commit failed for " + dir, e);
                     break;

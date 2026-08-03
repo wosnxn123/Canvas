@@ -369,7 +369,12 @@ public final class PlayerDataConverter {
         // place and must not be deleted.
         Path backup = null;
         boolean backedUp = false;
-        if (config.backupOnConvert() && Files.isDirectory(storeDir)) {
+        boolean backupOnConvert = config.backupOnConvert();
+        // Files the import skipped as unreadable: the export-side prune must leave them
+        // alone (the import promises a re-run after a repair re-imports them; deleting
+        // them would destroy the only remaining copy).
+        Set<String> skippedPlayerFiles = new java.util.HashSet<>();
+        if (backupOnConvert && Files.isDirectory(storeDir)) {
             backup = backupPath(storeDir);
         }
         try {
@@ -431,13 +436,23 @@ public final class PlayerDataConverter {
                                     + ": it disappeared while importing");
                             continue;
                         } catch (IOException e) {
-                            // An unreadable player file (permissions, torn write) is
-                            // skipped per file like a vanished one: the source tree keeps
-                            // the data, so a re-run after a repair re-imports it. Aborting
-                            // the whole world adoption over one unreadable player file
-                            // would be the same asymmetry the dimension side removed.
+                            // An unreadable player file (permissions, torn write): in
+                            // backup mode the rebuild would silently lack this player
+                            // while the old store - possibly holding the player's only
+                            // good copy - sits under .folesium-backup-* until the next
+                            // backup-mode conversion prunes it. Abort so the rollback
+                            // restores the old store (same rule as the dimension side).
+                            // Otherwise skip per file like a vanished one: the source
+                            // tree keeps the data, so a re-run after a repair re-imports
+                            // it. Aborting the whole world adoption over one unreadable
+                            // player file would be the same asymmetry the dimension side
+                            // removed.
+                            if (backupOnConvert) {
+                                throw new IOException("Failed importing " + file, e);
+                            }
                             System.err.println("Folesium: skipping player file " + file.getFileName()
                                     + ": cannot read it (" + e + ")");
+                            skippedPlayerFiles.add(file.getFileName().toString());
                             continue;
                         }
                         if (payload == null) {
@@ -681,18 +696,17 @@ public final class PlayerDataConverter {
         for (Path file : files) {
             UUID id = uuidOf(file);
             if (id != null && !stored.contains(id)) {
-                try {
-                    Files.deleteIfExists(file);
-                } catch (IOException ex) {
-                    // A single player file that cannot be deleted (Windows file lock,
-                    // permissions, ...) must not abort the whole export: skip it and
-                    // warn, mirroring the dimension-side prune. The file stays on
-                    // disk, so a later export may resurrect it; the operator can
-                    // delete it by hand.
-                    System.err.println("Folesium: skipping " + file.getFileName()
-                            + ": cannot delete it, the player may be resurrected by a later export ("
-                            + ex.getMessage() + ")");
-                }
+                // The store holds NO record for this player at all. Sweeping the file
+                // would destroy the data of a player the import skipped as unreadable
+                // (the import promises 'the source keeps the data, re-run after a
+                // repair'), or of a foreign file that never entered the store - the
+                // same hazard the dimension-side prune removed. Keep it and warn; the
+                // operator can delete it manually. (A player actually deleted on the
+                // server may be resurrected by a later export - the accepted cost of
+                // never destroying the only remaining copy.)
+                System.err.println("Folesium: keeping " + file.getFileName()
+                        + ": the store holds no record for it (skipped as unreadable or never"
+                        + " imported); delete the file manually to drop it");
             }
         }
     }

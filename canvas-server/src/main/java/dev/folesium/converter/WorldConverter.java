@@ -562,10 +562,21 @@ public final class WorldConverter {
             // so it is cheap even for a region full of chunks; a region absent from the
             // map (a shrunken or emptied store) has no stored keys and is swept entirely.
             List<Long> regionKeys = byRegion.get(LongKeys.chunkKey(rx, rz));
+            if (regionKeys == null) {
+                // The store holds NO key for this region. Sweeping it would destroy the
+                // chunks of a region the import skipped as corrupt (the import promises
+                // 'the source keeps the data, re-run after a repair'), or of a region
+                // that never entered the store. Keep the region and warn; the operator
+                // can delete the file manually.
+                System.err.println("Folesium: keeping region " + mca.getFileName()
+                        + ": the store holds no chunks for it (skipped as corrupt or never"
+                        + " imported); delete the file manually to drop it");
+                return;
+            }
             try (AnvilRegionFile rf = new AnvilRegionFile(mca)) {
                 for (int[] xz : rf.listChunks()) {
                     long key = LongKeys.chunkKey((rx << 5) + xz[0], (rz << 5) + xz[1]);
-                    if (regionKeys == null || !regionKeys.contains(key)) {
+                    if (!regionKeys.contains(key)) {
                         rf.deleteChunk(xz[0], xz[1]);
                     }
                 }
