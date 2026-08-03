@@ -249,7 +249,11 @@ public final class DictionaryStore {
      *                           acquired
      */
     public static byte[] trainIfMissing(Path dictFile, List<byte[]> samples) throws IOException {
-        if (Files.exists(dictFile)) {
+        // NOFOLLOW, matching load()'s corruption contract: a dangling symlink at
+        // dict.bin EXISTS as a link but resolves to nothing - treating it as absent
+        // would let training silently replace it (ATOMIC_MOVE) and orphan any
+        // codec-3 records written against the deleted target.
+        if (Files.exists(dictFile, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
             return null;
         }
         FileChannel lockChannel = acquireTrainLock(dictFile);
@@ -261,7 +265,11 @@ public final class DictionaryStore {
             return null;
         }
         try {
-            if (Files.exists(dictFile)) {
+            // NOFOLLOW, matching load()'s corruption contract: a dangling symlink at
+        // dict.bin EXISTS as a link but resolves to nothing - treating it as absent
+        // would let training silently replace it (ATOMIC_MOVE) and orphan any
+        // codec-3 records written against the deleted target.
+        if (Files.exists(dictFile, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
                 // The exists() check above ran before the lock; a completed concurrent train
                 // (or an external actor) created the file in the meantime. Under the lock this
                 // is the definitive answer - no trainer can be mid-flight - so report the same
@@ -274,7 +282,11 @@ public final class DictionaryStore {
                 // Only an external (non-lock-taking) actor can still race the move now; a
                 // dict.bin it created mid-train is the documented 'existing dictionary is not
                 // an error' case, so report it as such instead of surfacing a spurious refusal.
-                if (Files.exists(dictFile)) {
+                // NOFOLLOW, matching load()'s corruption contract: a dangling symlink at
+        // dict.bin EXISTS as a link but resolves to nothing - treating it as absent
+        // would let training silently replace it (ATOMIC_MOVE) and orphan any
+        // codec-3 records written against the deleted target.
+        if (Files.exists(dictFile, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
                     return null;
                 }
                 throw e;
@@ -292,7 +304,16 @@ public final class DictionaryStore {
      * concurrent {@code dict.bin} - {@code ATOMIC_MOVE} replaces silently on POSIX/Windows.
      */
     private static byte[] trainHoldingLock(Path dictFile, List<byte[]> samples) throws IOException {
-        if (Files.exists(dictFile)) {
+        // A null list must fail with the documented clean rejection, not an NPE before
+        // any validation (the per-element null check below covers the elements).
+        if (samples == null) {
+            throw new FolesiumException("Cannot train a dictionary: samples must not be null");
+        }
+        // NOFOLLOW, matching load()'s corruption contract: a dangling symlink at
+        // dict.bin EXISTS as a link but resolves to nothing - treating it as absent
+        // would let training silently replace it (ATOMIC_MOVE) and orphan any
+        // codec-3 records written against the deleted target.
+        if (Files.exists(dictFile, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
             throw new FolesiumException("Dictionary file " + dictFile + " already exists; refusing to "
                     + "overwrite it (existing codec-3 records may depend on the trained dictionary). "
                     + "Delete dict.bin first to retrain.");
@@ -442,7 +463,16 @@ public final class DictionaryStore {
             // the open - a replacement after the capture then always surfaces as an anchor
             // mismatch in the probe below, which is the safe direction (release and retry)
             // instead of a false "same inode".
-            Object openedFileKey = fileKeyOf(lockFile);
+            Object openedFileKey;
+            try {
+                openedFileKey = fileKeyOf(lockFile);
+            } catch (UnsupportedOperationException e) {
+                // Same normalization as the other attribute/locking calls (see the
+                // UnsupportedOperationException catch below): a filesystem that rejects the
+                // attribute probe outright must surface as the documented IOException, not
+                // as an unchecked escape from the pre-open anchor.
+                throw new IOException("file attributes unsupported on " + lockFile, e);
+            }
             FileChannel channel = FileChannel.open(lockFile,
                     StandardOpenOption.CREATE, StandardOpenOption.WRITE);
             try {

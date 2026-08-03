@@ -464,8 +464,18 @@ public final class AnvilRegionFile implements Closeable {
                     // only (the canonical name itself is never vacated, so every
                     // crash boundary keeps the .mcc path present):
                     backup = temporarySibling(externalPath);
-                    java.nio.file.Files.copy(externalPath, backup,
-                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    try {
+                        java.nio.file.Files.copy(externalPath, backup,
+                                java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    } catch (IOException copyFailure) {
+                        // A PARTIAL snapshot must never be restored over the intact old
+                        // payload: drop the backup reference (the finally block removes
+                        // the partial file) and abort before anything was published, so
+                        // the rollback path leaves the canonical .mcc untouched.
+                        deleteQuietly(backup);
+                        backup = null;
+                        throw copyFailure;
+                    }
                 }
                 // Publish directly over the canonical name. The canonical .mcc path
                 // is present at every instant (old payload before, new payload

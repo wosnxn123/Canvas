@@ -90,6 +90,16 @@ public final class FolesiumRegistry {
     /** Set while the config file is unreadable, to log the isEnabled() warning once per outage. */
     private static boolean configReadFailureLogged;
 
+    /**
+     * True while {@link #enabledCache} holds a degraded false (an unreadable config file
+     * treated as disabled) rather than a value worlds actually bound. Used to keep the
+     * degraded value out of {@link #enabledBeforeEdit} - unlike
+     * {@link #configReadFailureLogged} (which the successful re-read resets before the
+     * save point evaluates), this flag is captured BEFORE the re-read, so the guard is
+     * not dead code.
+     */
+    private static boolean degradedEnabled;
+
     private static Thread configWatcher;
     private static long configFileStamp;
 
@@ -182,8 +192,12 @@ public final class FolesiumRegistry {
         // (e.g. after the file was deleted and regenerated with the defaults).
         fileProperties = p;
         configReadFailureLogged = false;
+        // Capture before clearing: the save below must know whether the previous cache
+        // was a degraded value (this re-read succeeded, so from now on it is not).
+        boolean degradedBefore = degradedEnabled;
+        degradedEnabled = false;
         filePropertiesStamp = readStamp;
-        if (enabledCache != null) {
+        if (enabledCache != null && !degradedBefore) {
             // A re-read overwrote the value worlds actually bound: keep the old one for
             // reload()'s enabled-flip warning. isEnabled() saves on refresh the same way;
             // this covers the watcher's poll head, which re-reads the file (via
@@ -476,14 +490,16 @@ public final class FolesiumRegistry {
             // value worlds bound - saving it would poison the enabled-flip warning with
             // a false comparison (and clobber the real pre-outage value). The save
             // happens only after a successful re-read, and only when the previous
-            // cached value was a real one (not the degraded false of the outage that
-            // just ended - configReadFailureLogged is reset by the successful re-read
-            // below, so at that point it still reflects the LAST read having failed).
+            // cached value was a real one (not the degraded false of an outage - the
+            // degradedEnabled flag is captured BEFORE the re-read clears it, so this
+            // guard is live).
             Boolean enabledCacheBefore = enabledCache;
+            boolean degradedBefore = degradedEnabled;
             enabledCache = null;
             try {
                 enabledCache = boolProperty("enabled", false);
-                if (enabledCacheBefore != null && !configReadFailureLogged) {
+                degradedEnabled = false;
+                if (enabledCacheBefore != null && !degradedBefore) {
                     enabledBeforeEdit = enabledCacheBefore;
                 }
             } catch (UncheckedIOException e) {
@@ -508,6 +524,7 @@ public final class FolesiumRegistry {
                             configFilePath().toAbsolutePath(), e.toString());
                 }
                 enabledCache = false;
+                degradedEnabled = true;
             }
         }
         return enabledCache;

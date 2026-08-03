@@ -1742,7 +1742,17 @@ public final class ShardFile implements AutoCloseable {
                         throw new FolesiumException("Close failed for " + path, e);
                     }
                 }
-                channel.close();
+                try {
+                    channel.close();
+                } catch (IOException closeFailure) {
+                    // The fsync and hint already completed - the data is durable and the
+                    // handle is closed (or will be by GC). Failing the whole store close
+                    // over a final-close hiccup would force a pointless retry of an
+                    // already-persisted store, so log and continue.
+                    LOGGER.log(System.Logger.Level.WARNING,
+                            "Folesium: closing the channel of {0} reported an error after a"
+                                    + " successful fsync", path, closeFailure);
+                }
             } else if (channel != null && dirty && !readOnly) {
                 // The channel was closed by an interrupt (the group-commit retirement's
                 // last-resort interrupt landing on a blocking force): the final fsync
@@ -1757,8 +1767,16 @@ public final class ShardFile implements AutoCloseable {
                     reopened = null;
                     channel.force(false);
                     writeHint();
-                    channel.close();
                     dirty = false;
+                    try {
+                        channel.close();
+                    } catch (IOException closeFailure) {
+                        // Data is durable (force + hint completed) and the handle is closed
+                        // or will be by GC: log, do not fail the store close.
+                        LOGGER.log(System.Logger.Level.WARNING,
+                                "Folesium: closing the re-opened channel of {0} reported an error"
+                                        + " after a successful fsync", path, closeFailure);
+                    }
                 } catch (IOException reopenFailure) {
                     // Close the handle we did manage to reopen: a leaked open handle
                     // would keep the file locked and confuse the next open. (When the
@@ -1776,8 +1794,6 @@ public final class ShardFile implements AutoCloseable {
                             + " (could not re-fsync a channel an interrupt closed)", reopenFailure);
                 }
             }
-        } catch (IOException e) {
-            throw new FolesiumException("Close failed for " + path, e);
         } finally {
             lock.writeLock().unlock();
         }

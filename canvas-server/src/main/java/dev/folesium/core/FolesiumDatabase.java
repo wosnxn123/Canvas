@@ -232,10 +232,11 @@ public final class FolesiumDatabase implements AutoCloseable {
         } catch (IOException e) {
             throw new FolesiumException("Cannot read " + meta, e);
         }
-        // Validate like reconcileMetadata does (version, shardCount range), so a corrupt
-        // metadata file fails here with the same FolesiumException the open would raise -
-        // not with a bare IllegalArgumentException from the FolesiumConfig constructor or
-        // a confusing "Unsupported store version" one step later.
+        // Validate like reconcileMetadata does (role, version, shardCount range), so a
+        // corrupt metadata file fails here with the same FolesiumException the open would
+        // raise - not with a bare IllegalArgumentException from the FolesiumConfig
+        // constructor or a confusing "Unsupported store version" one step later.
+        parseRole(p.getProperty("store.role"), meta);
         int version;
         try {
             version = Integer.parseInt(p.getProperty("store.version", "0"));

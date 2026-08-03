@@ -143,7 +143,7 @@ public final class WorldConverter {
         // decide whether a corrupt region aborts (backup mode: rollback protects the
         // pre-existing store) or is skipped (first conversion: the source keeps the data).
         boolean backupOnConvert = config.backupOnConvert();
-        if (backupOnConvert && Files.isDirectory(folesiumDir)) {
+        if (backupOnConvert && Files.isDirectory(folesiumDir) && !isEmptyDirectory(folesiumDir)) {
             backup = backupPath(folesiumDir);
         }
         try {
@@ -499,6 +499,15 @@ public final class WorldConverter {
      * {@code .folesium-backup-*} trees are left alone (backup-mode lifecycle); failures
      * are ignored (the leftovers are inert).
      */
+    /** True when {@code dir} exists and holds no entries. */
+    static boolean isEmptyDirectory(Path dir) {
+        try (var s = Files.list(dir)) {
+            return s.findFirst().isEmpty();
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
     private static void cleanStagingSiblings(Path out) {
         Path parent = out.getParent();
         if (parent == null) {

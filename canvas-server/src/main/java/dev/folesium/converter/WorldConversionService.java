@@ -212,6 +212,15 @@ public final class WorldConversionService {
                     }
                     case TO_ANVIL -> {
                         if (!hasFolesium) continue;
+                        // A folesium/ directory that is not a DIMENSION store (e.g. a
+                        // foreign or PLAYERS store) must be skipped loudly, mirroring the
+                        // TO_FOLESIUM refusal of the same case: silently ignoring it would
+                        // hide that this dimension was never exported.
+                        if (FolesiumDatabase.readRole(folesiumStore) != FolesiumDatabase.StoreRole.DIMENSION) {
+                            System.err.println("Folesium: skipped dimension " + dim + ": " + folesiumStore
+                                    + " is not a DIMENSION store; its data was not exported");
+                            continue;
+                        }
                         // backupOnConvert moves the replaced vanilla trees (region/, entities/,
                         // poi/) aside into .folesium-backup-* siblings via replaceDirectory;
                         // report their exact paths too, so the operator knows which vanilla

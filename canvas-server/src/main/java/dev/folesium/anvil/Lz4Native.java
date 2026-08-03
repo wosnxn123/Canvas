@@ -55,9 +55,15 @@ public final class Lz4Native {
         Handle h = null;
         try {
             h = new Handle();
-        } catch (Throwable ignored) {
-            // lz4-java not on the classpath.
+        } catch (LinkageError e) {
+            // lz4-java absent or its native library cannot link (a broken install and a
+            // missing one must both degrade to 'unavailable' - the same class-name based
+            // normalization Compressors applies to zstd-jni).
+        } catch (Exception e) {
+            // lz4-java not on the classpath, or its constructor is unavailable.
         }
+        // OutOfMemoryError and other Errors deliberately propagate: swallowing them
+        // would misdiagnose a dying JVM as 'lz4 not on the classpath'.
         HANDLE = h;
         AVAILABLE = h != null;
     }

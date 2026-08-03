@@ -224,6 +224,14 @@ public final class ZstdNative {
         try {
             return (byte[]) mh.invokeExact(src, level);
         } catch (RuntimeException | Error e) {
+            // zstd-jni signals native failures as com.github.luben.zstd.ZstdException (a
+            // RuntimeException) rather than negative return codes; normalize it to the
+            // engine's own failure type so the write path never leaks the optional
+            // dependency's exception class (Compressors applies the same normalization
+            // on the read side).
+            if (e.getClass().getName().equals("com.github.luben.zstd.ZstdException")) {
+                throw new IllegalStateException("zstd compression failed", e);
+            }
             throw e;
         } catch (Throwable t) {
             throw new IllegalStateException("zstd compression failed", t);
@@ -238,6 +246,14 @@ public final class ZstdNative {
         try {
             return (byte[]) mh.invokeExact(src, rawLen);
         } catch (RuntimeException | Error e) {
+            // zstd-jni signals native failures as com.github.luben.zstd.ZstdException (a
+            // RuntimeException) rather than negative return codes; normalize it to the
+            // engine's own failure type so the write path never leaks the optional
+            // dependency's exception class (Compressors applies the same normalization
+            // on the read side).
+            if (e.getClass().getName().equals("com.github.luben.zstd.ZstdException")) {
+                throw new IllegalStateException("zstd decompression failed", e);
+            }
             throw e;
         } catch (Throwable t) {
             throw new IllegalStateException("zstd decompression failed", t);
@@ -295,6 +311,14 @@ public final class ZstdNative {
             System.arraycopy(dst, 0, out, 0, (int) n);
             return out;
         } catch (RuntimeException | Error e) {
+            // zstd-jni signals native failures as com.github.luben.zstd.ZstdException (a
+            // RuntimeException) rather than negative return codes; normalize it to the
+            // engine's own failure type so the write path never leaks the optional
+            // dependency's exception class (Compressors applies the same normalization
+            // on the read side).
+            if (e.getClass().getName().equals("com.github.luben.zstd.ZstdException")) {
+                throw new IllegalStateException("zstd dictionary compression failed", e);
+            }
             throw e;
         } catch (Throwable t) {
             throw new IllegalStateException("zstd dictionary compression failed", t);
@@ -327,6 +351,14 @@ public final class ZstdNative {
             }
             return dst;
         } catch (RuntimeException | Error e) {
+            // zstd-jni signals native failures as com.github.luben.zstd.ZstdException (a
+            // RuntimeException) rather than negative return codes; normalize it to the
+            // engine's own failure type so the write path never leaks the optional
+            // dependency's exception class (Compressors applies the same normalization
+            // on the read side).
+            if (e.getClass().getName().equals("com.github.luben.zstd.ZstdException")) {
+                throw new IllegalStateException("zstd dictionary decompression failed", e);
+            }
             throw e;
         } catch (Throwable t) {
             throw new IllegalStateException("zstd dictionary decompression failed", t);
@@ -391,6 +423,14 @@ public final class ZstdNative {
             System.arraycopy(dict, 0, out, 0, (int) n);
             return out;
         } catch (RuntimeException | Error e) {
+            // zstd-jni signals native failures as com.github.luben.zstd.ZstdException (a
+            // RuntimeException) rather than negative return codes; normalize it to the
+            // engine's own failure type so the write path never leaks the optional
+            // dependency's exception class (Compressors applies the same normalization
+            // on the read side).
+            if (e.getClass().getName().equals("com.github.luben.zstd.ZstdException")) {
+                throw new IllegalStateException("zstd dictionary training failed", e);
+            }
             throw e;
         } catch (Throwable t) {
             throw new IllegalStateException("zstd dictionary training failed", t);

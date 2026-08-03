@@ -286,8 +286,16 @@ final class StoreResharder {
         boolean willRefuse = hasBackup && moved && !movedAloneBackupDeletable(dir, backup,
                 metadataShardCount(dir), consistentOnDiskShardCount(dir));
         if (!willRefuse) {
-            LOGGER.log(System.Logger.Level.WARNING,
-                    "Folesium: discarding an incomplete reshard of {0} (store is unchanged)", dir);
+            if (moved) {
+                // MOVED + complete new set: the discard KEEPS the new layout and removes
+                // the backup - the store is not unchanged, so say what actually happened.
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Folesium: removing the backup of an incomplete reshard of {0}"
+                                + " (the complete new layout in place is kept)", dir);
+            } else {
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Folesium: discarding an incomplete reshard of {0} (store is unchanged)", dir);
+            }
         }
         if (hasBackup && !moved) {
             restoreFromBackup(dir, backup);
@@ -319,8 +327,10 @@ final class StoreResharder {
             LOGGER.log(System.Logger.Level.ERROR,
                     "Folesium: refusing to open {0}: an interrupted swap left the new set"
                             + " incomplete and the COMMIT marker is missing - the backup {1} is"
-                            + " the only remaining copy of the old shards; restore it by hand or"
-                            + " delete the partial set and re-run", dir, backup);
+                            + " the only remaining copy of the old shards; the staging tree has"
+                            + " already been discarded, so restore the backup by hand (or align"
+                            + " store.shardCount), or deliberately delete the backup together with"
+                            + " the partial shard set that remains in the store directory", dir, backup);
             throw new FolesiumException("Store " + dir + " holds a partial resharded layout"
                     + " (COMMIT marker lost, backup kept at " + backup + "); refusing to open -"
                     + " restore the backup by hand or delete the partial shard set and re-run");
@@ -517,8 +527,11 @@ final class StoreResharder {
                             // Same for writeAtomically's marker temp ('.COMMIT.<rand>.tmp'):
                             // it is only deleted on a live call's finally, so a crash between
                             // temp creation and rename leaves residue that must not be moved
-                            // into the store root either.
-                            .filter(p -> !p.getFileName().toString().startsWith("." + COMMIT_MARKER + "."))
+                            // into the store root either. Matched tightly (prefix AND .tmp
+                            // suffix): a keyspace legitimately named '.COMMIT.foo' would
+                            // otherwise have its staged shards silently skipped.
+                            .filter(p -> !(p.getFileName().toString().startsWith("." + COMMIT_MARKER + ".")
+                                    && p.getFileName().toString().endsWith(".tmp")))
                             .toList();
                     for (Path p : staged) {
                         moveReplacing(p, dir.resolve(p.getFileName().toString()));

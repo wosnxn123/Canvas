@@ -370,7 +370,7 @@ public final class PlayerDataConverter {
         Path backup = null;
         boolean backedUp = false;
         boolean backupOnConvert = config.backupOnConvert();
-        if (backupOnConvert && Files.isDirectory(storeDir)) {
+        if (backupOnConvert && Files.isDirectory(storeDir) && !WorldConverter.isEmptyDirectory(storeDir)) {
             backup = backupPath(storeDir);
         }
         try {
