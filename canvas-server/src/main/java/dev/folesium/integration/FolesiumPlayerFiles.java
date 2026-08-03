@@ -135,11 +135,6 @@ public final class FolesiumPlayerFiles {
             present = t.directory().equals(PlayerPathRecognizer.DIR_ADVANCEMENTS)
                     ? t.storage().hasAdvancements(t.player())
                     : t.storage().hasStats(t.player());
-        } catch (IOException e) {
-            // load() only declares IOException (the store path never throws it today);
-            // still, never turn a read failure into "no data".
-            throw new java.io.UncheckedIOException(
-                    "failed to read stored player JSON for " + t.player(), e);
         } catch (RuntimeException e) {
             // The engine reports store failures as FolesiumException (a RuntimeException).
             // Returning false here would make the vanilla call site treat the player as

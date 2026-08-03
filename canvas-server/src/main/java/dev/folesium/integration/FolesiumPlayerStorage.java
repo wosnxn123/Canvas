@@ -144,7 +144,7 @@ public final class FolesiumPlayerStorage implements AutoCloseable {
             LOGGER.log(System.Logger.Level.WARNING,
                     "Folesium: JVM already shutting down; releasing the player store instead of"
                             + " registering the flush hook", e);
-            FolesiumRegistry.release(storeDir, database);
+            FolesiumRegistry.release(storeDir, storage.database);
             storage.closed = true;
             active = null;
             return null;
