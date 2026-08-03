@@ -656,7 +656,6 @@ public final class FolesiumDatabase implements AutoCloseable {
         return closed.get();
     }
 
-    /** Returns (creating on first use) the named keyspace. */
     /**
      * A keyspace name is embedded in file names ({@code <name>-NNNN.flog}, {@code idx/<name>/}),
      * so it must be a single path segment without dots (a name like {@code .} or {@code ..}
@@ -686,10 +685,14 @@ public final class FolesiumDatabase implements AutoCloseable {
         }
         // The keyspace name is embedded in shard-file and idx/ directory names: a name
         // containing separators or '..' would silently write files OUTSIDE the store
-        // directory on a writable open. Only a plain name is legal.
+        // directory on a writable open, and the Windows-reserved characters/control
+        // characters/trailing space/length limits are rejected because they would surface
+        // as a bare InvalidPathException from resolve() (or produce a store a Windows
+        // server cannot address). Only a plain name is legal.
         if (!isValidKeyspaceName(name)) {
             throw new FolesiumException("Invalid keyspace name '" + name + "' for store " + dir
-                    + " (must be a plain name without path separators or dots)");
+                    + " (must be a plain single-segment name: at most 64 characters, no dots"
+                    + " or path separators, and no characters a Windows file name cannot hold)");
         }
         Keyspace existing = keyspaces.get(name);
         if (existing != null) {

@@ -310,7 +310,10 @@ public final class WorldConverter {
                 List<byte[]> samples = new ArrayList<>(sampleKeys.size());
                 for (byte[] key : sampleKeys) {
                     byte[] value = ks.get(key);
-                    if (value != null) {
+                    // Skip empty values: a zero-length sample contributes nothing to a
+                    // dictionary and the train-side guard rejects it outright, which would
+                    // otherwise fail the whole training run and leave codec-3 permanently off.
+                    if (value != null && value.length > 0) {
                         samples.add(value);
                     }
                 }

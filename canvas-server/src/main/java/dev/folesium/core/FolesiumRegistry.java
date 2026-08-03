@@ -677,10 +677,16 @@ public final class FolesiumRegistry {
         try {
             return configFromProperties();
         } catch (UncheckedIOException e) {
-            LOGGER.log(System.Logger.Level.WARNING,
-                    "Folesium: cannot read {0} ({1}); treating Folesium as disabled (opt-in:"
-                            + " a config read failure must not crash the server)",
-                    configFilePath().toAbsolutePath(), e.toString());
+            // Same once-per-outage dedup as isEnabled() (configReadFailureLogged is reset
+            // by the next successful fileProperties() re-read): acquire() runs on every
+            // world load, so an unreadable config file must not spam one WARNING per load.
+            if (!configReadFailureLogged) {
+                configReadFailureLogged = true;
+                LOGGER.log(System.Logger.Level.WARNING,
+                        "Folesium: cannot read {0} ({1}); treating Folesium as disabled (opt-in:"
+                                + " a config read failure must not crash the server)",
+                        configFilePath().toAbsolutePath(), e.toString());
+            }
             return null;
         }
     }

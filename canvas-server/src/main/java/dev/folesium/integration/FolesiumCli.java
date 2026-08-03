@@ -80,6 +80,16 @@ public final class FolesiumCli {
             LOGGER.severe("Folesium: world directory does not exist: " + worldDir);
             System.exit(2);
         }
+        // Mirror the folesium-converter CLI's world-root validation: a directory that does
+        // not hold level.dat (a dimension folder, a playerdata/ tree, an arbitrary backup
+        // directory) is not a world root - converting it would silently report "0
+        // dimensions, 0 chunks" and the operator would never notice the typo.
+        if (!java.nio.file.Files.isRegularFile(worldDir.resolve("level.dat"))) {
+            LOGGER.severe("Folesium: " + worldDir
+                    + " is not a world root (a directory holding level.dat);"
+                    + " --folesiumConvert* expects the world root, not a dimension or data folder");
+            System.exit(2);
+        }
 
         WorldConversionService.Direction dir = toFolesium
                 ? WorldConversionService.Direction.TO_FOLESIUM

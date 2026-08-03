@@ -666,18 +666,21 @@ final class StoreResharder {
      * rather than the old set.
      *
      * <p>Two completion rules apply. While staging still holds shard files of a keyspace
-     * the swap is provably unfinished there, and a shard only counts as swapped when
-     * {@code dir} actually holds its records (see {@link #isPopulatedShard}): a header-only
-     * file in {@code dir} may be an eagerly recreated empty shard after a crash mid-swap,
-     * which must not make a partial new layout look complete (that would let the backup -
-     * the only surviving copy of the records the missing shards should have held - be
-     * deleted). Once staging holds no shard file of a keyspace, every staged file has
-     * already been moved into {@code dir} - {@link #finishSwap} only empties staging after
-     * the last move and the directory fsync - so the swap is finished for that keyspace
-     * and mere presence of all {@code count} shards in {@code dir}, even header-only (the
-     * legitimate output of a finished growth reshard), proves it. Judging that state
-     * complete is what stops a crash in the cleanup window (between emptying and deleting
-     * staging) from rolling a finished swap back.
+     * the swap is provably unfinished there, and a shard in {@code dir} counts when it is
+     * a regular file carrying the committed {@code count} in its header - header-only
+     * shards included. They cannot be eagerly recreated empties: recovery resolves the
+     * layout before any keyspace opens, so a header-only file in {@code dir} mid-swap is
+     * a moved-in staged file (the legitimate output of a growth reshard for a keyspace
+     * with fewer records than shards), not a recreated empty that would let a partial new
+     * layout look complete (that would let the backup - the only surviving copy of the
+     * records the missing shards should have held - be deleted). Once staging holds no
+     * shard file of a keyspace, every staged file has already been moved into {@code dir}
+     * - {@link #finishSwap} only empties staging after the last move and the directory
+     * fsync - so the swap is finished for that keyspace and mere presence of all
+     * {@code count} shards in {@code dir}, even header-only (the legitimate output of a
+     * finished growth reshard), proves it. Judging that state complete is what stops a
+     * crash in the cleanup window (between emptying and deleting staging) from rolling a
+     * finished swap back.
      *
      * <p>A third rule applies to both branches: every file that counts toward completeness
      * must carry the committed {@code count} in its header (see {@link #recordedShardCount}) -
@@ -818,24 +821,6 @@ final class StoreResharder {
             }
             return true;
         } catch (RuntimeException e) {
-            return false;
-        }
-    }
-
-    /**
-     * True for a shard file that demonstrably holds records: strictly larger than the
-     * file header. {@link Keyspace} eagerly creates header-only shard files on open, so
-     * their mere presence does not prove a reshard swap was completed - after a crash
-     * mid-swap a recreated empty shard could make a partial new layout look complete and
-     * get the backup (the only surviving copy of the records it should have held) deleted.
-     */
-    private static boolean isPopulatedShard(Path p) {
-        if (!Files.isRegularFile(p)) {
-            return false;
-        }
-        try {
-            return Files.size(p) > ShardFile.FILE_HEADER_LEN;
-        } catch (IOException e) {
             return false;
         }
     }
@@ -1079,10 +1064,16 @@ final class StoreResharder {
         return m.matches() && m.group(1).equals(keyspace);
     }
 
-    /** Number of populated shard logs of exactly one keyspace, directly inside {@code dir}. */
+    /** Number of shard logs of exactly one keyspace, directly inside {@code dir}, by mere
+     *  presence. Header-only shards count: inside completeNewLayout branch B they are
+     *  moved-in staged files - the legitimate output of a growth reshard for a keyspace
+     *  with fewer records than shards - not eagerly recreated empties, because recovery
+     *  resolves the layout before any keyspace opens. The per-index loop has already
+     *  verified every index carries the committed count in its header, so presence
+     *  counting cannot declare a partial layout complete. */
     private static long countShardFiles(Path dir, String keyspace) throws IOException {
         try (Stream<Path> files = Files.list(dir)) {
-            return files.filter(StoreResharder::isPopulatedShard)
+            return files.filter(Files::isRegularFile)
                     .filter(p -> isShardFileOf(p, keyspace))
                     .count();
         }

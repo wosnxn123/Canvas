@@ -726,7 +726,13 @@ public final class ShardFile implements AutoCloseable {
                 // whole hint and fall back to the full scan instead of indexing a bogus
                 // record size (or letting a later get() blow up with a bare
                 // IllegalArgumentException from the codec dispatch).
-                if ((flags & 0x0F) > 3 || (flags & ~0x1F) != 0
+                // A tombstone-flagged entry can never be a live record: applyScanRecord
+                // (and every other index-writer) removes a deleted key from the index, so
+                // writeHint() can never emit one. A forged entry carrying the bit would
+                // index a deleted key as present-with-empty-value (get() returns an empty
+                // byte[] for the tombstone's zero stored bytes) - reject it here, mirroring
+                // the rejection of the other self-contradictory entry states.
+                if ((flags & FLAG_TOMBSTONE) != 0 || (flags & 0x0F) > 3 || (flags & ~0x1F) != 0
                         || rawValLen < 0 || rawValLen > MAX_VALUE_LEN
                         || storedValLen < 0 || storedValLen > MAX_VALUE_LEN) {
                     return false;

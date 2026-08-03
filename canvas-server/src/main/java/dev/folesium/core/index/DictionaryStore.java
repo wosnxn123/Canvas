@@ -662,16 +662,16 @@ public final class DictionaryStore {
     }
 
     /**
-     * Whether a dictionary file is present.
-     */
-    /**
-     * Whether a regular dictionary file is at {@code dictFile}. NOFOLLOW to stay
-     * consistent with {@link #load} and the train-side checks: a dangling symlink
-     * EXISTS as a link but resolves to nothing, and treating it as absent here would
-     * let a caller (WorldConverter's train pre-gate) silently retrain over it.
+     * Whether a regular dictionary file is at {@code dictFile}, following symlinks exactly
+     * like {@link #load} does: a live symlink to a dictionary reads through and is a
+     * working dictionary, while a dangling symlink resolves to nothing and load() would
+     * fail on it, so it is absent here. Treating a dangling symlink as absent does not let
+     * a caller (WorldConverter's train pre-gate) silently retrain over it - trainIfMissing
+     * and trainHoldingLock already refuse to write through an existing link via their own
+     * NOFOLLOW existence checks.
      */
     public static boolean exists(Path dictFile) {
-        return Files.isRegularFile(dictFile, java.nio.file.LinkOption.NOFOLLOW_LINKS);
+        return Files.isRegularFile(dictFile);
     }
 
     /**
