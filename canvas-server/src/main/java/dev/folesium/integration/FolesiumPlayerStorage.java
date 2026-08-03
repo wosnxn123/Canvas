@@ -135,7 +135,20 @@ public final class FolesiumPlayerStorage implements AutoCloseable {
         // durability mode (group commit by default, per-write fsync with durability=ALWAYS).
         Thread hook = Thread.ofPlatform().name("folesium-player-flush").unstarted(storage::flushQuietly);
         storage.shutdownHook = hook;
-        Runtime.getRuntime().addShutdownHook(hook);
+        try {
+            Runtime.getRuntime().addShutdownHook(hook);
+        } catch (IllegalStateException e) {
+            // The JVM is already shutting down: the hook cannot be registered. Release
+            // the acquired store instead of leaking it (active would point at an
+            // instance whose final fsync never fires).
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: JVM already shutting down; releasing the player store instead of"
+                            + " registering the flush hook", e);
+            FolesiumRegistry.release(storeDir, database);
+            storage.closed = true;
+            active = null;
+            return null;
+        }
         LOGGER.log(System.Logger.Level.INFO, "Folesium: player data {0} -> {1}", worldRoot, storeDir);
         return storage;
     }

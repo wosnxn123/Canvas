@@ -87,6 +87,9 @@ public final class FolesiumRegistry {
      */
     private static Boolean enabledBeforeEdit;
 
+    /** Set while the config file is unreadable, to log the isEnabled() warning once per outage. */
+    private static boolean configReadFailureLogged;
+
     private static Thread configWatcher;
     private static long configFileStamp;
 
@@ -152,6 +155,12 @@ public final class FolesiumRegistry {
                 try (var reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
                     p.load(reader);
                 }
+                // The generated file now exists with a real mtime: refresh the stamp so
+                // the cache is keyed to the content just loaded. (The pre-read capture
+                // above was -1 - the file did not exist yet - and a -1 stamp would make
+                // the next access re-read the file once redundantly and re-log the INFO
+                // line.)
+                readStamp = configFileTimestamp();
             } catch (IllegalArgumentException e) {
                 // Same malformed backslash-u guard as above; nearly unreachable because the
                 // file was just generated, but a load failure must never abort the server.
@@ -172,6 +181,7 @@ public final class FolesiumRegistry {
         // enabledCache is derived from this Properties and must not outlive a reload of it
         // (e.g. after the file was deleted and regenerated with the defaults).
         fileProperties = p;
+        configReadFailureLogged = false;
         filePropertiesStamp = readStamp;
         if (enabledCache != null) {
             // A re-read overwrote the value worlds actually bound: keep the old one for
@@ -474,18 +484,24 @@ public final class FolesiumRegistry {
                 // A config file that exists but cannot be read (fileProperties() throws
                 // UncheckedIOException) must not crash the world load path: Folesium is
                 // opt-in, so degrade to disabled. The outcome is cached like every other
-                // isEnabled() result; reload()/the config watcher re-read the file and
-                // clear the cache when it becomes readable again. The cache stamp is
-                // committed too: without it, configFileChanged() stays true (the file's
-                // mtime still differs from the last successful load) and EVERY
-                // isEnabled()/acquire() would re-read the file and re-log this warning,
-                // while also overwriting enabledBeforeEdit with the poisoned false.
-                LOGGER.log(System.Logger.Level.WARNING,
-                        "Folesium: cannot read {0} ({1}); treating Folesium as disabled (opt-in:"
-                                + " a config read failure must not crash the server)",
-                        configFilePath().toAbsolutePath(), e.toString());
+                // isEnabled() result, but the STAMP is deliberately NOT committed: with
+                // the file's mtime still differing from the last successful load,
+                // configFileChanged() stays true, so the moment the file becomes
+                // readable again the next access re-reads it and the operator's edit
+                // (possibly the enabled=true that made them touch the file) is honored.
+                // Committing the current mtime here would freeze the disabled outcome
+                // (and the stale properties) forever - and would also become the
+                // watcher's first baseline, hiding the same edit from the watcher.
+                // A flag keeps the warning at once per outage instead of once per
+                // world load (isEnabled() runs on every create).
+                if (!configReadFailureLogged) {
+                    configReadFailureLogged = true;
+                    LOGGER.log(System.Logger.Level.WARNING,
+                            "Folesium: cannot read {0} ({1}); treating Folesium as disabled (opt-in:"
+                                    + " a config read failure must not crash the server)",
+                            configFilePath().toAbsolutePath(), e.toString());
+                }
                 enabledCache = false;
-                filePropertiesStamp = configFileTimestamp();
             }
         }
         return enabledCache;
@@ -1103,11 +1119,20 @@ public final class FolesiumRegistry {
             Path p = abs;
             Path missing = null;
             while (p != null && !Files.exists(p)) {
+                if (p.getFileName() == null) {
+                    // Walked past the filesystem root with no existing ancestor (e.g. an
+                    // unmounted drive letter or an offline UNC share): nothing to
+                    // canonicalize against - fall back to the plain absolute path.
+                    return abs;
+                }
                 missing = missing == null ? p.getFileName() : p.getFileName().resolve(missing);
                 p = p.getParent();
             }
+            if (p == null) {
+                return abs;
+            }
             try {
-                return missing == null ? abs : p.toRealPath().resolve(missing);
+                return p.toRealPath().resolve(missing);
             } catch (IOException e2) {
                 return abs;
             }

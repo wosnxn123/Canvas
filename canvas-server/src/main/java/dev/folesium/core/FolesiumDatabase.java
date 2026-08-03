@@ -209,6 +209,45 @@ public final class FolesiumDatabase implements AutoCloseable {
         return parseRole(p.getProperty("store.role"), meta);
     }
 
+    /**
+     * Reconciles a requested configuration to the on-disk layout of an existing store, for
+     * callers that open a store WRITABLE without intending layout changes (the converter's
+     * merge import): {@link #reconcileMetadata} would otherwise reshard the store to the
+     * requested shard count and rewrite the compression field whenever they differ. The CLI
+     * resolves its configuration from the working directory only, so its auto-tuned shard
+     * count can easily differ from the server's - without alignment every routine merge
+     * conversion would silently rewrite the whole store (multi-GB worlds appear hung), drop
+     * the page index, and ping-pong if the server later reshards back. No-op when the
+     * directory is not a store yet (a first conversion creates it with the request).
+     * A corrupt or unreadable metadata file fails loudly here, exactly as open() would.
+     */
+    public static FolesiumConfig alignToDiskLayout(Path dir, FolesiumConfig requested) {
+        Path meta = dir.resolve(METADATA_FILE);
+        if (!Files.isRegularFile(meta)) {
+            return requested;
+        }
+        Properties p = new Properties();
+        try (var reader = Files.newBufferedReader(meta, java.nio.charset.StandardCharsets.UTF_8)) {
+            p.load(reader);
+        } catch (IOException e) {
+            throw new FolesiumException("Cannot read " + meta, e);
+        }
+        int shards;
+        try {
+            shards = Integer.parseInt(p.getProperty("store.shardCount", "").trim());
+        } catch (RuntimeException e) {
+            throw new FolesiumException("Missing/invalid store.shardCount in " + meta, e);
+        }
+        FolesiumConfig.Compression comp;
+        try {
+            comp = FolesiumConfig.Compression.valueOf(
+                    p.getProperty("store.compression", "").trim().toUpperCase(java.util.Locale.ROOT));
+        } catch (RuntimeException e) {
+            throw new FolesiumException("Missing/unknown store.compression in " + meta, e);
+        }
+        return requested.withShardCount(shards).withCompression(comp);
+    }
+
     private static StoreRole parseRole(String raw, Path meta) {
         if (raw == null || raw.isBlank()) {
             return StoreRole.LEGACY_DEFAULT;
@@ -1247,13 +1286,15 @@ public final class FolesiumDatabase implements AutoCloseable {
                         return;
                     }
                     try {
-                        // Read the interval INSIDE the lock: applyRuntimeConfig updates
-                        // config and notifyAll()s under the same lock, so a notification
-                        // that lands between an outside-lock read and wait() would be
-                        // lost and the flusher would sleep a full OLD interval before
-                        // adopting a shortened one (the docs promise the new interval
-                        // applies immediately). Reading under the lock makes read+wait
-                        // atomic against the notify.
+                        // Read the interval INSIDE the lock. The actual protocol:
+                        // applyRuntimeConfig writes the new config under keyspaceLock,
+                        // then notifyAll()s under flusherLock; config is volatile, so
+                        // this in-lock read sees the latest value. Reading under the
+                        // lock makes read+wait atomic against the notify: a flusher
+                        // that read the interval before a reload's notify will be
+                        // waiting (holding no lock) when the notify fires and wakes
+                        // immediately with the new config - no notification is lost,
+                        // so a shortened interval applies immediately as documented.
                         flusherLock.wait(Math.max(1, config.batchFlushMillis()));
                     } catch (InterruptedException e) {
                         // Retirement wakeup: awaitFlusherExit's last-resort interrupt (or

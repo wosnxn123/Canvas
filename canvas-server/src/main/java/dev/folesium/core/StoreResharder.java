@@ -254,16 +254,23 @@ final class StoreResharder {
                 // rewrite the shard count from the partial file names - a false "repair"
                 // that then serves only the swapped-in fraction of records (or fails
                 // the header topology check on the next writable open). Refuse to open
-                // and let the operator restore from the kept backup.
+                // and let the operator converge the layout. NOTE: while the MOVED
+                // marker is present, neither "restore the old files" nor "delete the
+                // partial set" converges (both re-trigger this refusal); the decisive
+                // step is removing the marker first.
                 LOGGER.log(System.Logger.Level.ERROR,
                         "Folesium: refusing to open {0}: the shard files hold {1} shards but"
-                                + " the metadata says {2}, and the backup {3} was kept - restore it"
-                                + " by hand or delete the partial set and re-run",
+                                + " the metadata says {2}, and the backup {3} was kept - remove the"
+                                + " MOVED marker {4} first, then either restore the backup by hand"
+                                + " (or align store.shardCount), or deliberately delete the backup"
+                                + " together with the partial set",
                         dir, fileCount < 0 ? "no consistent layout" : Integer.toString(fileCount),
-                        metaCount == null ? "nothing" : Integer.toString(metaCount), backup);
+                        metaCount == null ? "nothing" : Integer.toString(metaCount), backup,
+                        movedMarker);
                 throw new FolesiumException("Store " + dir + " holds a partial resharded layout"
-                        + " (backup kept at " + backup + "); refusing to open - restore the backup by"
-                        + " hand or delete the partial shard set and re-run");
+                        + " (backup kept at " + backup + "); refusing to open - remove the MOVED"
+                        + " marker first, then restore the backup by hand, align store.shardCount,"
+                        + " or deliberately delete the backup together with the partial set");
             }
             // The swap evidence is gone, so bring the metadata in line with the files
             // before the store is opened.
@@ -272,9 +279,16 @@ final class StoreResharder {
         }
         // No valid COMMIT marker: the new set was never authoritative. Restore any old files
         // moved aside before destroying scratch state, rather than destroying live shards.
-        LOGGER.log(System.Logger.Level.WARNING,
-                "Folesium: discarding an incomplete reshard of {0} (store is unchanged)", dir);
         boolean moved = Files.isRegularFile(movedMarker);
+        // The refusal path below (COMMIT lost + MOVED + incomplete new set) neither
+        // discards anything nor leaves the store unchanged, so this message only belongs
+        // to the branches that actually discard.
+        boolean willRefuse = hasBackup && moved && !movedAloneBackupDeletable(dir, backup,
+                metadataShardCount(dir), consistentOnDiskShardCount(dir));
+        if (!willRefuse) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: discarding an incomplete reshard of {0} (store is unchanged)", dir);
+        }
         if (hasBackup && !moved) {
             restoreFromBackup(dir, backup);
         }

@@ -530,34 +530,63 @@ public final class AnvilRegionFile implements Closeable {
                 }
             }
             if (externalPublished) {
+                if (backup != null) {
+                    try {
+                        // Restore the old payload directly OVER the published file (with
+                        // REPLACE_EXISTING, mirroring the non-published branch below): a
+                        // delete-then-move would leave the NEW payload in place if the
+                        // delete failed (transient lock), so a writeChunk that reported
+                        // failure would still serve uncommitted data through the rolled-back
+                        // header stub. With the replace-move the canonical name always holds
+                        // the old payload when the rollback succeeds. A plain replace move
+                        // fallback covers filesystems without atomic-move support (the
+                        // publish path already proved such a fallback is needed there).
+                        try {
+                            java.nio.file.Files.move(backup, externalPath,
+                                    java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                        } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                            java.nio.file.Files.move(backup, externalPath,
+                                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                        } catch (java.nio.file.FileSystemException e) {
+                            java.nio.file.Files.move(backup, externalPath,
+                                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                        }
+                        backup = null;
+                    } catch (IOException rollbackFailure) {
+                        // The published .mcc could not be replaced with the old payload:
+                        // keep the backup file - it is the only surviving copy of the old
+                        // payload, and the finally block would otherwise delete it,
+                        // permanently losing the chunk's data (the region header stub still
+                        // references the external file).
+                        keepBackup = true;
+                        failure.addSuppressed(rollbackFailure);
+                    }
+                }
+                // backup == null: the old chunk was inline (or absent) - there is no old
+                // payload to restore. The header was rolled back above, so the published
+                // .mcc is an unreferenced orphan; drop it (best-effort - a leftover is
+                // harmless because the region no longer references it).
                 try {
-                    // Restore the old payload directly OVER the published file (with
-                    // REPLACE_EXISTING, mirroring the non-published branch below): a
-                    // delete-then-move would leave the NEW payload in place if the
-                    // delete failed (transient lock), so a writeChunk that reported
-                    // failure would still serve uncommitted data through the rolled-back
-                    // header stub. With the replace-move the canonical name always holds
-                    // the old payload when the rollback succeeds.
-                    java.nio.file.Files.move(backup, externalPath,
-                            java.nio.file.StandardCopyOption.ATOMIC_MOVE,
-                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                    backup = null;
-                } catch (IOException rollbackFailure) {
-                    // The published .mcc could not be replaced with the old payload:
-                    // keep the backup file - it is the only surviving copy of the old
-                    // payload, and the finally block would otherwise delete it,
-                    // permanently losing the chunk's data (the region header stub still
-                    // references the external file).
-                    keepBackup = true;
-                    failure.addSuppressed(rollbackFailure);
+                    java.nio.file.Files.deleteIfExists(externalPath);
+                } catch (IOException orphanFailure) {
+                    // Best-effort: an orphaned .mcc is not referenced by the region file.
                 }
             } else if (backup != null) {
                 try {
                     // The canonical name was never vacated (backup is a snapshot
                     // copy), so overwrite it to restore the old payload:
-                    java.nio.file.Files.move(backup, externalPath,
-                            java.nio.file.StandardCopyOption.ATOMIC_MOVE,
-                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    try {
+                        java.nio.file.Files.move(backup, externalPath,
+                                java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                                java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                        java.nio.file.Files.move(backup, externalPath,
+                                java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    } catch (java.nio.file.FileSystemException e) {
+                        java.nio.file.Files.move(backup, externalPath,
+                                java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    }
                     backup = null;
                 } catch (IOException rollbackFailure) {
                     // Same protection as above: the restore failed, so the backup must

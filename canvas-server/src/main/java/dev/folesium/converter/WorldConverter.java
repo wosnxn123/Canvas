@@ -31,6 +31,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
@@ -152,7 +153,9 @@ public final class WorldConverter {
             }
 
             try (FolesiumDatabase db = FolesiumDatabase.open(folesiumDir,
-                    config.withDurability(FolesiumConfig.DurabilityMode.EXPLICIT))) {
+                    FolesiumDatabase.alignToDiskLayout(folesiumDir,
+                            config.withDurability(FolesiumConfig.DurabilityMode.EXPLICIT)),
+                    FolesiumDatabase.StoreRole.DIMENSION, true)) {
                 List<Keyspace> converted = new ArrayList<>();
                 for (Map.Entry<String, String> e : DIR_TO_KEYSPACE.entrySet()) {
                     Path src = dimensionDir.resolve(e.getKey());
@@ -164,6 +167,18 @@ public final class WorldConverter {
                     List<Path> mcaFiles;
                     try (var s = Files.list(src)) {
                         mcaFiles = s.filter(p -> MCA.matcher(p.getFileName().toString()).matches()).toList();
+                    } catch (NoSuchFileException ex) {
+                        // The whole source directory vanished between the isDirectory check
+                        // above and the listing (concurrent cleanup) - the same transient
+                        // race the per-file level skips. In backup mode the rebuild would
+                        // silently lack this keyspace while the old store sits aside until
+                        // pruned, so abort and roll back; otherwise skip with a warning.
+                        if (backupOnConvert) {
+                            throw ex;
+                        }
+                        System.err.println("Folesium: skipping " + src
+                                + ": it disappeared while importing (its keyspace stays absent from the store)");
+                        continue;
                     }
                     runParallel(mcaFiles, mca -> {
                         Matcher m = MCA.matcher(mca.getFileName().toString());

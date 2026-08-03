@@ -188,6 +188,26 @@ public final class WorldConversionService {
                             System.out.println("Folesium: whose root is a pure dimension, not the legacy player-store host).");
                             continue;
                         }
+                        // Same non-empty-non-store refusal the single-dimension CLI applies
+                        // (Main's to-folesium guard): a dimension containing a foreign
+                        // non-empty folesium/ directory (leftover, other product's files)
+                        // must not get a store materialized inside it - in default mode the
+                        // metadata+shards would mix with the existing files, and with
+                        // backupOnConvert the whole directory would be moved aside and
+                        // replaced. A store already recorded there (readRole != null) or a
+                        // missing directory (first conversion) passes.
+                        if (FolesiumDatabase.readRole(folesiumStore) == null && Files.exists(folesiumStore)) {
+                            try (var s = Files.list(folesiumStore)) {
+                                if (s.findFirst().isPresent()) {
+                                    System.err.println("Folesium: refusing to convert dimension " + dim
+                                            + ": " + folesiumStore + " is not empty and not a store;"
+                                            + " remove or move the existing files first");
+                                    continue;
+                                }
+                            } catch (IOException listFailure) {
+                                throw new IOException("cannot inspect " + folesiumStore, listFailure);
+                            }
+                        }
                         stats = converter.anvilToFolesium(dim, folesiumStore, config, movedStores::add);
                     }
                     case TO_ANVIL -> {

@@ -510,6 +510,8 @@ public final class ShardFile implements AutoCloseable {
             int storedValLen = header.getInt();
 
             if (magic != RECORD_MAGIC || keyLen == 0
+                    || (flags & 0x0F) > 3        // unknown compression id (write side only writes 0..3)
+                    || (flags & ~0x1F) != 0      // unknown high bits (0x10 tombstone is the only other bit)
                     || rawValLen < 0 || rawValLen > MAX_VALUE_LEN
                     || storedValLen < 0 || storedValLen > MAX_VALUE_LEN
                     || recordStart + RECORD_HEADER_LEN + keyLen + storedValLen + 4L > eof) {
@@ -720,9 +722,12 @@ public final class ShardFile implements AutoCloseable {
                 int storedValLen = b.getInt();
                 byte flags = b.get();
                 // Mirror the record-header validation from scanRange(): an out-of-range
-                // length is a corrupt entry, so discard the whole hint and fall back to
-                // the full scan instead of indexing a bogus record size.
-                if (rawValLen < 0 || rawValLen > MAX_VALUE_LEN
+                // length or an unknown codec/flags byte is a corrupt entry, so discard the
+                // whole hint and fall back to the full scan instead of indexing a bogus
+                // record size (or letting a later get() blow up with a bare
+                // IllegalArgumentException from the codec dispatch).
+                if ((flags & 0x0F) > 3 || (flags & ~0x1F) != 0
+                        || rawValLen < 0 || rawValLen > MAX_VALUE_LEN
                         || storedValLen < 0 || storedValLen > MAX_VALUE_LEN) {
                     return false;
                 }
@@ -1262,6 +1267,7 @@ public final class ShardFile implements AutoCloseable {
         int rawValLen = h.getInt();
         int storedValLen = h.getInt();
         if (magic != RECORD_MAGIC || (flags & FLAG_TOMBSTONE) != 0 || keyLen != 8
+                || (flags & 0x0F) > 3 || (flags & ~0x1F) != 0
                 || rawValLen < 0 || rawValLen > MAX_VALUE_LEN
                 || storedValLen < 0 || storedValLen > MAX_VALUE_LEN
                 // The whole record must fit inside the valid log, the same bound scanRange()
@@ -1711,17 +1717,30 @@ public final class ShardFile implements AutoCloseable {
         try {
             if (channel != null && channel.isOpen()) {
                 if (!readOnly) {
-                    // Read-only mode never fsyncs (nothing was written) and never writes
-                    // the hint file (it would describe a log this open may not touch). A
-                    // shard whose channel was released by a failed compaction restore
-                    // skips both as well: its on-disk state is inconsistent, so no hint
-                    // must be written against it (the next open does a full scan).
-                    channel.force(false);
-                    writeHint();
-                    // The force completed: nothing is dirty on disk any more, so a
-                    // repeated close() (or a close after an interrupted force) must not
-                    // redo the fsync.
-                    dirty = false;
+                    try {
+                        // Read-only mode never fsyncs (nothing was written) and never writes
+                        // the hint file (it would describe a log this open may not touch). A
+                        // shard whose channel was released by a failed compaction restore
+                        // skips both as well: its on-disk state is inconsistent, so no hint
+                        // must be written against it (the next open does a full scan).
+                        channel.force(false);
+                        writeHint();
+                        // The force completed: nothing is dirty on disk any more, so a
+                        // repeated close() (or a close after an interrupted force) must not
+                        // redo the fsync.
+                        dirty = false;
+                    } catch (IOException e) {
+                        // Close the handle anyway: a leaked open channel would keep the
+                        // file locked on Windows until GC. (The dirty tail and hint were
+                        // not persisted - the next open's hint logLength guard falls back
+                        // to a full scan, so data is safe.)
+                        try {
+                            channel.close();
+                        } catch (IOException closeFailure) {
+                            e.addSuppressed(closeFailure);
+                        }
+                        throw new FolesiumException("Close failed for " + path, e);
+                    }
                 }
                 channel.close();
             } else if (channel != null && dirty && !readOnly) {

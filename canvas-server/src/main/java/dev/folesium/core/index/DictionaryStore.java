@@ -148,26 +148,15 @@ public final class DictionaryStore {
                             + " from a backup, or delete it and re-run the conversion; codec-3 records"
                             + " in this keyspace are not decodable without the dictionary.");
         }
-        // Pre-check the size before reading the bytes: a file this big is never a dictionary,
+        // Size check immediately before the read: a file this big is never a dictionary,
         // and loading it whole would be an OOM for what is a corrupt/foreign file anyway
         // (normal dictionaries are well under 1 MiB - trained ones are exactly DICT_SIZE).
+        // The post-read length check below still guards the TOCTOU gap between this
+        // check and the read itself.
         long size = Files.size(dictFile);
         if (size > MAX_DICT_BYTES) {
             throw new FolesiumException(
                     "Dictionary file " + dictFile + " is corrupt: " + size
-                            + " bytes, but a valid zstd dictionary is a small trained blob (well under 1 MiB;"
-                            + " trained ones are exactly " + DICT_SIZE + " bytes). Restore dict.bin from a"
-                            + " backup, or delete it and re-run the conversion; codec-3 records in this"
-                            + " keyspace are not decodable without the dictionary.");
-        }
-        // Second size check immediately before the read: narrows the TOCTOU window in which a
-        // concurrently growing file could slip past the pre-check and be read (and allocated)
-        // whole - the second guard of the RegionPage.read triple (pre-check, re-check,
-        // post-check). The post-read length check below still guards the remaining gap.
-        long size2 = Files.size(dictFile);
-        if (size2 > MAX_DICT_BYTES) {
-            throw new FolesiumException(
-                    "Dictionary file " + dictFile + " is corrupt: " + size2
                             + " bytes, but a valid zstd dictionary is a small trained blob (well under 1 MiB;"
                             + " trained ones are exactly " + DICT_SIZE + " bytes). Restore dict.bin from a"
                             + " backup, or delete it and re-run the conversion; codec-3 records in this"
@@ -558,10 +547,12 @@ public final class DictionaryStore {
                 }
             } catch (OverlappingFileLockException e) {
                 // This JVM already holds the lock on this keyspace: contention.
-                channel.close();
+                closeQuietly(channel);
                 return null;
             } catch (IOException e) {
-                channel.close();
+                // The close itself can throw (a channel in a strange state); it must not
+                // replace the recorded failure or skip the remaining retries.
+                closeQuietly(channel);
                 lastFailure = e;
             } catch (UnsupportedOperationException e) {
                 // The filesystem rejects the locking/attribute operations outright (e.g.
@@ -571,7 +562,7 @@ public final class DictionaryStore {
                 // acquisition is reported loudly instead of silently degrading to contention
                 // (trainIfMissing would then claim the dictionary already exists when it was
                 // never trained).
-                channel.close();
+                closeQuietly(channel);
                 lastFailure = new IOException("file locking unsupported on " + lockFile, e);
             }
         }
@@ -585,6 +576,16 @@ public final class DictionaryStore {
         // dictionary that was never trained (the caller degrades an IOException instead).
         throw new IOException("could not acquire the dictionary training lock after "
                 + LOCK_ACQUIRE_ATTEMPTS + " attempts");
+    }
+
+    /** Best-effort channel close: a close failure must not replace the caller's recorded error. */
+    private static void closeQuietly(FileChannel channel) {
+        try {
+            channel.close();
+        } catch (IOException ignored) {
+            // The channel's lock (if any) is released when the JVM reaps the handle; the
+            // caller's failure is the one that matters.
+        }
     }
 
     /**

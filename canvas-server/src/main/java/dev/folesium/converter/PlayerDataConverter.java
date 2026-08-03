@@ -388,8 +388,9 @@ public final class PlayerDataConverter {
                 System.err.println("Folesium: found both modern and legacy player trees; merging");
             }
             try (FolesiumDatabase db = FolesiumDatabase.open(storeDir,
-                    config.withDurability(FolesiumConfig.DurabilityMode.EXPLICIT),
-                    FolesiumDatabase.StoreRole.PLAYERS)) {
+                    FolesiumDatabase.alignToDiskLayout(storeDir,
+                            config.withDurability(FolesiumConfig.DurabilityMode.EXPLICIT)),
+                    FolesiumDatabase.StoreRole.PLAYERS, true)) {
                 for (Mapping m : mappings) {
                     // Legacy mappings resolve against the world root, not playerRoot:
                     // on a 26.x world the legacy tree is <world>/playerdata etc., never
@@ -399,7 +400,7 @@ public final class PlayerDataConverter {
                         continue;
                     }
                     Keyspace ks = db.keyspace(m.keyspace());
-                    for (Path file : listPlayerFiles(src, m.extension())) {
+                    for (Path file : listPlayerFilesTolerant(src, m.extension(), backupOnConvert)) {
                         UUID id = uuidOf(file);
                         if (id == null) {
                             continue;
@@ -562,6 +563,11 @@ public final class PlayerDataConverter {
         for (Mapping m : mappings) {
             cleanTmpLeftovers(exportRoot.resolve(m.dir()));
         }
+        List<Path> swapped = new java.util.ArrayList<>();
+        Consumer<Path> sink = swapped::add;
+        if (backupSink != null) {
+            sink = sink.andThen(backupSink);
+        }
         try (FolesiumDatabase db = FolesiumDatabase.open(storeDir,
                 FolesiumConfig.defaults().withDurability(FolesiumConfig.DurabilityMode.EXPLICIT),
                 FolesiumDatabase.StoreRole.PLAYERS, false)) {
@@ -573,11 +579,31 @@ public final class PlayerDataConverter {
                     continue;
                 }
                 long[] inc = config.backupOnConvert()
-                        ? convertMappingViaStaging(out, ks, m, backupSink)
+                        ? convertMappingViaStaging(out, ks, m, sink)
                         : convertMappingInPlace(out, ks, m);
                 entries += inc[0];
                 bytes += inc[1];
             }
+        } catch (RuntimeException | IOException ex) {
+            if (config.backupOnConvert() && !swapped.isEmpty()) {
+                // Mappings swap one at a time (a backup-mode player export is not atomic):
+                // the ones swapped before the failure hold the exported data, the rest are
+                // untouched, and the replaced vanilla trees survive only under the
+                // .folesium-backup-* names. Say where they are -- the driver's
+                // finally-report lists them too, but without this warning the operator
+                // would not know the export was left incomplete (mirrors the dimension
+                // side's warning).
+                System.err.println("Folesium: WARNING: player data of " + worldRoot.toAbsolutePath().normalize()
+                        + " left in mixed exported/untouched state: the export failed after some");
+                System.err.println("Folesium: data classes were already swapped (they swap independently, so a player");
+                System.err.println("Folesium: export is not atomic). The replaced vanilla trees are preserved as");
+                System.err.println("Folesium: backups at:");
+                for (Path backup : swapped) {
+                    System.err.println("    " + backup.toAbsolutePath().normalize());
+                }
+                System.err.println("Folesium: restore those backups to undo the already-swapped classes before re-running.");
+            }
+            throw ex;
         }
         return new Stats(entries, bytes, (System.nanoTime() - start) / 1_000_000);
     }
@@ -956,6 +982,27 @@ public final class PlayerDataConverter {
                     .filter(p -> UUID_FILE.matcher(p.getFileName().toString()).matches())
                     .sorted()
                     .toList();
+        }
+    }
+
+    /**
+     * Lists {@code dir}, tolerating the whole directory vanishing between the caller's
+     * isDirectory check and the listing (the same transient race the per-file level
+     * skips): returns an empty list then, so the caller's skip logic applies.
+     * In backup mode the caller aborts instead (the rebuild must not silently lack a
+     * data class while the old store sits aside until pruned).
+     */
+    private static List<Path> listPlayerFilesTolerant(Path dir, String extension, boolean backupOnConvert)
+            throws IOException {
+        try {
+            return listPlayerFiles(dir, extension);
+        } catch (NoSuchFileException e) {
+            if (backupOnConvert) {
+                throw e;
+            }
+            System.err.println("Folesium: skipping " + dir
+                    + ": it disappeared while importing (its players stay absent from the store)");
+            return List.of();
         }
     }
 
