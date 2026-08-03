@@ -265,11 +265,7 @@ public final class DictionaryStore {
             return null;
         }
         try {
-            // NOFOLLOW, matching load()'s corruption contract: a dangling symlink at
-        // dict.bin EXISTS as a link but resolves to nothing - treating it as absent
-        // would let training silently replace it (ATOMIC_MOVE) and orphan any
-        // codec-3 records written against the deleted target.
-        if (Files.exists(dictFile, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            if (Files.exists(dictFile, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
                 // The exists() check above ran before the lock; a completed concurrent train
                 // (or an external actor) created the file in the meantime. Under the lock this
                 // is the definitive answer - no trainer can be mid-flight - so report the same
@@ -282,11 +278,7 @@ public final class DictionaryStore {
                 // Only an external (non-lock-taking) actor can still race the move now; a
                 // dict.bin it created mid-train is the documented 'existing dictionary is not
                 // an error' case, so report it as such instead of surfacing a spurious refusal.
-                // NOFOLLOW, matching load()'s corruption contract: a dangling symlink at
-        // dict.bin EXISTS as a link but resolves to nothing - treating it as absent
-        // would let training silently replace it (ATOMIC_MOVE) and orphan any
-        // codec-3 records written against the deleted target.
-        if (Files.exists(dictFile, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                if (Files.exists(dictFile, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
                     return null;
                 }
                 throw e;
@@ -672,8 +664,14 @@ public final class DictionaryStore {
     /**
      * Whether a dictionary file is present.
      */
+    /**
+     * Whether a regular dictionary file is at {@code dictFile}. NOFOLLOW to stay
+     * consistent with {@link #load} and the train-side checks: a dangling symlink
+     * EXISTS as a link but resolves to nothing, and treating it as absent here would
+     * let a caller (WorldConverter's train pre-gate) silently retrain over it.
+     */
     public static boolean exists(Path dictFile) {
-        return Files.isRegularFile(dictFile);
+        return Files.isRegularFile(dictFile, java.nio.file.LinkOption.NOFOLLOW_LINKS);
     }
 
     /**

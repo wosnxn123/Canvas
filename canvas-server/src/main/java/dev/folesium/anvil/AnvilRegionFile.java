@@ -239,17 +239,21 @@ public final class AnvilRegionFile implements Closeable {
             }
         }
         // Commit point: the chunk is gone from the region once the zeroed header entry
-        // is forced.
-        writeHeaderEntry(0, 0, idx);
+        // is forced. Both the zero write and the force sit in the try: a partially
+        // written entry (location zeroed, timestamp write failed) must be rolled back
+        // like a force failure, or the deletion would be committed on disk while the
+        // in-memory slots still report the chunk.
         try {
+            writeHeaderEntry(0, 0, idx);
             channel.force(false);
         } catch (IOException failure) {
-            // Roll the header back: the force failed, so the deletion never committed.
-            // Without the rollback the in-memory slots would keep reporting the chunk
-            // (and holding its sectors) while the file header already says it is gone -
-            // the same memory/file divergence writeChunk's failure path avoids. Force
-            // again so the rollback itself is durable (a transient force failure must
-            // not leave the zeroed entry committed on disk after a reported failure).
+            // Roll the header back: the write or force failed, so the deletion never
+            // committed. Without the rollback the in-memory slots would keep reporting
+            // the chunk (and holding its sectors) while the file header already says it
+            // is gone - the same memory/file divergence writeChunk's failure path
+            // avoids. Force again so the rollback itself is durable (a transient force
+            // failure must not leave the zeroed entry committed on disk after a
+            // reported failure).
             try {
                 writeHeaderEntry(oldLoc, oldTimestamp, idx);
                 channel.force(false);
@@ -470,6 +474,16 @@ public final class AnvilRegionFile implements Closeable {
                     try {
                         java.nio.file.Files.copy(externalPath, backup,
                                 java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                        // Force the snapshot's DATA blocks before it can be restored by a
+                        // rollback: a directory force only makes the name durable, and a
+                        // crash after the rollback move but before the backup inode's
+                        // blocks hit disk would leave the canonical .mcc pointing at
+                        // unwritten (zero/partial) data. The publish path forces its
+                        // staged file for exactly the same reason.
+                        try (FileChannel backupChannel = FileChannel.open(backup,
+                                java.nio.file.StandardOpenOption.WRITE)) {
+                            backupChannel.force(true);
+                        }
                     } catch (IOException copyFailure) {
                         // A PARTIAL snapshot must never be restored over the intact old
                         // payload: drop the backup reference (the finally block removes

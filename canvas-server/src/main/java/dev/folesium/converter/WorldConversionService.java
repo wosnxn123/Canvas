@@ -158,10 +158,22 @@ public final class WorldConversionService {
                         // mix player data and chunk data in one store"). Skip the root
                         // dimension and say why; its Anvil data stays on disk unconverted.
                         if (FolesiumDatabase.readRole(folesiumStore) == FolesiumDatabase.StoreRole.PLAYERS) {
-                            System.out.println("Folesium: skipped dimension " + dim + ": " + folesiumStore
-                                    + " already holds the player store (role=PLAYERS). On a pre-1.21 world");
-                            System.out.println("Folesium: the root dimension cannot get its own store (path collision with");
-                            System.out.println("Folesium: the player store), so its Anvil data (region/, entities/, poi/) is left unconverted.");
+                            if (dim.equals(worldRoot)) {
+                                // The root dimension's PLAYERS store is the legitimate
+                                // pre-1.21 collision: the player store lives at the root.
+                                System.out.println("Folesium: skipped dimension " + dim + ": " + folesiumStore
+                                        + " already holds the player store (role=PLAYERS). On a pre-1.21 world");
+                                System.out.println("Folesium: the root dimension cannot get its own store (path collision with");
+                                System.out.println("Folesium: the player store), so its Anvil data (region/, entities/, poi/) is left unconverted.");
+                            } else {
+                                // A PLAYERS store at a NON-root dimension's folesium/ is
+                                // misdirected: its Anvil data is being silently left
+                                // unconverted, so say so loudly (mirrors the TO_ANVIL side).
+                                System.err.println("Folesium: skipped dimension " + dim + ": " + folesiumStore
+                                        + " already holds the player store (role=PLAYERS), not a dimension");
+                                System.err.println("Folesium: store; its Anvil data (region/, entities/, poi/) is left unconverted -");
+                                System.err.println("Folesium: move or convert that store first, then re-run.");
+                            }
                             continue;
                         }
                         // Same collision while the reserved path is still free: on a pre-1.21
@@ -222,8 +234,17 @@ public final class WorldConversionService {
                         if (!Files.exists(folesiumStore)) {
                             continue;
                         }
-                        if (FolesiumDatabase.readRole(folesiumStore) != FolesiumDatabase.StoreRole.DIMENSION) {
-                            if (!dim.equals(worldRoot)) {
+                        FolesiumDatabase.StoreRole fRole = FolesiumDatabase.readRole(folesiumStore);
+                        if (fRole != FolesiumDatabase.StoreRole.DIMENSION) {
+                            // The one legitimate silent case is the root dimension's
+                            // PLAYERS store (player data is handled by convertPlayerData).
+                            // A foreign non-store folesium/ at the root - or any
+                            // non-DIMENSION store at a non-root dimension - must be
+                            // reported, or the operator never learns the data was
+                            // ignored.
+                            boolean legitimateRootPlayers = dim.equals(worldRoot)
+                                    && fRole == FolesiumDatabase.StoreRole.PLAYERS;
+                            if (!legitimateRootPlayers) {
                                 System.err.println("Folesium: skipped dimension " + dim + ": " + folesiumStore
                                         + " is not a DIMENSION store; its data was not exported");
                             }
@@ -386,6 +407,16 @@ public final class WorldConversionService {
             }
             case TO_ANVIL -> {
                 if (FolesiumDatabase.readRole(store) != FolesiumDatabase.StoreRole.PLAYERS) {
+                    // A non-PLAYERS store at the player-store location (e.g. a DIMENSION
+                    // store misplaced under players/folesium) is never exported: the
+                    // dimension loop cannot see it either (discoverDimensions prunes the
+                    // players/ container by name), so it would silently stay on disk while
+                    // the run reports success. Say so loudly, mirroring the TO_FOLESIUM
+                    // refusal of the same case.
+                    if (Files.exists(store)) {
+                        System.err.println("Folesium: skipped player data export of " + worldRoot + ": " + store
+                                + " is not the PLAYERS store; move or convert it first, then re-run");
+                    }
                     return 0;
                 }
                 // Same precise-path reporting as the dimension export: the replaced vanilla

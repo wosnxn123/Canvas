@@ -660,15 +660,20 @@ public final class FolesiumDatabase implements AutoCloseable {
     /**
      * A keyspace name is embedded in file names ({@code <name>-NNNN.flog}, {@code idx/<name>/}),
      * so it must be a single path segment without dots (a name like {@code .} or {@code ..}
-     * would escape the store directory).
+     * would escape the store directory). Windows reserved characters are rejected too: they
+     * would surface as a bare {@code InvalidPathException} from resolve() instead of the
+     * documented FolesiumException, and a name accepted on Linux would create shard files
+     * a Windows server cannot even address.
      */
     private static boolean isValidKeyspaceName(String name) {
-        if (name == null || name.isEmpty() || name.equals(".") || name.equals("..")) {
+        if (name == null || name.isEmpty() || name.length() > 64 || name.equals(".") || name.equals("..")) {
             return false;
         }
         for (int i = 0; i < name.length(); i++) {
             char c = name.charAt(i);
-            if (c == '/' || c == '\\' || c == '.') {
+            if (c == '/' || c == '\\' || c == '.' || c == '<' || c == '>' || c == ':'
+                    || c == '"' || c == '|' || c == '?' || c == '*' || c < 0x20
+                    || (c == ' ' && i == name.length() - 1)) {
                 return false;
             }
         }

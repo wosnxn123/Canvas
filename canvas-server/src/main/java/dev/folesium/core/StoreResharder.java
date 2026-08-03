@@ -262,15 +262,14 @@ final class StoreResharder {
                         "Folesium: refusing to open {0}: the shard files hold {1} shards but"
                                 + " the metadata says {2}, and the backup {3} was kept - remove the"
                                 + " MOVED marker {4} first, then either restore the backup by hand"
-                                + " (or align store.shardCount), or deliberately delete the backup"
-                                + " together with the partial set",
+                                + " or deliberately delete the backup together with the partial set",
                         dir, fileCount < 0 ? "no consistent layout" : Integer.toString(fileCount),
                         metaCount == null ? "nothing" : Integer.toString(metaCount), backup,
                         movedMarker);
                 throw new FolesiumException("Store " + dir + " holds a partial resharded layout"
                         + " (backup kept at " + backup + "); refusing to open - remove the MOVED"
-                        + " marker first, then restore the backup by hand, align store.shardCount,"
-                        + " or deliberately delete the backup together with the partial set");
+                        + " marker first, then restore the backup by hand, or deliberately delete"
+                        + " the backup together with the partial set");
             }
             // The swap evidence is gone, so bring the metadata in line with the files
             // before the store is opened.
@@ -282,9 +281,13 @@ final class StoreResharder {
         boolean moved = Files.isRegularFile(movedMarker);
         // The refusal path below (COMMIT lost + MOVED + incomplete new set) neither
         // discards anything nor leaves the store unchanged, so this message only belongs
-        // to the branches that actually discard.
-        boolean willRefuse = hasBackup && moved && !movedAloneBackupDeletable(dir, backup,
+        // to the branches that actually discard. The deletability check is evaluated
+        // ONCE and reused for the backup decision below: its inputs are side-effect
+        // free and nothing changes in between (single thread, no writes), so a second
+        // evaluation would only repeat the directory scans and header reads.
+        boolean backupDeletable = !hasBackup || !moved || movedAloneBackupDeletable(dir, backup,
                 metadataShardCount(dir), consistentOnDiskShardCount(dir));
+        boolean willRefuse = hasBackup && moved && !backupDeletable;
         if (!willRefuse) {
             if (moved) {
                 // MOVED + complete new set: the discard KEEPS the new layout and removes
@@ -300,7 +303,8 @@ final class StoreResharder {
                                 + " previous layout from the backup", dir);
             } else {
                 LOGGER.log(System.Logger.Level.WARNING,
-                        "Folesium: discarding an incomplete reshard of {0} (store is unchanged)", dir);
+                        "Folesium: discarding an incomplete reshard of {0} (shard files are"
+                                + " unchanged; the page index and metadata are reconciled)", dir);
             }
         }
         if (hasBackup && !moved) {
@@ -314,8 +318,7 @@ final class StoreResharder {
         deleteRecursively(staging);
         if (!hasBackup) {
             // Nothing to preserve.
-        } else if (!moved || movedAloneBackupDeletable(dir, backup,
-                metadataShardCount(dir), consistentOnDiskShardCount(dir))) {
+        } else if (backupDeletable) {
             // No MOVED marker (the old set was restored above, so dir holds the complete
             // old layout), or the MOVED marker plus a complete new set in dir - in both
             // cases the backup is a true duplicate and can go.
@@ -720,18 +723,15 @@ final class StoreResharder {
                 for (int i = 0; i < count; i++) {
                     Path dirShard = dir.resolve(String.format("%s-%04d.flog", name, i));
                     Path stagingShard = staging.resolve(String.format("%s-%04d.flog", name, i));
-                    // A staging file - even header-only - is copyKeyspace's output for that
-                    // shard: a shard of the new layout legitimately holds no records when the
-                    // keyspace has fewer records than shards (e.g. a growth reshard), so its
-                    // mere presence proves the swap reached it. A dir file only counts when
-                    // populated: a header-only file there may be an eagerly recreated empty
-                    // shard after a crash mid-swap, which must not make a partial new layout
-                    // look complete (that would let the backup - the only surviving copy of
-                    // the records the missing shards should have held - be deleted).
-                    if (isPopulatedShard(dirShard)) {
-                        // The dir file counts: it must name the new layout in its header,
-                        // or the set is mixed with leftovers of another layout and the swap
-                        // is not finishable over it.
+                    // A dir file counts when populated OR when it is header-only but
+                    // carries the new layout in its header. Header-only dir files cannot
+                    // be eagerly recreated empties here: recovery runs before any keyspace
+                    // opens (so nothing can have recreated them), and finishSwap moves
+                    // staged files in arbitrary order - a crash can leave a legitimate
+                    // header-only shard (the output of a growth reshard for a keyspace
+                    // with fewer records than shards) moved in while its siblings still
+                    // sit in staging. Rejecting it would roll back a resumable swap.
+                    if (Files.isRegularFile(dirShard)) {
                         if (recordedShardCount(dirShard) != count) {
                             return false;
                         }

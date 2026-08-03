@@ -302,6 +302,14 @@ public final class ZstdNative {
             if (n < 0) {
                 throw new IllegalStateException("zstd dictionary compression failed with error code " + n);
             }
+            if (n == 0) {
+                // Symmetric with trainDict: a native 0 return must never be persisted
+                // as a successful record - an empty stored payload would fail every
+                // later read as 'Corrupt compressed record' (a write-time failure
+                // deferred to read-time data loss). ZSTD_compress cannot legitimately
+                // return 0 for a bound-sized buffer, so this is defensive.
+                throw new IllegalStateException("zstd dictionary compression failed (native returned 0)");
+            }
             if (n == dst.length) {
                 return dst;
             }
@@ -395,8 +403,11 @@ public final class ZstdNative {
                     + " samples, got " + (samples == null ? 0 : samples.length));
         }
         for (byte[] sample : samples) {
-            if (sample == null) {
-                throw new IllegalArgumentException("trainDict sample must not be null");
+            // Zero-length samples too: they reach the downcall fine but contribute
+            // nothing (silently weakening the dictionary) or fail it with an
+            // undocumented native error (mirrors DictionaryStore's caller-side check).
+            if (sample == null || sample.length == 0) {
+                throw new IllegalArgumentException("trainDict sample must not be null or empty");
             }
         }
         try {
