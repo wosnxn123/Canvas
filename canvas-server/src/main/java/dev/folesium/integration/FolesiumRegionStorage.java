@@ -115,7 +115,12 @@ public final class FolesiumRegionStorage implements AutoCloseable {
      */
     private static void checkNotShadowingVanillaChunks(Path folder) {
         Path storeDir = storeDirectoryFor(folder);
-        if (Files.exists(storeDir) || !Files.isDirectory(folder)) {
+        // A directory that merely EXISTS is not a store: another product (e.g.
+        // cesium-fabric's <world>/folesium players.db) can occupy the path, and
+        // FolesiumDatabase.open would treat it as a fresh empty store - which would
+        // shadow the .mca data exactly like a missing store. Only a store whose
+        // metadata reads back (readRole != null) is exempt from the check.
+        if (FolesiumDatabase.readRole(storeDir) != null || !Files.isDirectory(folder)) {
             return;
         }
         try (var s = Files.list(folder)) {

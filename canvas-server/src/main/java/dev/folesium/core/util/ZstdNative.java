@@ -169,6 +169,9 @@ public final class ZstdNative {
      * that flip the switch after the class was already probed refresh the cached value
      * with {@link #setForcedUnavailable(boolean)} instead of relying on the property.</p>
      */
+    /** Minimum samples zstd's {@code trainFromBuffer} accepts (COVER). */
+    private static final int MIN_TRAIN_SAMPLES = 11;
+
     private static final String FORCE_UNAVAILABLE_PROPERTY = "folesium.zstd.forceUnavailable";
 
     /** Lazily probed from {@link #FORCE_UNAVAILABLE_PROPERTY}; {@code null} until first use. */
@@ -262,11 +265,12 @@ public final class ZstdNative {
      * zstd-jni's offset-based {@code compressUsingDict}), then trimmed to the produced size.
      */
     public static byte[] compressUsingDict(byte[] raw, byte[] dict, int level) {
-        // Entry checks mirroring compress()/decompress(): the handles can be bound while the
-        // native link is broken (the probe dropped only the plain pair, see the static
-        // initializer) or the test-only force switch is set - both must surface as the same
-        // clear failure the plain path reports, so the switch's negative semantics are
-        // closed over the dictionary entries too.
+        // Entry checks mirroring compress()/decompress(): they gate the test-only force
+        // switch (folesium.zstd.forceUnavailable) and the null-handle state (an older
+        // zstd-jni without the dictionary API), surfacing both as the same clear failure
+        // the plain path reports. (The handles cannot be bound while the native link is
+        // broken: the probe failure drops the dict handles too, see the static
+        // initializer.)
         if (!available()) {
             throw new IllegalStateException(unavailableMessage());
         }
@@ -332,7 +336,9 @@ public final class ZstdNative {
     /**
      * Trains a dictionary from {@code samples} into a fresh {@code dictSize}-byte buffer using the
      * COVER algorithm ({@code legacy=false}). Returns the dictionary bytes exactly as long as the
-     * native side wrote them. Requires at least 11 samples, matching {@code Zstd.trainFromBuffer}.
+     * native side wrote them. Requires at least 11 non-null samples, matching
+     * {@code Zstd.trainFromBuffer} (fewer, or any null element, would be handed to the JNI
+     * downcall as an empty pointer instead of failing cleanly).
      */
     public static byte[] trainDict(byte[][] samples, int dictSize) {
         // Entry checks mirroring compress()/decompress() - see compressUsingDict for why the
@@ -353,11 +359,30 @@ public final class ZstdNative {
             throw new IllegalArgumentException("dictSize exceeds maximum of "
                     + DictionaryStore.MAX_DICT_BYTES + " bytes: " + dictSize);
         }
+        // The public API owns the JNI boundary, so it enforces its own preconditions too -
+        // the current caller (DictionaryStore.trainHoldingLock) checks them as well, but a
+        // future direct caller must not be able to reach the downcall with garbage.
+        if (samples == null || samples.length < MIN_TRAIN_SAMPLES) {
+            throw new IllegalArgumentException("trainDict requires at least " + MIN_TRAIN_SAMPLES
+                    + " samples, got " + (samples == null ? 0 : samples.length));
+        }
+        for (byte[] sample : samples) {
+            if (sample == null) {
+                throw new IllegalArgumentException("trainDict sample must not be null");
+            }
+        }
         try {
             byte[] dict = new byte[dictSize];
             long n = (long) mh.invokeExact(samples, dict, false);
             if (n < 0) {
                 throw new IllegalStateException("zstd dictionary training failed with error code " + n);
+            }
+            if (n == 0) {
+                // zstd-jni contract: trainFromBuffer returns 0 on failure (e.g. the
+                // dictionary buffer is too small for COVER). Reporting success with an
+                // empty dictionary would let the caller persist a dict.bin the loader
+                // rejects - surface the failure instead.
+                throw new IllegalStateException("zstd dictionary training failed (native returned 0)");
             }
             if (n == dict.length) {
                 return dict;

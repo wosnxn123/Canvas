@@ -1054,6 +1054,13 @@ public final class ShardFile implements AutoCloseable {
     public void delete(Bytes key) {
         lock.writeLock().lock();
         try {
+            // Same key-length validation put()/putIfAbsent() enforce: a tombstone with an
+            // invalid key length would write a record the recovery scan rejects as
+            // corrupt and truncate the shard at it on the next open, silently dropping
+            // every subsequent record.
+            if (key.length() == 0 || key.length() > MAX_KEY_LEN) {
+                throw new FolesiumException("Invalid key length " + key.length() + " for delete in " + path);
+            }
             ensureWritable();
             Loc old = index.get(key);
             if (old == null) {

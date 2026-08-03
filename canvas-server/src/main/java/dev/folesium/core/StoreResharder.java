@@ -261,10 +261,11 @@ final class StoreResharder {
             return;
         }
         // No valid COMMIT marker: the new set was never authoritative. Restore any old files
-        // moved aside before deleting scratch state, rather than destroying live shards.
+        // moved aside before destroying scratch state, rather than destroying live shards.
         LOGGER.log(System.Logger.Level.WARNING,
                 "Folesium: discarding an incomplete reshard of {0} (store is unchanged)", dir);
-        if (hasBackup && !Files.isRegularFile(movedMarker)) {
+        boolean moved = Files.isRegularFile(movedMarker);
+        if (hasBackup && !moved) {
             restoreFromBackup(dir, backup);
         }
         // The staging/backup trees are about to be destroyed: drop the rebuildable page
@@ -273,7 +274,28 @@ final class StoreResharder {
         // recovery evidence is gone.
         invalidatePageIndex(dir);
         deleteRecursively(staging);
-        deleteRecursively(backup);
+        if (!hasBackup) {
+            // Nothing to preserve.
+        } else if (!moved || movedAloneBackupDeletable(dir,
+                metadataShardCount(dir), consistentOnDiskShardCount(dir))) {
+            // No MOVED marker (the old set was restored above, so dir holds the complete
+            // old layout), or the MOVED marker plus a complete new set in dir - in both
+            // cases the backup is a true duplicate and can go.
+            deleteRecursively(backup);
+        } else {
+            // MOVED exists but dir does not hold the complete new set (verified the same
+            // way the MOVED-alone branch does): the swap was partially applied, the
+            // COMMIT marker is missing, and the backup is the only remaining copy of the
+            // old records. Deleting it here would destroy those records while dir holds
+            // only a partial new set - keep it and warn instead. (A normal crash sequence
+            // cannot produce this state; it needs a lost/corrupted COMMIT marker, e.g.
+            // bitrot or antivirus quarantine.)
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Folesium: keeping the backup {0} of {1}: an interrupted swap left the new"
+                            + " set incomplete and the COMMIT marker is missing - the backup is"
+                            + " the only remaining copy of the old shards",
+                    backup, dir);
+        }
         // Persist the scratch-tree deletions like the MOVED-alone branch above: the unlink
         // of the staging/backup directories lives in the store directory's entry, and
         // without an fsync a power cut could resurrect the discard evidence recovery

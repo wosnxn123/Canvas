@@ -802,22 +802,23 @@ public final class FolesiumRegistry {
         // when its mtime changed and commits that read into filePropertiesStamp, so a
         // probe-first order would baseline the watcher at the post-edit stamp and the
         // very edit that started it would never be detected or applied to the running
-        // stores. This also covers an edit that landed while the watcher was stopped
-        // (e.g. an autoReload=false->true flip that also retuned other settings): the
-        // probe absorbs it, but the baseline stays at the last-applied stamp, so the
-        // first poll sees the absorbed edit as a change and applies it. With no
-        // outstanding edit the stamps agree and the first poll applies nothing.
-        long appliedStamp = filePropertiesStamp;
+        // stores. configFileStamp is the last stamp a watcher run committed (an edit
+        // that landed while the watcher was stopped - e.g. an autoReload=false->true
+        // flip that also retuned other settings - stays visible to the first poll even
+        // if isEnabled()/property() reads absorbed it in the meantime: the probe
+        // absorbs it, but the baseline stays at the last-applied stamp, so the first
+        // poll sees the absorbed edit as a change and applies it. With no outstanding
+        // edit the stamps agree and the first poll applies nothing.
+        long appliedStamp = configFileStamp;
         if (!boolProperty("autoReload", true)) {
             return;
         }
         if (appliedStamp == 0L) {
-            // The file was never read through fileProperties() (the explicit-config
-            // acquire(dir, cfg) path, currently tests/embeddings only): the probe just
-            // absorbed it, so baseline at that stamp. A zero baseline would make the
-            // first poll treat a pre-existing operator file as an unapplied edit and
-            // reload() would override the explicitly passed configuration with the
-            // file's values.
+            // No watcher ever ran (configFileStamp is its own field, 0 until the first
+            // commit), and the probe just absorbed the file: baseline at that stamp.
+            // This is the one case the fix cannot reach - an edit absorbed by an even
+            // earlier isEnabled()/property() read with no application record - and it
+            // only matters for stores already open under a pre-edit configuration.
             appliedStamp = filePropertiesStamp;
         }
         configFileStamp = appliedStamp;

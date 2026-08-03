@@ -528,7 +528,20 @@ public final class DictionaryStore {
                         }
                         verifyLock.release();
                     } catch (OverlappingFileLockException ignored) {
-                        // Same-JVM lock on the file the path names: our own lock. (A peer
+                        // Same-JVM lock on the file the path names. If that file is NOT
+                        // the one we locked (delete+recreate between the key capture and
+                        // the verify open, with a peer thread holding the new file), the
+                        // path's file is unprotected while we hold the orphaned inode -
+                        // the same double-trainer outcome the re-check above prevents.
+                        // The mismatch is provable here even though tryLock cannot
+                        // succeed, so verify it the same way.
+                        Object peerKey = fileKeyOf(lockFile);
+                        if (peerKey != null && !peerKey.equals(currentFileKey)) {
+                            channel.close();
+                            continue;
+                        }
+                        // Keys match (or are unprovable): our own lock - or the accepted
+                        // inode-reuse variant, which stays indistinguishable. (A peer
                         // thread holding a live lock on a recreated file with a reused
                         // inode remains indistinguishable from our own lock - an accepted
                         // limitation with an astronomically narrow trigger window.)

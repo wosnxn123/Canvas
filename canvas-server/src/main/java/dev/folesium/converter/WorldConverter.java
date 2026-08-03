@@ -188,7 +188,13 @@ public final class WorldConverter {
                         } catch (NumberFormatException ex) {
                             // Out-of-range coordinates (e.g. r.9999999999999999.0.mca from a
                             // corrupt or foreign file): skip the file instead of aborting the
-                            // whole conversion.
+                            // whole conversion - except in backup mode, where skipping would
+                            // silently drop the region's data when the backup tree is pruned
+                            // after the "successful" rebuild (same rule as the read failure
+                            // below).
+                            if (backupOnConvert) {
+                                throw new RuntimeException("Failed converting " + mca, ex);
+                            }
                             System.err.println("Folesium: skipping " + mca.getFileName()
                                     + ": region coordinates out of range");
                             return;

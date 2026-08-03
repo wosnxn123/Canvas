@@ -790,7 +790,23 @@ public final class FolesiumDatabase implements AutoCloseable {
             try {
                 flush();
             } catch (RuntimeException e) {
-                throw new FolesiumException("Cannot flush " + dir + " during durability change", e);
+                // The retirement's last-resort interrupt can land on the retired
+                // thread's in-flight force and close a shard channel; the retired
+                // thread's own ERROR path reopens it, but if it is still blocked on a
+                // shard lock this flush may win the lock first and see the closed
+                // channel (flushIfDirty throws for exactly that state). Reopen and
+                // retry once before failing the whole durability change.
+                if (isChannelClosedFailure(e) && !closed.get()) {
+                    try {
+                        reopenInterruptClosedShards();
+                        flush();
+                    } catch (RuntimeException retryFailure) {
+                        throw new FolesiumException("Cannot flush " + dir
+                                + " during durability change", retryFailure);
+                    }
+                } else {
+                    throw new FolesiumException("Cannot flush " + dir + " during durability change", e);
+                }
             }
         }
         LOGGER.log(System.Logger.Level.INFO, "Folesium: {0} reconfigured - {1}",

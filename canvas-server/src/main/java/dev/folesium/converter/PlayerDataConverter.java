@@ -430,6 +430,15 @@ public final class PlayerDataConverter {
                             System.err.println("Folesium: skipping player file " + file.getFileName()
                                     + ": it disappeared while importing");
                             continue;
+                        } catch (IOException e) {
+                            // An unreadable player file (permissions, torn write) is
+                            // skipped per file like a vanished one: the source tree keeps
+                            // the data, so a re-run after a repair re-imports it. Aborting
+                            // the whole world adoption over one unreadable player file
+                            // would be the same asymmetry the dimension side removed.
+                            System.err.println("Folesium: skipping player file " + file.getFileName()
+                                    + ": cannot read it (" + e + ")");
+                            continue;
                         }
                         if (payload == null) {
                             // Reached only when the file grew past the bound after the
