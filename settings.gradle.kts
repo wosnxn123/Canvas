@@ -5,11 +5,14 @@ pluginManagement {
         mavenLocal()
         maven("https://maven.aliyun.com/repository/gradle-plugin") // Maven Central blocks CNB/CN hosts (HTTP 403)
         maven("https://maven.aliyun.com/repository/public")
-        gradlePluginPortal()
+        // Must come before gradlePluginPortal(): the weaver plugin's transitive
+        // paperweight-core dependency only exists here; the portal would proxy the
+        // lookup to Maven Central, which 403s CNB/CN egress IPs and aborts resolution.
         maven {
             name = "canvasmc"
             url = uri("https://maven.canvasmc.io/public")
         }
+        gradlePluginPortal()
     }
 }
 
