@@ -20,6 +20,7 @@ package dev.folesium.integration;
 
 import dev.folesium.converter.WorldConversionService;
 import dev.folesium.core.FolesiumConfig;
+import dev.folesium.core.FolesiumDatabase;
 import dev.folesium.core.FolesiumRegistry;
 import joptsimple.OptionSet;
 
@@ -80,14 +81,26 @@ public final class FolesiumCli {
             LOGGER.severe("Folesium: world directory does not exist: " + worldDir);
             System.exit(2);
         }
-        // Mirror the folesium-converter CLI's world-root validation: a directory that does
-        // not hold level.dat (a dimension folder, a playerdata/ tree, an arbitrary backup
-        // directory) is not a world root - converting it would silently report "0
-        // dimensions, 0 chunks" and the operator would never notice the typo.
-        if (!java.nio.file.Files.isRegularFile(worldDir.resolve("level.dat"))) {
+        // Mirror the folesium-converter CLI's world-root validation, but accept the
+        // documented "world whose root is a pure dimension" layout too: --folesiumConvert*
+        // may target a world root (level.dat) or a single dimension directory (Anvil
+        // region/poi/entities, or a folesium/ store with role=DIMENSION for the to-anvil
+        // direction). A directory with none of these (a playerdata/ tree, an arbitrary
+        // backup folder) would silently convert "0 dimensions, 0 chunks" and the operator
+        // would never notice the typo, so it still fails loudly.
+        boolean isWorldRoot = Files.isRegularFile(worldDir.resolve("level.dat"));
+        boolean isDimension = Files.isDirectory(worldDir.resolve("region"))
+                || Files.isDirectory(worldDir.resolve("poi"))
+                || Files.isDirectory(worldDir.resolve("entities"))
+                || (Files.isDirectory(worldDir.resolve(FolesiumDatabase.STORE_DIR_NAME))
+                        && FolesiumDatabase.readRole(
+                                worldDir.resolve(FolesiumDatabase.STORE_DIR_NAME))
+                                == FolesiumDatabase.StoreRole.DIMENSION);
+        if (!isWorldRoot && !isDimension) {
             LOGGER.severe("Folesium: " + worldDir
-                    + " is not a world root (a directory holding level.dat);"
-                    + " --folesiumConvert* expects the world root, not a dimension or data folder");
+                    + " is not a world root (level.dat) or a dimension directory (region/, or a"
+                    + " folesium/ store with role=DIMENSION); --folesiumConvert* expects a world"
+                    + " root or dimension, not a data folder");
             System.exit(2);
         }
 

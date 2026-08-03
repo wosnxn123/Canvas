@@ -1243,7 +1243,10 @@ public final class FolesiumDatabase implements AutoCloseable {
     /** Starts the group-commit thread if {@code durability == BATCH} and none is running. */
     private void startFlusherIfNeeded() {
         synchronized (flusherLock) {
-            if (closed.get() || flusher != null
+            // A read-only store never marks shards dirty and never compacts, so a
+            // group-commit thread on it would only wake to no-op scans (and, before the
+            // compact() readOnly guard, could touch scratch files it must not).
+            if (closed.get() || readOnly || flusher != null
                     || config.durability() != FolesiumConfig.DurabilityMode.BATCH) {
                 return;
             }

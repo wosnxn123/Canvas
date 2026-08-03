@@ -1221,6 +1221,12 @@ public final class ShardFile implements AutoCloseable {
         if (pageIndex == null || pageIndex.isInvalidated() || key.length() != 8) {
             return null;
         }
+        if (pageIndex.isClosed()) {
+            // A read that reaches the page index after close() must fail loudly, never
+            // report a live key as absent: in PAGE mode a null here would be served as
+            // "key absent" while the record is still live in the log and the HashMap.
+            throw new FolesiumException("Cannot read " + path + ": page index is closed");
+        }
         long chunkKey = LongKeys.decode(key.array());
         int regionX = RegionPage.regionXFromChunk(chunkKey);
         int regionZ = RegionPage.regionZFromChunk(chunkKey);
@@ -1562,7 +1568,11 @@ public final class ShardFile implements AutoCloseable {
             }
             throw failure;
         } finally {
-            if (!swapped) {
+            // A read-only shard's compact() returns at the top (readOnly guard) with
+            // swapped == false, but a read-only open must never write: skip the scratch
+            // cleanup for it (a leftover .compact from a live writer's in-flight
+            // compaction belongs to that writer, not to this read-only inspector).
+            if (!swapped && !readOnly) {
                 try {
                     Files.deleteIfExists(tmp);
                 } catch (IOException ignored) {

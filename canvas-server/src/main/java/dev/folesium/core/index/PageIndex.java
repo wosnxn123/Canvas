@@ -940,4 +940,10 @@ public final class PageIndex implements AutoCloseable {
     public boolean isInvalidated() {
         return invalidated;
     }
+
+    /** True after {@link #close()}. A read reaching the index in this state must fail
+     *  loudly, never report a live key as absent (the PAGE-mode invariant). */
+    public boolean isClosed() {
+        return closed;
+    }
 }
