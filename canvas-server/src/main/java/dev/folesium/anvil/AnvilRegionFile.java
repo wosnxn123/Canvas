@@ -472,9 +472,21 @@ public final class AnvilRegionFile implements Closeable {
                 // after); a crash between the publish and its directory force simply
                 // replays back to the old payload, which the region header stub
                 // references by the same path and therefore remains consistent.
-                java.nio.file.Files.move(staged, externalPath,
-                        java.nio.file.StandardCopyOption.ATOMIC_MOVE,
-                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                // Prefer the atomic replace but fall back to a plain replace move on
+                // filesystems without atomic-move support (mirroring ShardFile's
+                // moveReplacing): stageExternal already forced the staged payload to
+                // disk, so a non-atomic publish loses no durability.
+                try {
+                    java.nio.file.Files.move(staged, externalPath,
+                            java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                    java.nio.file.Files.move(staged, externalPath,
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                } catch (java.nio.file.FileSystemException e) {
+                    java.nio.file.Files.move(staged, externalPath,
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                }
                 staged = null;
                 externalPublished = true;
                 // Force the directory so the publish itself is durable (crash
@@ -519,16 +531,21 @@ public final class AnvilRegionFile implements Closeable {
             }
             if (externalPublished) {
                 try {
-                    java.nio.file.Files.deleteIfExists(externalPath);
-                    if (backup != null) {
-                        java.nio.file.Files.move(backup, externalPath,
-                                java.nio.file.StandardCopyOption.ATOMIC_MOVE);
-                        backup = null;
-                    }
+                    // Restore the old payload directly OVER the published file (with
+                    // REPLACE_EXISTING, mirroring the non-published branch below): a
+                    // delete-then-move would leave the NEW payload in place if the
+                    // delete failed (transient lock), so a writeChunk that reported
+                    // failure would still serve uncommitted data through the rolled-back
+                    // header stub. With the replace-move the canonical name always holds
+                    // the old payload when the rollback succeeds.
+                    java.nio.file.Files.move(backup, externalPath,
+                            java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    backup = null;
                 } catch (IOException rollbackFailure) {
-                    // The published .mcc was deleted and the old payload could not be
-                    // restored: keep the backup file - it is the only surviving copy of
-                    // the old payload, and the finally block would otherwise delete it,
+                    // The published .mcc could not be replaced with the old payload:
+                    // keep the backup file - it is the only surviving copy of the old
+                    // payload, and the finally block would otherwise delete it,
                     // permanently losing the chunk's data (the region header stub still
                     // references the external file).
                     keepBackup = true;

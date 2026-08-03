@@ -92,7 +92,13 @@ public final class ShardFile implements AutoCloseable {
     static final int RECORD_HEADER_LEN = 12;
     static final int FLAG_TOMBSTONE = 0x10;
     static final int MAX_KEY_LEN = 0xFFFF;
-    static final int MAX_VALUE_LEN = 256 * 1024 * 1024;
+    // 64 MiB per record, enforced symmetrically on write and on every read-side load
+    // (scan, hint, page loc): a corrupt record header may carry a huge declared raw
+    // length whose only other bound was the stored length, and decompressing such a
+    // record would allocate the declared size up front (Compressors/ZstdNative) - the
+    // input-side bomb defense. Real Minecraft payloads (chunks, players, advancements)
+    // are far below this.
+    static final int MAX_VALUE_LEN = 64 * 1024 * 1024;
 
     private record Loc(long recordOffset, int recordLength, int keyLen, int rawValLen, int storedValLen, byte flags) {
         long valueOffset() {
@@ -1712,6 +1718,10 @@ public final class ShardFile implements AutoCloseable {
                     // must be written against it (the next open does a full scan).
                     channel.force(false);
                     writeHint();
+                    // The force completed: nothing is dirty on disk any more, so a
+                    // repeated close() (or a close after an interrupted force) must not
+                    // redo the fsync.
+                    dirty = false;
                 }
                 channel.close();
             } else if (channel != null && dirty && !readOnly) {
@@ -1721,12 +1731,25 @@ public final class ShardFile implements AutoCloseable {
                 // - reopen, force, write the hint, close again. (channel == null means a
                 // failed compaction restore: the on-disk state is inconsistent, so never
                 // force against it.)
+                FileChannel reopened = null;
                 try {
-                    channel = FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE);
+                    reopened = FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE);
+                    channel = reopened;
+                    reopened = null;
                     channel.force(false);
                     writeHint();
                     channel.close();
+                    dirty = false;
                 } catch (IOException reopenFailure) {
+                    // Close the channel we did manage to reopen: a leaked open handle
+                    // would keep the file locked and confuse the next open.
+                    if (reopened != null) {
+                        try {
+                            reopened.close();
+                        } catch (IOException closeFailure) {
+                            reopenFailure.addSuppressed(closeFailure);
+                        }
+                    }
                     throw new FolesiumException("Close failed for " + path
                             + " (could not re-fsync a channel an interrupt closed)", reopenFailure);
                 }

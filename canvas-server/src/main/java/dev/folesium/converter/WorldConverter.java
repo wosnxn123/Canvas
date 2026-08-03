@@ -503,11 +503,13 @@ public final class WorldConverter {
      * In-place exports keep every chunk the store still has and delete the slots of chunks
      * the store dropped since the target .mca was written, mirroring the staging-mode
      * semantics "records absent from the store cannot survive". Every region file already
-     * present in the target tree is swept -- including regions the store holds no records
-     * in any more (a shrunken or emptied store), whose stale chunks would otherwise be
-     * resurrected by the next conversion -- by comparing each region's live chunk slots
-     * against the keys the store still holds for that region. Regions are only touched
-     * when their .mca exists, so a fresh target tree stays untouched outside the regions
+     * present in the target tree is compared against the keys the store still holds for
+     * that region; a region the store holds NO key for at all is KEPT with a warning
+     * (never swept) - it may have been skipped as corrupt at import time, and sweeping it
+     * would destroy the only surviving copy, breaking the import's re-run-after-repair
+     * promise (chunks of a genuinely shrunken store may be resurrected by a later
+     * conversion - the accepted cost). Regions are only touched when their .mca exists,
+     * so a fresh target tree stays untouched outside the regions
      * {@link #writeKeyspace} just wrote.
      */
     private void pruneSlotsMissingFromStore(Path out, Map<Long, List<Long>> byRegion) throws IOException {
@@ -559,8 +561,7 @@ public final class WorldConverter {
             // looked up per region instead of being merged into one global set of every
             // stored key: that duplicate set would double the memory footprint of a large
             // keyspace. The linear scan stays bounded by the 1024 slots a region can hold,
-            // so it is cheap even for a region full of chunks; a region absent from the
-            // map (a shrunken or emptied store) has no stored keys and is swept entirely.
+            // so it is cheap even for a region full of chunks.
             List<Long> regionKeys = byRegion.get(LongKeys.chunkKey(rx, rz));
             if (regionKeys == null) {
                 // The store holds NO key for this region. Sweeping it would destroy the

@@ -127,7 +127,11 @@ public final class DictionaryStore {
      * @throws IOException       if the file cannot be read
      */
     public static byte[] load(Path dictFile) throws IOException {
-        if (!Files.exists(dictFile)) {
+        // NOFOLLOW: a dangling symlink EXISTS (the link itself) but resolves to nothing -
+        // silently treating it as "no dictionary" would hide the corruption the same way
+        // a directory does; the isRegularFile check below then fails loudly for it, like
+        // every other non-regular object on the path.
+        if (!Files.exists(dictFile, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
             // The "no dictionary" case: no codec-3 record can exist without a dict.bin, so a
             // missing file means plain compression. This is deliberately distinct from "the
             // dictionary is corrupt" below, which fails the open loudly.

@@ -366,18 +366,22 @@ final class StoreResharder {
         Path staging = dir.resolve(STAGING_DIR);
         Path backup = dir.resolve(BACKUP_DIR);
         // Reuse recover()'s MOVED-alone determination before the cleanup below destroys
-        // the scratch trees: recover() only leaves a MOVED-marked backup behind when the
-        // store does NOT hold the complete new layout (its MOVED-alone branch keeps the
-        // backup otherwise), and in that retained state the backup is the only surviving
-        // copy of the old records - deleting it here would destroy the only copy. Refuse
-        // the reshard instead, so the operator resolves the leftover layout first.
+        // the scratch trees: recover() only leaves a MOVED-marked backup behind when it
+        // could NOT prove the store holds the complete new layout (its MOVED-alone
+        // branch deletes the backup otherwise). In that retained state the backup may be
+        // the only surviving copy of the old records - deleting it here would destroy
+        // the only copy - and even when the directory happens to hold a full file set,
+        // the kept state means the headers disagree with the layout (a mixed set), so a
+        // new reshard over it could propagate the mismatch. Refuse the reshard instead,
+        // so the operator resolves the leftover layout first.
         if (Files.isDirectory(backup) && Files.isRegularFile(backup.resolve(MOVED_MARKER))) {
             Integer metaCount = metadataShardCount(dir);
             if (!movedAloneBackupDeletable(dir, backup, metaCount, consistentOnDiskShardCount(dir))) {
                 throw new FolesiumException("Cannot reshard " + dir + ": the backup directory " + backup
-                        + " still holds the only surviving copy of the previous layout's records"
-                        + " (an interrupted reshard never finished its swap). Resolve the leftover"
-                        + " layout before starting a new reshard.");
+                        + " was kept by recovery because the store's layout could not be verified as"
+                        + " complete (an interrupted reshard never finished its swap, or the shard"
+                        + " headers disagree with the layout). Resolve the leftover layout before"
+                        + " starting a new reshard.");
             }
         }
         // The rewritten shards assign new offsets to every record, so any region pages left

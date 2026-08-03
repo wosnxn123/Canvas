@@ -1231,7 +1231,6 @@ public final class FolesiumDatabase implements AutoCloseable {
                 // retirement checks inside the lock are the only exit decision - an
                 // external interrupt is never a reason to stop a healthy flusher.
                 Thread.interrupted();
-                FolesiumConfig snapshot = config;
                 synchronized (flusherLock) {
                     // Either the store is closing or this thread has been superseded/retired.
                     if (closed.get() || flusher != Thread.currentThread()) {
@@ -1248,7 +1247,14 @@ public final class FolesiumDatabase implements AutoCloseable {
                         return;
                     }
                     try {
-                        flusherLock.wait(Math.max(1, snapshot.batchFlushMillis()));
+                        // Read the interval INSIDE the lock: applyRuntimeConfig updates
+                        // config and notifyAll()s under the same lock, so a notification
+                        // that lands between an outside-lock read and wait() would be
+                        // lost and the flusher would sleep a full OLD interval before
+                        // adopting a shortened one (the docs promise the new interval
+                        // applies immediately). Reading under the lock makes read+wait
+                        // atomic against the notify.
+                        flusherLock.wait(Math.max(1, config.batchFlushMillis()));
                     } catch (InterruptedException e) {
                         // Retirement wakeup: awaitFlusherExit's last-resort interrupt (or
                         // the store closing) arrives only after this thread was retired
@@ -1314,8 +1320,13 @@ public final class FolesiumDatabase implements AutoCloseable {
                         // The reopened channels still carry their dirty state: flush once
                         // more NOW so the interrupted force completes before the fresh
                         // thread's first pass (which waits a full batchFlushMillis). A
-                        // second channel-closing failure is logged and left for the fresh
-                        // thread's retry - never a reason to skip the ERROR path.
+                        // ClosedByInterruptException leaves the interrupt STATUS set
+                        // (InterruptibleChannel contract), which would re-close the just
+                        // reopened channel on the very next force - clear it first, the
+                        // same hygiene the loop top applies. A second channel-closing
+                        // failure is logged and left for the fresh thread's retry - never
+                        // a reason to skip the ERROR path.
+                        Thread.interrupted();
                         try {
                             flush();
                         } catch (RuntimeException flushRetryFailure) {

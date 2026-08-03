@@ -370,10 +370,6 @@ public final class PlayerDataConverter {
         Path backup = null;
         boolean backedUp = false;
         boolean backupOnConvert = config.backupOnConvert();
-        // Files the import skipped as unreadable: the export-side prune must leave them
-        // alone (the import promises a re-run after a repair re-imports them; deleting
-        // them would destroy the only remaining copy).
-        Set<String> skippedPlayerFiles = new java.util.HashSet<>();
         if (backupOnConvert && Files.isDirectory(storeDir)) {
             backup = backupPath(storeDir);
         }
@@ -430,8 +426,16 @@ public final class PlayerDataConverter {
                             payload = readPlayerFileBounded(file, size);
                         } catch (NoSuchFileException e) {
                             // A file that vanished between listing and read (concurrent
-                            // cleanup, server pruning) is skipped per file; it must not
-                            // abort the whole import.
+                            // cleanup, server pruning) is skipped per file - except in
+                            // backup mode, where the vanished source means the old store
+                            // (moved aside) may hold the only remaining copy and the
+                            // rebuild would silently lack this player; abort so the
+                            // rollback restores the old store (same rule as the
+                            // unreadable-file branch and the dimension side).
+                            if (backupOnConvert) {
+                                throw new IOException("Failed importing " + file
+                                        + ": it disappeared while importing", e);
+                            }
                             System.err.println("Folesium: skipping player file " + file.getFileName()
                                     + ": it disappeared while importing");
                             continue;
@@ -452,7 +456,6 @@ public final class PlayerDataConverter {
                             }
                             System.err.println("Folesium: skipping player file " + file.getFileName()
                                     + ": cannot read it (" + e + ")");
-                            skippedPlayerFiles.add(file.getFileName().toString());
                             continue;
                         }
                         if (payload == null) {
@@ -489,10 +492,12 @@ public final class PlayerDataConverter {
      * Materializes every player keyspace back into the vanilla per-player files.
      *
      * <p>Default: each record is written straight into the target directory,
-     * atomically replacing any existing file of the same name, and per-player files
-     * the store no longer holds are deleted, mirroring the staging mode's "records
-     * absent from the store cannot survive" (players deleted on the server are not
-     * resurrected by a rollback). Foreign files that are not player data are left
+     * atomically replacing any existing file of the same name. A player file the store
+     * holds NO record for at all is KEPT with a warning (never deleted): the import may
+     * have skipped it as unreadable, and destroying the only remaining copy would
+     * break the documented re-run-after-repair contract (a player actually deleted on
+     * the server may be resurrected by a later export - the accepted cost, same trade
+     * as the dimension-side prune). Foreign files that are not player data are left
      * untouched.</p>
      *
      * <p>With {@code backupOnConvert} a clean staging directory is built first and
@@ -603,9 +608,8 @@ public final class PlayerDataConverter {
 
     /**
      * Default path: write each record straight into the target directory, replacing existing
-     * files, then prune the files the store no longer holds. The prune mirrors the dimension
-     * export's {@code pruneSlotsMissingFromStore}: players deleted from the store (a shrunken
-     * or emptied store) must not be resurrected by a later export.
+     * files, then sweep the files the store no longer holds. A file the store holds NO record
+     * for is kept with a warning (never deleted) - see {@link #prunePlayerFilesMissingFromStore}.
      */
     private static long[] convertMappingInPlace(Path out, Keyspace ks, Mapping m) throws IOException {
         Files.createDirectories(out);
@@ -665,15 +669,15 @@ public final class PlayerDataConverter {
     }
 
     /**
-     * In-place exports keep every record the store still has and delete the per-player files
-     * the store dropped since the target directory was written, mirroring the staging-mode
-     * semantics "records absent from the store cannot survive" (and the dimension converter's
-     * {@code pruneSlotsMissingFromStore}). Every player file already present in the target
-     * tree is swept -- including directories the store holds no records in any more (a
-     * shrunken or emptied store), whose stale files would otherwise be resurrected by the
-     * next export -- by comparing each file's player UUID against the full set of player
-     * keys the store still holds. Files are only touched when they match the mapping's
-     * extension and the UUID filename pattern, so foreign files stay untouched.
+     * In-place exports keep every record the store still has and warn about (never delete)
+     * per-player files the store dropped: sweeping a file the store holds NO record for at
+     * all could destroy the only surviving copy of a player the import skipped as
+     * unreadable, so such files are kept with a warning and the operator deletes them by
+     * hand (a player actually deleted on the server may be resurrected by a later export -
+     * the accepted cost). Every player file present in the target tree is compared against
+     * the full set of player keys the store still holds; files are only touched when they
+     * match the mapping's extension and the UUID filename pattern, so foreign files stay
+     * untouched.
      */
     private static void prunePlayerFilesMissingFromStore(Path out, Keyspace ks, String extension) throws IOException {
         // Keys first: the sweep needs the full stored set (a clean staging tree would handle

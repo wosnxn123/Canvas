@@ -120,6 +120,13 @@ public final class FolesiumRegistry {
         }
         Properties p = new Properties();
         Path file = configFilePath();
+        // Capture the stamp BEFORE reading the content: an edit landing between the read
+        // and the stamp capture would leave the cache stamped with the NEW mtime while
+        // holding the OLD content, making the edit invisible to every stamp-only
+        // comparison (configFileChanged) until a second modification. With the
+        // pre-read stamp, an in-flight edit surfaces as a stamp mismatch on the next
+        // access and the file is simply re-read.
+        long readStamp = configFileTimestamp();
         if (Files.isRegularFile(file)) {
             try (var reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
                 p.load(reader);
@@ -165,7 +172,7 @@ public final class FolesiumRegistry {
         // enabledCache is derived from this Properties and must not outlive a reload of it
         // (e.g. after the file was deleted and regenerated with the defaults).
         fileProperties = p;
-        filePropertiesStamp = configFileTimestamp();
+        filePropertiesStamp = readStamp;
         if (enabledCache != null) {
             // A re-read overwrote the value worlds actually bound: keep the old one for
             // reload()'s enabled-flip warning. isEnabled() saves on refresh the same way;
@@ -468,12 +475,17 @@ public final class FolesiumRegistry {
                 // UncheckedIOException) must not crash the world load path: Folesium is
                 // opt-in, so degrade to disabled. The outcome is cached like every other
                 // isEnabled() result; reload()/the config watcher re-read the file and
-                // clear the cache when it becomes readable again.
+                // clear the cache when it becomes readable again. The cache stamp is
+                // committed too: without it, configFileChanged() stays true (the file's
+                // mtime still differs from the last successful load) and EVERY
+                // isEnabled()/acquire() would re-read the file and re-log this warning,
+                // while also overwriting enabledBeforeEdit with the poisoned false.
                 LOGGER.log(System.Logger.Level.WARNING,
                         "Folesium: cannot read {0} ({1}); treating Folesium as disabled (opt-in:"
                                 + " a config read failure must not crash the server)",
                         configFilePath().toAbsolutePath(), e.toString());
                 enabledCache = false;
+                filePropertiesStamp = configFileTimestamp();
             }
         }
         return enabledCache;
@@ -1073,7 +1085,33 @@ public final class FolesiumRegistry {
     /* ------------------------------------------------------------------ */
 
     private static Path canonical(Path dir) {
-        return dir.toAbsolutePath().normalize();
+        Path abs = dir.toAbsolutePath().normalize();
+        try {
+            // Resolve symlinks AND the filesystem's canonical case: on a
+            // case-insensitive filesystem (Windows/macOS) "D:/world/folesium" and
+            // "d:/World/folesium" name the SAME directory, and a registry keyed on the
+            // raw string would double-open it as two independent stores (two group-commit
+            // threads, two watermark writers, interleaved appends over the same shard
+            // files). toRealPath() returns the canonical spelling, collapsing both.
+            return abs.toRealPath();
+        } catch (IOException e) {
+            // Not created yet (first acquire creates the store): resolve as far as the
+            // existing ancestor so the canonical spelling still wins. The whole missing
+            // suffix is carried along - a store path is usually several levels deep
+            // (…/world/folesium) and dropping the intermediate segments would key two
+            // spellings of the same target differently.
+            Path p = abs;
+            Path missing = null;
+            while (p != null && !Files.exists(p)) {
+                missing = missing == null ? p.getFileName() : p.getFileName().resolve(missing);
+                p = p.getParent();
+            }
+            try {
+                return missing == null ? abs : p.toRealPath().resolve(missing);
+            } catch (IOException e2) {
+                return abs;
+            }
+        }
     }
 
     /**
