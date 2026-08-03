@@ -64,8 +64,7 @@
 
 ### 补丁清单与来源
 
-**基础 patch**（`canvas-server/minecraft-patches/base/`，Canvas 上游维护，fork 不改）：
-`0001-Rebrand`、`0002-Remove-Vanilla-Profiler`、`0003-Remove-Dead-Old-Watchdog-Code`、`0004-Per-world-Canvas-configs` / `0004-Fixup-Region-Threading`、`0005-Region-Threading`、`0006-Canvas-RegionizedWorldData`、`0007-Replace-Moonrise-Executor`、`0008-Purpur-Ender-Chest-6-Rows-Config`
+**基础 patch**（`canvas-server/minecraft-patches/base/`）：Canvas 上游维护，fork 不改。数量和编号会随上游合并变化，以目录实际内容为准，此处不硬编码。
 
 **Feature patch**（`canvas-server/minecraft-patches/features/`）：
 
@@ -81,9 +80,11 @@
 
 同日补齐 `old-feature` 段剩余 4 个字段（`spawn-invulnerable-time` / `old-explosion-damage-calculator` / `old-raid-behavior` / `villager-void-trade`），至此与 Lophine `OldFeatureConfig` 的 6 字段完全对齐；0003 由 23 个文件扩到 28 个。同时复核确认 0129 未把任何机制拆分到硬分叉新增的其他补丁里——0129 触碰的 17 个文件全部仍在 0003 覆盖范围内，本 fork 没有漏移植。
 
+2026-08-04 复核（Leaves 三项 GPL 来源）：`LeavesMC/Leaves` `master` 上 `0125-Old-wet-tnt-explode-behavior`、`0101-Old-raid-behavior`、`0005-Configurable-void-trade` 三个补丁的最后一次修改均为 1.21.11 rebase `22a763cb`（2026-04-28），此后无改动；与本 fork 固定版本（`3e96b237` / `bda7e406` / `9d2bd3f7`）的差异全部是 rebase 上下文适配（变量重命名、行号偏移），无行为修复，0003 无需重新移植。同日合并上游 Canvas `main`（至 `2c97cca1`），0003 应用无需适配。
+
 **Canvas 自有源码改动**（`canvas-server/src/main/java/io/canvasmc/canvas/GlobalConfiguration.java`，非 patch）：新增 `VanillaLikeExperience` 配置段（`enabled` + `commandBlocks` 字段）。
 
-命令方块修复 + Vanilla-like Experience 都在 feature patch `0003-Vanilla-like-experience.patch`（一个补丁），配置都在 `config/canvas-server.yml` 的 `vanilla-like-experience` 段（`enabled` 控原版机制，`command-blocks` 控命令方块）。基础 patch（`0004`/`0005`）保持上游 Canvas 原样（命令方块禁用），由 0003 重新启用并受配置控制。
+命令方块修复 + Vanilla-like Experience 都在 feature patch `0003-Vanilla-like-experience.patch`（一个补丁），配置都在 `config/canvas-server.yml` 的 `vanilla-like-experience` 段（`enabled` 控原版机制，`command-blocks` 控命令方块）。基础 patch 保持上游 Canvas 原样（命令方块禁用），由 0003 重新启用并受配置控制。
 
 ### 上游更新须知
 

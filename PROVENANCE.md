@@ -198,6 +198,21 @@ whose full license texts now live in
 and
 [`licenses/MIT.md`](https://github.com/LophineLabs/Lophine/blob/dev/26.2-hardfork/licenses/MIT.md).
 
+### Leaves sources re-verified 2026-08-04
+
+The three GPL-3.0 groups are pinned at the LeavesMC/Leaves commits recorded in
+the ledger above (`3e96b237`, `bda7e406`, `9d2bd3f7`). On Leaves `master` the
+same patches now live at `0125-Old-wet-tnt-explode-behavior.patch`,
+`0101-Old-raid-behavior.patch`, and `0005-Configurable-void-trade.patch`. The
+last commit touching any of the three files is the 1.21.11 rebase `22a763cb`
+(2026-04-28); nothing changed after it. Normalized diffs (index lines and
+`From:` hashes stripped) against the pinned versions show only rebase-context
+adaptation — variable renames such as `player` → `serverPlayer` and
+`attempt` → `i`, hunk offsets, and one `mutable.immutable()` → `mutable`
+return-site change with identical semantics. No behavioral fix and no added or
+removed mechanic exists upstream, so 0003 needs no re-port. As with Lophine,
+locate these patches by file-name keyword, never by number.
+
 ### License notices
 
 - Repository license: [`LICENSE`](LICENSE)
