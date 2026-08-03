@@ -160,6 +160,20 @@ public final class WorldConverter {
                 for (Map.Entry<String, String> e : DIR_TO_KEYSPACE.entrySet()) {
                     Path src = dimensionDir.resolve(e.getKey());
                     if (!Files.isDirectory(src)) {
+                        // Backup mode: the old store was moved aside (above) and the backup
+                        // tree is pruned after a "successful" rebuild, so a source dir absent
+                        // at the start would make the rebuild silently lack this keyspace
+                        // while the moved-aside store - the only surviving copy of its records
+                        // if it held any - sits aside until pruned. Mirror the
+                        // NoSuchFileException branch below (abort + rollback in backup mode)
+                        // whenever the moved-aside store actually held records for this
+                        // keyspace; when it never did (no populated shard), the skip is safe.
+                        if (backupOnConvert && backup != null && backupHoldsRecords(backup, e.getValue())) {
+                            throw new IOException("Source directory " + src + " is absent but the"
+                                    + " moved-aside store holds " + e.getValue()
+                                    + " records; aborting the backup-mode conversion instead of"
+                                    + " dropping them");
+                        }
                         continue;
                     }
                     Keyspace ks = db.keyspace(e.getValue());
@@ -704,6 +718,30 @@ public final class WorldConverter {
     private static Path backupPath(Path destination) throws IOException {
         pruneOldBackups(destination);
         return siblingPath(destination, ".folesium-backup-");
+    }
+
+    /**
+     * Whether the moved-aside store tree holds any <em>record</em> of {@code keyspace}: at
+     * least one {@code <keyspace>-NNNN.flog} shard file larger than the file header. Used on
+     * the backup-mode rebuild to decide whether an absent Anvil source directory means real
+     * records would be dropped (abort) or a keyspace that never held data (skip is safe). A
+     * shard that is exactly the header length holds no record; a keyspace with no shard file
+     * at all never existed in the moved-aside store.
+     */
+    static boolean backupHoldsRecords(Path backup, String keyspace) throws IOException {
+        try (var s = Files.list(backup)) {
+            return s.anyMatch(p -> {
+                String n = p.getFileName().toString();
+                if (!n.startsWith(keyspace + "-") || !n.endsWith(".flog")) {
+                    return false;
+                }
+                try {
+                    return Files.size(p) > dev.folesium.core.shard.ShardFile.FILE_HEADER_LEN;
+                } catch (IOException e) {
+                    return false;
+                }
+            });
+        }
     }
 
     /**

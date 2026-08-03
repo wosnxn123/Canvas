@@ -397,6 +397,21 @@ public final class PlayerDataConverter {
                     // <world>/players/playerdata.
                     Path src = m.resolve(worldRoot, playerRoot);
                     if (!Files.isDirectory(src)) {
+                        // Backup mode: the old store was moved aside (above) and the backup
+                        // tree is pruned after a "successful" rebuild, so a source dir absent
+                        // at the start would make the rebuild silently lack this data class
+                        // while the moved-aside store - the only surviving copy of its
+                        // records if it held any - sits aside until pruned. Abort + rollback
+                        // whenever the moved-aside store actually held records for this
+                        // keyspace; when it never did, the skip is safe (mirrors the
+                        // dimension-side WorldConverter fix).
+                        if (backupOnConvert && backup != null
+                                && WorldConverter.backupHoldsRecords(backup, m.keyspace())) {
+                            throw new IOException("Source directory " + src + " is absent but the"
+                                    + " moved-aside store holds " + m.keyspace()
+                                    + " records; aborting the backup-mode conversion instead of"
+                                    + " dropping them");
+                        }
                         continue;
                     }
                     Keyspace ks = db.keyspace(m.keyspace());

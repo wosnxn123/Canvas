@@ -138,6 +138,17 @@ public final class FolesiumDatabase implements AutoCloseable {
      * retirement decision.
      */
     private volatile Thread flusher;
+    /**
+     * Set when a reload's post-lock transition flush ({@code finalDurability != BATCH})
+     * failed after the config swap + flusher retirement, leaving BATCH-pending writes
+     * un-forced. The next reload must re-run the post-lock flush even when its
+     * {@code changes} is empty (the config is already applied) - otherwise the early
+     * no-change return would let the watcher commit a stamp while the failed flush's
+     * pending window is never forced again, silently degrading durability. Cleared when
+     * the transition flush succeeds or the flusher (BATCH) takes over. Volatile: written
+     * by the watcher thread, read by the next reload on the same thread.
+     */
+    private volatile boolean transitionFlushOwed;
 
     /**
      * Outcome of a runtime configuration change.
@@ -868,7 +879,7 @@ public final class FolesiumDatabase implements AutoCloseable {
                 // return below as if the disk now recorded the intent.
                 persistedCodec = persistCompression(requestedCodec);
             }
-            if (changes.isEmpty() && !persistedCodec) {
+            if (changes.isEmpty() && !persistedCodec && !transitionFlushOwed) {
                 return new ConfigReloadResult(current, changes, notes, reshardRequired);
             }
             this.config = effective;
@@ -895,6 +906,10 @@ public final class FolesiumDatabase implements AutoCloseable {
                 startFlusherIfNeeded();
                 flusherLock.notifyAll();
                 retired = null;
+                // The group-commit thread takes over forcing pending writes, so a
+                // transition flush is no longer owed (one failed earlier and the operator
+                // has since moved back to BATCH).
+                transitionFlushOwed = false;
             } else {
                 retired = flusher;
                 flusher = null;
@@ -907,6 +922,7 @@ public final class FolesiumDatabase implements AutoCloseable {
         if (finalDurability != FolesiumConfig.DurabilityMode.BATCH) {
             try {
                 flush();
+                transitionFlushOwed = false;
             } catch (RuntimeException e) {
                 // The retirement's last-resort interrupt can land on the retired
                 // thread's in-flight force and close a shard channel; the retired
@@ -918,11 +934,20 @@ public final class FolesiumDatabase implements AutoCloseable {
                     try {
                         reopenInterruptClosedShards();
                         flush();
+                        transitionFlushOwed = false;
                     } catch (RuntimeException retryFailure) {
+                        // The flip away from BATCH already retired the group-commit
+                        // thread and swapped this.config; the pending writes are now
+                        // un-forced and nothing else will force them until a successful
+                        // flush. Remember that a transition flush is owed so the next
+                        // reload (the watcher retries the failed edit) re-runs this
+                        // post-lock block instead of early-returning on empty changes.
+                        transitionFlushOwed = true;
                         throw new FolesiumException("Cannot flush " + dir
                                 + " during durability change", retryFailure);
                     }
                 } else {
+                    transitionFlushOwed = true;
                     throw new FolesiumException("Cannot flush " + dir + " during durability change", e);
                 }
             }

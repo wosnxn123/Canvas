@@ -156,7 +156,35 @@ public final class FolesiumPlayerStorage implements AutoCloseable {
     /** The player storage of the running server, or {@code null} when Folesium is off. */
     public static FolesiumPlayerStorage active() {
         FolesiumPlayerStorage storage = active;
-        return storage == null || storage.closed ? null : storage;
+        if (storage == null || storage.closed) {
+            return null;
+        }
+        // A hot reload that disabled Folesium must take effect on the player path too:
+        // chunks re-evaluate isEnabled() on every world load (RegionFileStorage is
+        // recreated per world), but the player storage is bound once per server, so its
+        // enabled state would otherwise stay frozen. If the operator disabled Folesium
+        // while the server ran, self-close once so every subsequent player read/write
+        // falls through to the vanilla files exactly like chunks do after a world
+        // reload - otherwise player NBT/advancements/stats would keep flowing into a
+        // store the operator believes is off, and on the next restart (Folesium still
+        // off) all of it would be silently invisible to vanilla. close() is idempotent
+        // and nulls {@code active}, so a concurrent flip races to the same outcome.
+        if (!FolesiumRegistry.isEnabled()) {
+            storage.close();
+            return null;
+        }
+        return storage;
+    }
+
+    /**
+     * Whether this storage is the still-open, still-enabled player store. The player
+     * hooks ({@code pds-save}/{@code pds-load}) route through this instead of a bare
+     * {@code != null} check so an {@code enabled=false} hot reload makes them fall
+     * through to the vanilla files (via {@link #active()}, which self-closes the store
+     * on the flip) rather than keep writing into a store that is now off.
+     */
+    public boolean enabled() {
+        return !closed && active() == this;
     }
 
     /**
