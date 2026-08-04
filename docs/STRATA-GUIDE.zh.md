@@ -14,7 +14,7 @@ Strata 是用 Rust 编写的混合双层存档引擎，替代 Anvil `.mca`：
 - 逐条 xxhash64 校验，损坏只隔离单条记录、不传播；
 - epoch 日志 + manifest 影子双副本，崩溃可恢复。
 
-**默认关闭**。启用后接管区块 / 实体 / POI 存储；native 库缺失或加载失败时**自动回退 Anvil**，服务器照常启动。
+**默认关闭**。启用后接管区块 / 实体 / POI 存储。native 库缺失或加载失败：该维度尚无 vstore 时**自动回退 Anvil**，服务器照常启动；**已有 vstore 时 fail-closed 拒绝启动该 level**（否则 vstore 数据不可见），见"关闭与回滚"。
 
 ## 启用
 
@@ -34,6 +34,8 @@ Strata 是用 Rust 编写的混合双层存档引擎，替代 Anvil `.mca`：
    ```
 
    每个维度各有一行 `virtual store online`。
+
+> **fail-closed**：若某维度已有 vstore（`vstore/manifest.vsm` 存在）而 Strata 未接管（`strata.enabled=false`、native 失败、打开失败），**拒绝启动该 level**——静默按 Anvil 启动会让 vstore 里的数据不可见。应急逃生：`strata.force-anvil=true`（仍按 Anvil 启动，vstore 数据转回前不可见，每次启动醒目 WARN）。
 
 ## 多世界与多维度
 
@@ -55,6 +57,8 @@ Strata 是用 Rust 编写的混合双层存档引擎，替代 Anvil `.mca`：
 
 转换在启动前同步执行，完成后继续正常启动。**转换完成后请移除该参数**，否则下次启动会再次覆盖重建。
 
+**转换守卫**：目标维度已有 vstore 时，这两个启动参数**默认拒绝**（既有 vstore 可能含更新的运行期数据），需追加 `--strataForce` 显式确认。`--strataConvertToAnvil` 还会提示：运行期写入的记录只存在于 vstore，不会被 Anvil 清单枚举，服务端内导出可能漏——无损全量导出请用 `strata-cli convert --to-anvil`。
+
 ### 方式二：strata-cli（离线工具，Strata 仓库构建）
 
 ```bash
@@ -68,6 +72,8 @@ strata-cli convert --to-anvil <world>    # Strata → Anvil
 - **断点续传**：中断后重跑自动跳过已完成部分；
 - **全维度**：自动发现主世界、`DIM-1`/`DIM1`、`dimensions/minecraft/*` 全部维度根；
 - 多世界服务器：对每个世界根各执行一次。
+
+服务端内 `/strata convert-to-strata` / `/strata convert-to-anvil` 子命令同理受守卫：目标维度已有 vstore 时需 `-f`/`--force` 确认。
 
 ## 配置参考（strata.properties）
 
@@ -86,7 +92,6 @@ strata.compression.hot-enabled=true
 strata.compression.cold-enabled=true
 strata.compression.hot=zstd-3
 strata.compression.cold=zstd-9
-strata.compression.dictionary=true
 # Batch compression workers: 0=auto(all cores) 1=serial(default, TPS-first) N>=2=capped
 # 批量压缩线程：0=自动(全核) 1=串行(默认,TPS优先) N≥2=限N线程
 strata.compression.threads=1
@@ -96,6 +101,11 @@ strata.index.cache-mb=512
 strata.gc.enabled=true
 strata.gc.invalid-threshold=0.6
 strata.gc.budget-bytes=33554432
+# Minimum hole bytes for punch / 挖洞最小洞阈值（字节）
+strata.gc.min-hole-bytes=65536
+# Emergency escape: boot on Anvil even when a vstore exists (data in vstore invisible until converted back)
+# 应急逃生门：vstore 存在时仍按 Anvil 启动（vstore 内数据在转回前不可见）
+strata.force-anvil=false
 ```
 
 要点：
@@ -103,6 +113,9 @@ strata.gc.budget-bytes=33554432
 - **压缩级别可随时改**：每条记录自带 codec/字典槽/代际，新旧记录混存合法，读取按记录自身配置解压；
 - **`strata.compression.threads` 默认 1（串行）**：游戏服 CPU 稀缺，TPS 优先；CPU 富余时设 `0`（全核）或 `N`（限流）换取 autosave/转换吞吐；
 - `strata.index.cache-mb`：索引缓存预算，常驻内存上界，与世界大小无关；
+- `strata.gc.min-hole-bytes`：挖洞最小洞阈值（默认 65536 字节）；
+- `strata.force-anvil`：应急逃生门（见"关闭与回滚"）；
+- `strata.compression.dictionary` **已停用**：旧键仍识别但 WARN 后忽略；
 - 非法值会在启动时报错并指明行号，不静默回退。
 
 ## 维护命令（strata-cli）
@@ -114,10 +127,18 @@ strata-cli compact <world>      # 手动 GC 压实
 strata-cli recompress <world>   # 按当前配置全量重压（安全：先写 vstore.new，校验后 rename 交换）
 ```
 
+在线维护：GC 与冷层迁移**随 autosave 周期在线运行**——每 `strata.tiering.stable-flushes` 次成功 flush 触发一轮（GC + flush + tier），启动时不做全量扫描。
+
+> ⚠️ **CLI 需停服**：vstore 有独占会话锁（`vstore/.strata.lock`），对运行中服务的 vstore 跑 CLI 会报"另一个进程正在使用"。
+> ⚠️ **备份注意**：挖洞产生稀疏文件，不感知稀疏的复制工具会膨胀回逻辑大小——用 `tar --sparse` 或支持稀疏的工具，或直接复制段文件；建议防病毒软件排除 vstore 目录。
+> ⚠️ **NFS/网络文件系统/多机共享卷不支持**：锁与 rename/fsync/挖洞语义依赖本地文件系统。
+
 ## 关闭与回滚
 
-1. `strata.enabled=false`（或删除配置文件）→ 服务器回到 Anvil 路径，vstore 保留不删；
-2. 需要彻底转回 Anvil 文件：停服后 `--strataConvertToAnvil` 或 `strata-cli convert --to-anvil <world>`；
+> ⚠️ **风险真相**：Strata 运行期写过的 chunk，其 Anvil 主副本在写成功时即被删除（vstore 是唯一副本）。直接置 `strata.enabled=false` 不是"恢复原样"：这些 chunk 在 Anvil 侧不可见，且 fail-closed 会直接拒绝启动该 level。
+
+1. `strata.enabled=false`（或删除配置文件）→ 若 vstore 存在，**fail-closed 拒绝启动该 level**（防止 vstore 数据被静默无视）；`strata.force-anvil=true` 才放行（应急逃生：vstore 数据转回前不可见，每次启动醒目 WARN）；
+2. 彻底转回 Anvil 文件（**推荐 CLI**，无损全量）：停服后 `strata-cli convert --to-anvil <world>`；服务端 `--strataConvertToAnvil` / `/strata convert-to-anvil` 需 `--strataForce` / `-f` 显式确认，且只存在于 vstore 的记录（运行期写入）不会被 Anvil 清单枚举、可能漏出；
 3. 回滚完成、验证无误后再删除 `vstore/`。
 
 ## 常见问题
