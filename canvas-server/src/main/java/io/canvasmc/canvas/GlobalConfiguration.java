@@ -13,6 +13,7 @@ import io.canvasmc.canvas.subcommands.RegionTickSubCommand;
 import io.canvasmc.canvas.subcommands.ReloadSubCommand;
 import io.canvasmc.canvas.subcommands.SetMaxPlayersSubCommand;
 import io.canvasmc.canvas.subcommands.WorldDistanceSubCommand;
+import io.canvasmc.canvas.subcommands.StrataSubCommand; // Canvas - Strata storage
 import io.canvasmc.canvas.threadedregions.scheduler.AffinitySchedulerThreadPool;
 import io.canvasmc.canvas.util.FasterRandomSource;
 import io.canvasmc.canvas.util.LockedReference;
@@ -245,7 +246,8 @@ public class GlobalConfiguration extends Part {
                 RegionBarSubCommand.class,
                 WorldDistanceSubCommand.class,
                 ReloadSubCommand.class,
-                RegionTickSubCommand.class // TODO - merge this into regiondata command
+                RegionTickSubCommand.class, // TODO - merge this into regiondata command
+                StrataSubCommand.class // Canvas - Strata storage
                 // RegionDataCommand.class // TODO - regiondata command
             );
 
