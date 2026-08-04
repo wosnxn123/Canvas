@@ -1,51 +1,17 @@
 ## Strata 存档引擎 / Strata Storage Engine
 
-本 fork 内置 **Strata**——Rust 编写的混合双层存档引擎（段日志热层 + 分块固态冷归档），替代 Anvil `.mca`：体积降低约 45%+，存储内存与世界大小无关，逐条 xxhash 校验自愈。**默认关闭**，显式启用后接管区块/实体/POI 存储；native 加载失败时自动回退 Anvil，不影响启动。
+本 fork 内置 **Strata**——Rust 混合双层存档引擎（段日志热层 + 分块固态冷归档），替代 Anvil `.mca`：体积降低 45%+、存储内存与世界大小无关、逐条 xxhash 自愈。**默认关闭**，`strata.enabled=true` 显式启用；native 加载失败自动回退 Anvil，不影响启动。
 
-This fork bundles **Strata** — a Rust hybrid two-tier storage engine (segment-log hot tier + blocked solid cold archive) replacing Anvil `.mca`: ~45%+ smaller saves, storage memory independent of world size, per-record xxhash self-healing. **Disabled by default**; when enabled it takes over chunk/entity/POI storage. If the native library fails to load, the server silently falls back to Anvil and boots normally.
+This fork bundles **Strata** — a Rust hybrid two-tier storage engine replacing Anvil `.mca`: 45%+ smaller saves, memory independent of world size, per-record xxhash self-healing. **Disabled by default** (opt in via `strata.enabled=true`); automatic Anvil fallback if the native fails to load.
 
-### 启用 / Enable
+### 📖 使用教程 / Usage Guide
 
-在世界根目录（与 `level.dat` 同级）创建或编辑 `strata.properties`：
-Create or edit `strata.properties` in the world root (next to `level.dat`):
+| 语言 / Language | 文档 / Document |
+|---|---|
+| **中文** | [docs/STRATA-GUIDE.zh.md](docs/STRATA-GUIDE.zh.md) —— 启用、多世界/多维度、Anvil 互转、配置参考、维护命令、回滚 |
+| **English** | [docs/STRATA-GUIDE.en.md](docs/STRATA-GUIDE.en.md) — enabling, multi-world/multi-dimension, Anvil conversion, config reference, maintenance, rollback |
 
-```properties
-strata.enabled=true
-```
-
-首次启动自动生成带完整注释的配置模板（含压缩级别、冷层迁移、GC、批量压缩线程数等，全部可配）。
-On first start a fully commented template is generated (compression levels, cold tiering, GC, batch-compression threads — all configurable).
-
-启动日志出现 `native bridge loaded` 与每个维度的 `virtual store online` 即接管成功。
-Look for `native bridge loaded` and one `virtual store online` line per dimension.
-
-### 多世界与多维度 / Multi-world & multi-dimension
-
-- 主世界、下界、末地**各自独立存储池**（`<维度目录>/vstore`）。
-  Overworld, nether and end each get their own store (`<dimDir>/vstore`).
-- Multiverse 等插件创建的世界同样自动接管（每个世界根读自己的 `strata.properties`）。
-  Plugin-created worlds (e.g. Multiverse) are handled automatically — each world root reads its own `strata.properties`.
-
-### 转换已有世界 / Converting existing worlds
-
-启动参数（启动前同步执行，Cesium 式：覆盖目标、保留源、断点续传）：
-Launch flags (run synchronously before boot; Cesium-style: overwrite target, keep source, resumable):
-
-```
---strataConvertToStrata    # Anvil → Strata（全部维度 / all dimensions）
---strataConvertToAnvil     # Strata → Anvil（回滚 / rollback）
-```
-
-转换**绝不删除源文件**，验证无误后手动删除 `region/` 等旧目录。多世界服务器对每个世界根各执行一次。
-Conversion **never deletes the source**; remove old `region/` dirs manually after verification. For multi-world servers run once per world root.
-
-### 关闭与回滚 / Disable & rollback
-
-`strata.enabled=false` 即回到 Anvil 路径（vstore 保留）；需要彻底转回文件用 `--strataConvertToAnvil`。
-Set `strata.enabled=false` to return to the Anvil path (vstore retained); use `--strataConvertToAnvil` to convert back to files.
-
-引擎仓库与设计文档：[wosnxn123/Strata](https://github.com/wosnxn123/Strata)（含 CLI 工具 `strata-cli`：verify / stats / compact / recompress）。
-Engine repo & design docs: [wosnxn123/Strata](https://github.com/wosnxn123/Strata) (includes the `strata-cli` tool: verify / stats / compact / recompress).
+引擎仓库 / Engine repo：[wosnxn123/Strata](https://github.com/wosnxn123/Strata)（设计文档 + `strata-cli` 工具 / design docs + CLI）
 
 ---
 
