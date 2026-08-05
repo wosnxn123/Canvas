@@ -100,6 +100,8 @@ This fork bundles **Strata** — a Rust hybrid two-tier storage engine replacing
 
 2026-08-04 复核（Leaves 三项 GPL 来源）：`LeavesMC/Leaves` `master` 上 `0125-Old-wet-tnt-explode-behavior`、`0101-Old-raid-behavior`、`0005-Configurable-void-trade` 三个补丁的最后一次修改均为 1.21.11 rebase `22a763cb`（2026-04-28），此后无改动；与本 fork 固定版本（`3e96b237` / `bda7e406` / `9d2bd3f7`）的差异全部是 rebase 上下文适配（变量重命名、行号偏移），无行为修复，0003 无需重新移植。同日合并上游 Canvas `main`（至 `2c97cca1`），0003 应用无需适配。
 
+2026-08-05 合并上游 Canvas `main`（至 `0d4958ba`，2 个提交：末影珍珠数据缺 `level` 条目崩溃修复、Projectile `canvasWorldData` 空值防护）。两个上游提交均只改 base 层补丁文件（`base/0004-Region-Threading` + `sources/Projectile.java.patch`），0003/0004 应用无需适配；CNB 构建三门全绿 + 启动 smoke 通过。
+
 **Canvas 自有源码改动**（`canvas-server/src/main/java/io/canvasmc/canvas/GlobalConfiguration.java`，非 patch）：新增 `VanillaLikeExperience` 配置段（`enabled` + `commandBlocks` 字段）。
 
 命令方块修复 + Vanilla-like Experience 都在 feature patch `0003-Vanilla-like-experience.patch`（一个补丁），配置都在 `config/canvas-server.yml` 的 `vanilla-like-experience` 段（`enabled` 控原版机制，`command-blocks` 控命令方块）。基础 patch 保持上游 Canvas 原样（命令方块禁用），由 0003 重新启用并受配置控制。
