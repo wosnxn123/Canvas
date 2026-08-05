@@ -14,7 +14,7 @@ Strata is a Rust hybrid two-tier storage engine replacing Anvil `.mca`:
 - Per-record xxhash64 verification — corruption is isolated to the single record, never propagates;
 - Epoch log + shadow dual-copy manifest — crash-recoverable.
 
-**Disabled by default.** When enabled, it takes over chunk / entity / POI storage. If the native library is missing or fails to load: dimensions **without** a vstore **fall back to Anvil automatically** and boot normally; a dimension **with** an existing vstore **refuses to start (fail-closed)** — otherwise vstore data would be invisible. See "Disabling and rollback".
+**Disabled by default.** When enabled, it takes over chunk / entity / POI storage. **Official Canvas CI builds (GitHub Actions artifacts) embed both platform natives** (`strata_ffi.dll` win-x64 / `strata_ffi.so` linux-x64) — nothing extra to install; self-builds must supply the native per the Strata repo BUILD_GUIDE. If the native library is missing or fails to load: dimensions **without** a vstore **fall back to Anvil automatically** and boot normally; a dimension **with** an existing vstore **refuses to start (fail-closed)** — otherwise vstore data would be invisible. See "Disabling and rollback".
 
 ## Enabling
 

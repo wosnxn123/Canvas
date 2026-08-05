@@ -14,7 +14,7 @@ Strata 是用 Rust 编写的混合双层存档引擎，替代 Anvil `.mca`：
 - 逐条 xxhash64 校验，损坏只隔离单条记录、不传播；
 - epoch 日志 + manifest 影子双副本，崩溃可恢复。
 
-**默认关闭**。启用后接管区块 / 实体 / POI 存储。native 库缺失或加载失败：该维度尚无 vstore 时**自动回退 Anvil**，服务器照常启动；**已有 vstore 时 fail-closed 拒绝启动该 level**（否则 vstore 数据不可见），见"关闭与回滚"。
+**默认关闭**。启用后接管区块 / 实体 / POI 存储。**官方 Canvas CI 构建（GitHub Actions 产物）已内嵌双平台 native**（`strata_ffi.dll` win-x64 / `strata_ffi.so` linux-x64），无需额外安装；自构建时需按 Strata 仓 BUILD_GUIDE 自备 native。native 库缺失或加载失败：该维度尚无 vstore 时**自动回退 Anvil**，服务器照常启动；**已有 vstore 时 fail-closed 拒绝启动该 level**（否则 vstore 数据不可见），见"关闭与回滚"。
 
 ## 启用
 
