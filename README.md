@@ -16,7 +16,7 @@
 
 ### 1. 重新启用命令方块（可通过配置开关）
 
-上游 Canvas 在多处代码中硬编码禁用了命令方块。本 fork 在 feature patch 0003 中将 5 处禁用点改为受配置控制：
+上游 Canvas 在多处代码中硬编码禁用了命令方块。本 fork 在 feature patch `0003-Re-enable-command-blocks` 中将 5 处禁用点改为受配置控制：
 
 - 开关：`config/canvas-server.yml` → `vanilla-like-experience.command-blocks`（默认 `true`）
 - 开启时通过 ACE API 的 `io.canvasmc.canvas.threadedregions.commands.AbstractCommandExecution.executeOnGlobal` 将命令方块执行路由到 **global region 线程**，可安全执行跨区域命令（如 `/tp`、`/give`、`/scoreboard`）
@@ -58,6 +58,25 @@
 
 许可证要点：上表六项的补丁 `From:` 都是 Lophine 的 MIT opt-in 作者，但其中三个在补丁体内显式声明 `Licensed under: GPL-3.0` 且各有不同 co-author，真实来源是 LeavesMC/Leaves 的固定提交——**MIT opt-in 属于作者个人，不可传递**。逐项来源、作者与许可证见 [`PROVENANCE.md`](PROVENANCE.md)。
 
+### 4. 新增原版机制还原（2026-08-07 移植）
+
+以下机制位于 `vanilla-like-experience` 段，**独立于** `enabled`，逐项开关，全部默认 `false`：
+
+| 选项 | 说明 | 来源 / 许可证 |
+|------|------|------|
+| `vanilla-end-portal-teleportation` | 还原原版末地传送手感：保留实体动量、平台玩家生成偏移，同步生成末地平台 | Kaiiju → Lophine 0028，GPL-3.0 |
+| `use-legacy-random-source-for-players` | 实体使用 per-entity 旧版随机源，还原 Folia 前原版随机序列 | Luminol → Lophine 0034，MIT |
+| `tripwire-behavior` | `OFF`/`VANILLA20`/`VANILLA21`/`MIXED`：1.20/1.21 式绊线复制与混合刷线机行为；同时调整末地平台生成避免绊线复制 | Luminol → Lophine 0045，MIT |
+| `vanilla-hopper` | 还原完整原版漏斗 pull 语义（逐物品移动 + 原版事件/计数处理） | Leaves → Lophine 0065，GPL-3.0 |
+| `follow-tick-sequence-merge` | 物品实体按 tick 序列而非堆叠数合并，修大合并半径下物品无法合并 | Lophine 0093，MIT |
+| `catch-update-suppression` | 物理/方块更新期间的 StackOverflowError/ClassCastException/IllegalArgumentException 转为记日志的 UpdateSuppressionException，不再崩 tick 循环 | Leaves → Lophine 0117，GPL-3.0 |
+| `cce-update-suppression` | 重新引入潜影盒 CCE 更新抑制向量（需 `catch-update-suppression` 才有意义） | Leaves → Lophine 0118，GPL-3.0 |
+| `revert-trapdoor-changes` | 回退 Paper 对 TrapDoorBlock 的改动 | Luminol → Lophine 0121，MIT |
+| `old-block-remove-behaviour` | 旧版 Block remove 行为（方块实体移除时序） | Leaves → Lophine 0124，GPL-3.0 |
+| `no-ghast-block-breaking` / `no-creeper-block-breaking` / `disable-ghast-fire` / `disable-blaze-fire` | MiniTweaks 生物火焰与爆炸规则，四个独立开关 | MiniTweaks → Lophine 0125，GPL-3.0 |
+
+更新抑制另引入 `io.canvasmc.canvas.util.UpdateSuppressionException`（改写自 Leaves，GPL-3.0，无 Leaves 事件/日志依赖）；`0122`（防止更新抑制丢失物品掉落，Leaves → Lophine，GPL-3.0）仅在 `catch-update-suppression` 生效时起作用。
+
 ### 分支
 
 `main` 跟踪 Canvas 上游 `main`，也是服务器构建和部署使用的分支。旧的 `pre-merger/26.2` 说明已经过时，不再作为当前维护基线。
@@ -72,7 +91,10 @@
 |------|------|------|
 | `0001-Purpur-Alternative-Keepalive` | Canvas 上游 | — |
 | `0002-Disable-Criterion-Trigger-Config` | Canvas 上游 | — |
-| `0003-Vanilla-like-experience` | **本 fork**（移植 + 原创） | 17 项 vanilla 机制移植自 [Lophine 0048 固定版本](https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0048-Add-Vanilla-like-experience-Config.patch)（作者 Bacteriawa，GPL-3.0）；2 项旧版僵尸机制移植自 [Lophine 0013](https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0013-Old-zombie-reinforcement.patch) / [0014](https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0014-Old-leader-zombie-health-logic.patch)（作者 Helvetica Volubi，MIT）；5 个命令方块 gate 为本 fork 原创。完整适配说明见 [`PROVENANCE.md`](PROVENANCE.md)。 |
+| `0003-Re-enable-command-blocks` | **本 fork 原创** | 6 个命令方块 gate + global region 执行路由 + owning-region 输出 hop |
+| `0128-Add-Vanilla-like-experience-Config` | **本 fork**（移植） | 17 项 vanilla 机制 + `enabled` 主开关，移植自 [Lophine 0048 固定版本](https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0048-Add-Vanilla-like-experience-Config.patch)（作者 Bacteriawa，GPL-3.0） |
+| `0094`/`0095`/`0096`/`0098`/`0101`/`0104` | **本 fork**（移植） | old-feature 六项，与 Lophine `OldFeatureConfig` 对齐，见 §3 |
+| `0028`/`0034`/`0045`/`0065`/`0093`/`0117`/`0118`/`0121`/`0122`/`0124`/`0125` | **本 fork**（移植） | 2026-08-07 新增移植，见 §4；编号对齐 Lophine `dev/26.2-hardfork@0724ba3f` |
 
 2026-07-14 已与 `LophineCraft/Lophine` `dev/26.2@f4aea025` 复核：0048 仍覆盖相同的 17 个原版机制；0013 和已更名的 `0014-Old-leader-zombie-health-logic.patch` 与本 fork 的两个 OldFeature 选项语义一致。
 
@@ -81,10 +103,11 @@
 同日补齐 `old-feature` 段剩余 4 个字段（`spawn-invulnerable-time` / `old-explosion-damage-calculator` / `old-raid-behavior` / `villager-void-trade`），至此与 Lophine `OldFeatureConfig` 的 6 字段完全对齐；0003 由 23 个文件扩到 28 个。同时复核确认 0129 未把任何机制拆分到硬分叉新增的其他补丁里——0129 触碰的 17 个文件全部仍在 0003 覆盖范围内，本 fork 没有漏移植。
 
 2026-08-04 复核（Leaves 三项 GPL 来源）：`LeavesMC/Leaves` `master` 上 `0125-Old-wet-tnt-explode-behavior`、`0101-Old-raid-behavior`、`0005-Configurable-void-trade` 三个补丁的最后一次修改均为 1.21.11 rebase `22a763cb`（2026-04-28），此后无改动；与本 fork 固定版本（`3e96b237` / `bda7e406` / `9d2bd3f7`）的差异全部是 rebase 上下文适配（变量重命名、行号偏移），无行为修复，0003 无需重新移植。同日合并上游 Canvas `main`（至 `2c97cca1`），0003 应用无需适配。
+2026-08-07：原单一 `0003-Vanilla-like-experience.patch` 按功能拆为 `0003`（命令方块）/`0128`（vanilla-like 主）/old-feature 六个补丁，并新增移植 11 个机制（§4）。全链回放验证：19 个补丁按序应用逐字节复现拆分前最终态；GitHub Actions（applyAllPatches + compileJava + paperclip）全绿，CNB 远程启动 smoke test 通过（全部新配置项带 docs 生成）。Lophine `ver/26.2@fc3415e6` 已将补丁集重编号为 49 个，且删除了 `0028`/`0034`/`0045`/`0065` 四个来源——移植与复核仍以固定提交 `0724ba3f` 为准，按文件名关键词定位。
 
-**Canvas 自有源码改动**（`canvas-server/src/main/java/io/canvasmc/canvas/GlobalConfiguration.java`，非 patch）：新增 `VanillaLikeExperience` 配置段（`enabled` + `commandBlocks` 字段）。
+**Canvas 自有源码改动**（非 patch）：`canvas-server/src/main/java/io/canvasmc/canvas/GlobalConfiguration.java` 新增 `VanillaLikeExperience` 配置段（`enabled`、`commandBlocks` + 11 个新机制字段 + `TripwireBehavior` 枚举，枚举位于 `GlobalConfiguration` 顶层供 NMS patch 引用）；新增 `util/UpdateSuppressionException.java`。
 
-命令方块修复 + Vanilla-like Experience 都在 feature patch `0003-Vanilla-like-experience.patch`（一个补丁），配置都在 `config/canvas-server.yml` 的 `vanilla-like-experience` 段（`enabled` 控原版机制，`command-blocks` 控命令方块）。基础 patch 保持上游 Canvas 原样（命令方块禁用），由 0003 重新启用并受配置控制。
+命令方块修复在 `0003-Re-enable-command-blocks`，vanilla-like 主机制在 `0128`，old-feature 与新增机制各自独立补丁（见上表）；配置都在 `config/canvas-server.yml`（`vanilla-like-experience` 段控原版机制与新增机制，`old-feature` 段控旧版六项）。基础 patch 保持上游 Canvas 原样（命令方块禁用），由 0003 重新启用并受配置控制。
 
 ### 上游更新须知
 

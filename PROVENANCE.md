@@ -74,12 +74,19 @@ upstreams. Git history is the authoritative record for the moving upstream
 baseline. Existing upstream patch authorship and source comments must be
 preserved during merges.
 
-### `0003-Vanilla-like-experience.patch`
+### Feature patch set (split 2026-08-07)
 
-Local path:
-`canvas-server/minecraft-patches/features/0003-Vanilla-like-experience.patch`
+Until 2026-08-07 the groups below shipped as a single
+`0003-Vanilla-like-experience.patch`. They now ship as per-feature patches under
+`canvas-server/minecraft-patches/features/`, numbered to match Lophine
+`dev/26.2-hardfork@0724ba3f` (the pinned port source): `0003` command blocks
+(original to this fork), `0128` vanilla-like config, `0094`/`0095`/`0096`/`0098`/
+`0101`/`0104` old-feature ports, and the eleven new ports recorded in the
+2026-08-07 section below. A full-chain replay (base then features in file
+order) reproduces the pre-split applied tree byte-identically, so no mechanic
+changed during the split.
 
-The patch contains three separately attributed groups:
+The ledger rows below cover the original 0003 groups and the new ports:
 
 | Local work | Classification | Immutable source | Original author | License | Local adaptation |
 | --- | --- | --- | --- | --- | --- |
@@ -91,6 +98,17 @@ The patch contains three separately attributed groups:
 | Old explosion damage calculator | Derived/ported | [LeavesMC/Leaves `0134-Old-wet-tnt-explode-behavior.patch` at `3e96b237`](https://github.com/LeavesMC/Leaves/blob/3e96b237749a960f297f211d439ffc9ea7fd2381/leaves-server/minecraft-patches/features/0134-Old-wet-tnt-explode-behavior.patch), reached via [Lophine `Leaves-Old-Explosion-Damage-Calculator` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0104-Leaves-Old-Explosion-Damage-Calculator.patch) | MC_XiaoHei `<xor7xiaohei@gmail.com>`, relayed by Helvetica Volubi `<suisuroru@blue-millennium.fun>` | **GPL-3.0**, as declared in the patch body — the Lophine MIT opt-in does **not** apply to this patch | Replaced the Lophine TOML config read with Canvas `GlobalConfiguration.oldFeature.oldExplosionDamageCalculator`; retained the `// Leaves` source marker. |
 | Old raid behavior | Derived/ported | [LeavesMC/Leaves `0114-Old-raid-behavior.patch` at `bda7e406`](https://github.com/LeavesMC/Leaves/blob/bda7e406b995290234e33283a181e33467ceda38/leaves-server/minecraft-patches/features/0114-Old-raid-behavior.patch), reached via [Lophine `Leaves-Old-raid-behavior` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0098-Leaves-Old-raid-behavior.patch) | huanli233 `<392352840@qq.com>`, relayed by Helvetica Volubi `<suisuroru@blue-millennium.fun>` | **GPL-3.0**, as declared in the patch body — the Lophine MIT opt-in does **not** apply to this patch | Replaced four TOML config reads with `GlobalConfiguration.oldFeature.oldRaidBehavior`; used Canvas's existing `RAVAGER_SPAWN_PLACEMENT_TYPE` constant instead of re-resolving `SpawnPlacements.getPlacementType` inside the added `getRavagerSpawnLocation`; retained all `// Leaves` source markers. |
 | Villager void trade | Derived/ported | [LeavesMC/Leaves `0088-Configurable-trading-with-the-void.patch` at `9d2bd3f7`](https://github.com/LeavesMC/Leaves/blob/9d2bd3f7b0a48f00df7bc8c74292338ed9c3a458/leaves-server/minecraft-patches/features/0088-Configurable-trading-with-the-void.patch), reached via [Lophine `Leaves-Configurable-trading-with-the-void` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0101-Leaves-Configurable-trading-with-the-void.patch) | violetc `<58360096+s-yh-china@users.noreply.github.com>`, relayed by Helvetica Volubi `<suisuroru@blue-millennium.fun>` | **GPL-3.0**, as declared in the patch body — the Lophine MIT opt-in does **not** apply to this patch | Replaced three TOML config reads with `GlobalConfiguration.oldFeature.villagerVoidTrade`; retained the `// Leaves` source markers. See the risk note below. |
+| Vanilla end portal teleportation | Derived/ported | [Lophine `0028-Kaiiju-Vanilla-end-portal-teleportation` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0028-Kaiiju-Vanilla-end-portal-teleportation.patch), origin KaiijuMC/Kaiiju | MrHua269 `<mrhua269@gmail.com>`, co-authored Sofiane H. Djerbi `<46628754+kugge@users.noreply.github.com>` | **GPL-3.0**, per the Kaiiju license pinned in the patch body | Gated by `vanillaLikeExperience.vanillaEndPortalTeleportation`; end-platform creation captures a final local (`finalDestination`) because Canvas reassigns `destination`. |
+| Vanilla random for players | Derived/ported | [Lophine `0034-Add-config-for-vanilla-random` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0034-Add-config-for-vanilla-random.patch), origin Luminol | Helvetica Volubi `<suisuroru@blue-millennium.fun>` | MIT opt-in | Gated by `useLegacyRandomSourceForPlayers`. |
+| Tripwire behavior config | Derived/ported | [Lophine `0045-Add-config-to-modify-tripwire-behavior` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0045-Add-config-to-modify-tripwire-behavior.patch), origin Luminol | Helvetica Volubi `<suisuroru@blue-millennium.fun>` | MIT opt-in | Gated by `tripwireBehavior` enum; the `TripwireBehavior` enum lives at `GlobalConfiguration` level so NMS patches can reference it. |
+| Vanilla hopper | Derived/ported | [Lophine `0065-Leaves-Vanilla-Hopper` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0065-Leaves-Vanilla-Hopper.patch), origin LeavesMC/Leaves | MrHua269 `<mrhua269@gmail.com>` | **GPL-3.0** (Leaves repository license; no MIT opt-in applies) | Gated by `vanillaHopper`. |
+| Tick-sequence item merge | Derived/ported | [Lophine `0093-Modify-merge-ItemEntity-logic` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0093-Modify-merge-ItemEntity-logic.patch) | Helvetica Volubi `<suisuroru@blue-millennium.fun>` | MIT opt-in | Gated by `followTickSequenceMerge`. |
+| Catch update suppression crash | Derived/ported | [Lophine `0117-Leaves-Catch-update-suppression-crash` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0117-Leaves-Catch-update-suppression-crash.patch), origin LeavesMC/Leaves | Bacteriawa `<A3167717663@hotmail.com>`, co-authored violetc `<58360096+s-yh-china@users.noreply.github.com>` | **GPL-3.0**, as declared in the patch body | Adapted to `io.canvasmc.canvas.util.UpdateSuppressionException` (no Leaves event/logger dependencies); gated by `catchUpdateSuppression`. |
+| CCE update suppression | Derived/ported | [Lophine `0118-Leaves-CCE-update-suppression` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0118-Leaves-CCE-update-suppression.patch), origin LeavesMC/Leaves | Bacteriawa `<A3167717663@hotmail.com>`, co-authored violetc | **GPL-3.0**, as declared in the patch body | Same adaptation; gated by `cceUpdateSuppression`. |
+| TrapDoorBlock Paper revert | Derived/ported | [Lophine `0121-Revert-TrapDoorBlock-changes-form-Paper` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0121-Revert-TrapDoorBlock-changes-form-Paper.patch), origin Luminol | Helvetica Volubi `<suisuroru@blue-millennium.fun>` | MIT opt-in | Gated by `revertTrapdoorChanges`. |
+| Prevent item-drop loss on suppression | Derived/ported | [Lophine `0122-Leaves-Prevent-loss-of-item-drops-due-to-update-supp` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0122-Leaves-Prevent-loss-of-item-drops-due-to-update-supp.patch), origin LeavesMC/Leaves | Helvetica Volubi, co-authored violetc | **GPL-3.0**, as declared in the patch body | Only effective when `catchUpdateSuppression` converts the crash. |
+| Old block remove behaviour | Derived/ported | [Lophine `0124-Leaves-Old-Block-remove-behaviour` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0124-Leaves-Old-Block-remove-behaviour.patch), origin LeavesMC/Leaves | Helvetica Volubi, co-authored violetc | **GPL-3.0**, as declared in the patch body | Gated by `oldBlockRemoveBehaviour`. |
+| Mob fire and explosion rules | Derived/ported | [Lophine `0125-MiniTweaks-mob-fire-and-explosion-rules` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0125-MiniTweaks-mob-fire-and-explosion-rules.patch), origin MiniTweaks | Bacteriawa `<A3167717663@hotmail.com>` | **GPL-3.0** (Lophine repository license; no MIT opt-in for this author) | Split into four flags: `noGhastBlockBreaking`, `noCreeperBlockBreaking`, `disableGhastFire`, `disableBlazeFire`. |
 
 ### MIT opt-in is personal, not transitive
 
@@ -212,6 +230,37 @@ adaptation — variable renames such as `player` → `serverPlayer` and
 return-site change with identical semantics. No behavioral fix and no added or
 removed mechanic exists upstream, so 0003 needs no re-port. As with Lophine,
 locate these patches by file-name keyword, never by number.
+
+### Patch split and new ports 2026-08-07
+
+The single `0003-Vanilla-like-experience.patch` was split into per-feature
+patches and eleven further mechanics were ported (ledger rows above). Local
+numbers align with Lophine `dev/26.2-hardfork@0724ba3f`. Lophine's current
+`ver/26.2@fc3415e6` renumbered the set again (49 patches); the mapping for
+re-verification is:
+
+| Local | Lophine `ver/26.2@fc3415e6` |
+| --- | --- |
+| `0093-Modify-merge-ItemEntity-logic` | `0012` |
+| `0094-Old-zombie-reinforcement` | `0013` |
+| `0095-Old-leader-zombie-health-logic` | `0014` |
+| `0096-Spawn-invulnerable-time` | `0015` |
+| `0098-Leaves-Old-raid-behavior` | `0017` |
+| `0101-Leaves-Configurable-trading-with-the-void` | `0020` |
+| `0104-Leaves-Old-Explosion-Damage-Calculator` | `0023` |
+| `0117-Leaves-Catch-update-suppression-crash` | `0036` |
+| `0118-Leaves-CCE-update-suppression` | `0037` |
+| `0121-Revert-TrapDoorBlock-changes-form-Paper` | `0040` |
+| `0122-Leaves-Prevent-loss-of-item-drops-due-to-update-supp` | `0041` |
+| `0124-Leaves-Old-Block-remove-behaviour` | `0043` |
+| `0125-MiniTweaks-mob-fire-and-explosion-rules` | `0044` |
+| `0128-Add-Vanilla-like-experience-Config` | `0048` |
+
+`0028` (Kaiiju end portal), `0034` (vanilla random), `0045` (tripwire
+behavior), and `0065` (vanilla hopper) are **absent** from
+`ver/26.2@fc3415e6` — Lophine dropped them in the 26.2 rebuild. The pinned
+`0724ba3f` copies remain the authoritative source; do not re-port from
+`ver/26.2` for these four.
 
 ### License notices
 
