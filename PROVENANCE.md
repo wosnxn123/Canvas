@@ -109,6 +109,7 @@ The ledger rows below cover the original 0003 groups and the new ports:
 | Prevent item-drop loss on suppression | Derived/ported | [Lophine `0122-Leaves-Prevent-loss-of-item-drops-due-to-update-supp` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0122-Leaves-Prevent-loss-of-item-drops-due-to-update-supp.patch), origin LeavesMC/Leaves | Helvetica Volubi, co-authored violetc | **GPL-3.0**, as declared in the patch body | Only effective when `catchUpdateSuppression` converts the crash. |
 | Old block remove behaviour | Derived/ported | [Lophine `0124-Leaves-Old-Block-remove-behaviour` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0124-Leaves-Old-Block-remove-behaviour.patch), origin LeavesMC/Leaves | Helvetica Volubi, co-authored violetc | **GPL-3.0**, as declared in the patch body | Gated by `oldBlockRemoveBehaviour`. |
 | Mob fire and explosion rules | Derived/ported | [Lophine `0125-MiniTweaks-mob-fire-and-explosion-rules` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0125-MiniTweaks-mob-fire-and-explosion-rules.patch), origin MiniTweaks | Bacteriawa `<A3167717663@hotmail.com>` | **GPL-3.0** (Lophine repository license; no MIT opt-in for this author) | Split into four flags: `noGhastBlockBreaking`, `noCreeperBlockBreaking`, `disableGhastFire`, `disableBlazeFire`. |
+| Vanilla ender pearl loading | Derived/ported | [Lophine `0130-Restore-vanilla-ender-pearl-loading` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0130-Restore-vanilla-ender-pearl-loading.patch) (`0049` on `ver/26.2@fc3415e6`) | Bacteriawa `<A3167717663@hotmail.com>` | **GPL-3.0** (Lophine repository license) | Replaces the Canvas upstream `canvas:pearls` SavedData persistence removed by fork-original `0129`; pearls save into player data (vanilla `ender_pearls` layout) via a region-owned volatile snapshot updated on the pearl's region thread. |
 
 ### MIT opt-in is personal, not transitive
 
@@ -261,6 +262,22 @@ behavior), and `0065` (vanilla hopper) are **absent** from
 `ver/26.2@fc3415e6` — Lophine dropped them in the 26.2 rebuild. The pinned
 `0724ba3f` copies remain the authoritative source; do not re-port from
 `ver/26.2` for these four.
+
+### Ender pearl mechanism swap 2026-08-07
+
+The Canvas upstream global `canvas:pearls` SavedData persistence
+(`io.canvasmc.canvas.threadedregions.entities.EnderPearls`, the
+`savePearls`/`spawnPearls` hooks, the `RegionShutdownThread` shutdown
+collection, and the `RegionizedServer` autosave entry) is removed by
+fork-original `0129-Remove-Canvas-ender-pearl-persistence.patch` and replaced
+by `0130-Restore-vanilla-ender-pearl-loading.patch` (ledger row above). The
+earlier 2026-08-07 decision to **not** port the Lophine pearl patch (recorded
+in the project context on the grounds that Canvas base already persisted
+pearls) was reversed at the user's request in favour of vanilla save-layout
+semantics. Behavioural difference versus the removed mechanism: pearls no
+longer survive player logout (Paper semantics); they survive restarts only
+while the owner is online. Pre-existing `canvas:pearls` save data is ignored
+after the swap.
 
 ### License notices
 
