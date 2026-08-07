@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: wosnxn123 <wosnxn123@users.noreply.github.com>
+Date: Thu, 7 Aug 2026 12:00:00 +0800
+Subject: [PATCH] Leaves Configurable trading with the void
+
+Ported from Lophine 0101, originally LeavesMC/Leaves 0088 (GPL-3.0, violetc).
+
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index d3582db1f4..8611c74d10 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -2969,7 +2969,7 @@
+     }
+ 
+     public boolean isCommandBlockEnabled() {
+-        return false; // Canvas - region threading
++        return io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.commandBlocks && this.getGameRules().get(GameRules.COMMAND_BLOCKS_WORK); // Canvas - vanilla-like experience
+     }
+ 
+     public boolean isSpawnerBlockEnabled() {
+@@ -3086,7 +3086,7 @@
+             // Spigot start
+             if (entity.getBukkitEntity() instanceof org.bukkit.inventory.InventoryHolder && (!(entity instanceof ServerPlayer) || entity.getRemovalReason() != Entity.RemovalReason.KILLED)) { // SPIGOT-6876: closeInventory clears death message
+                 // Paper start - Fix merchant inventory not closing on entity removal
+-                if (entity.getBukkitEntity() instanceof org.bukkit.inventory.Merchant merchant && merchant.getTrader() != null) {
++                if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().oldFeature.villagerVoidTrade && entity.getBukkitEntity() instanceof org.bukkit.inventory.Merchant merchant && merchant.getTrader() != null) { // Leaves - Configurable trading with the void
+                     merchant.getTrader().closeInventory(org.bukkit.event.inventory.InventoryCloseEvent.Reason.UNLOADED);
+                 }
+                 // Paper end - Fix merchant inventory not closing on entity removal
+diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
+index 4e97ff3ae6..9d625d8a95 100644
+--- a/net/minecraft/server/players/PlayerList.java
++++ b/net/minecraft/server/players/PlayerList.java
+@@ -545,7 +545,7 @@
+                 player.stopRiding();
+                 vehicle.getPassengersAndSelf().forEach(e -> {
+                     // Paper start - Fix villager boat exploit
+-                    if (e instanceof net.minecraft.world.entity.npc.villager.AbstractVillager villager) {
++                    if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().oldFeature.villagerVoidTrade && e instanceof net.minecraft.world.entity.npc.villager.AbstractVillager villager) { // Leaves - Configurable trading with the void
+                         final net.minecraft.world.entity.player.Player human = villager.getTradingPlayer();
+                         if (human != null) {
+                             villager.setTradingPlayer(null);
+diff --git a/net/minecraft/world/inventory/MerchantMenu.java b/net/minecraft/world/inventory/MerchantMenu.java
+index 5979e3856d..55f6392f85 100644
+--- a/net/minecraft/world/inventory/MerchantMenu.java
++++ b/net/minecraft/world/inventory/MerchantMenu.java
+@@ -74,6 +74,7 @@
+ 
+     @Override
+     public boolean stillValid(final Player player) {
++        if (io.canvasmc.canvas.GlobalConfiguration.getInstance().oldFeature.villagerVoidTrade) return this.trader.getTradingPlayer() == player; // Leaves - Configurable trading with the void
+         if (!checkReachable) return true; // Paper - checkReachable
+         return this.trader.stillValid(player);
+     }

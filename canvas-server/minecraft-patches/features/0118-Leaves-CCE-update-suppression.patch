@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: wosnxn123 <wosnxn123@users.noreply.github.com>
+Date: Thu, 7 Aug 2026 12:00:00 +0800
+Subject: [PATCH] Leaves: CCE update suppression
+
+Ported from Lophine 0118, originally LeavesMC/Leaves (GPL-3.0, violetc/Bacteriawa).
+Gated behind vanilla-like-experience.cceUpdateSuppression.
+
+diff --git a/net/minecraft/world/level/block/ShulkerBoxBlock.java b/net/minecraft/world/level/block/ShulkerBoxBlock.java
+index e27413c..6b65a15 100644
+--- a/net/minecraft/world/level/block/ShulkerBoxBlock.java
++++ b/net/minecraft/world/level/block/ShulkerBoxBlock.java
+@@ -185,7 +185,9 @@ public class ShulkerBoxBlock extends BaseEntityBlock {
+     protected int getAnalogOutputSignal(final BlockState state, final Level level, final BlockPos pos, final Direction direction) {
+         // Lophine start - catch update suppression crash
+         try {
+-            return AbstractContainerMenu.getRedstoneSignalFromBlockEntity(level.getBlockEntity(pos));
++            return io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.cceUpdateSuppression
++                ? AbstractContainerMenu.getRedstoneSignalFromContainer((net.minecraft.world.Container)level.getBlockEntity(pos))
++                : AbstractContainerMenu.getRedstoneSignalFromBlockEntity(level.getBlockEntity(pos));
+         } catch (ClassCastException ex) {
+             if (io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.catchUpdateSuppression) {
+                 throw new io.canvasmc.canvas.util.UpdateSuppressionException(pos, null, this, null, ex);

@@ -1,0 +1,214 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: wosnxn123 <wosnxn123@users.noreply.github.com>
+Date: Thu, 7 Aug 2026 12:00:00 +0800
+Subject: [PATCH] Re-enable command blocks with config gate and global-region execution
+
+Original to this fork: 5 command-block gates routed through
+global region execution (GPL-3.0, wosnxn123).
+
+diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+index f66b4330ed..9532029f94 100644
+--- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+@@ -987,7 +987,7 @@
+     public void handleSetCommandBlock(final ServerboundSetCommandBlockPacket packet) {
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
+         // Canvas start - region threading
+-        if (true) {
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.commandBlocks) {
+             this.player.sendSystemMessage(Component.literal("Command blocks are not enabled with region threading"));
+             return;
+         }
+@@ -1054,7 +1054,7 @@
+     public void handleSetCommandMinecart(final ServerboundSetCommandMinecartPacket packet) {
+         PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
+         // Canvas start - region threading
+-        if (true) {
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.commandBlocks) {
+             this.player.sendSystemMessage(Component.literal("Command block minecarts are not enabled with region threading"));
+             return;
+         }
+diff --git a/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java b/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java
+index 0be598cae2..bd21f4a4d0 100644
+--- a/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java
++++ b/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java
+@@ -88,7 +88,7 @@
+     @Override
+     public InteractionResult interact(final Player player, final InteractionHand hand, final Vec3 location) {
+         // Canvas start - region threading
+-        if (true) {
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.commandBlocks) {
+             return InteractionResult.FAIL;
+         }
+         // Canvas end - region threading
+@@ -159,6 +159,19 @@
+         public void threadCheck() {
+             ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(MinecartCommandBlock.this, "Asynchronous sendSystemMessage to a command block");
+         }
++        // Canvas start - vanilla-like experience - apply command output on the owning region
++        @Override
++        public void runOnOwningRegion(final ServerLevel level, final Runnable task) {
++            // A minecart moves, so its owning region is only known for the position it holds right now.
++            // Queueing against that chunk is the best available target; if the cart has crossed into
++            // another region by the time the task runs, threadCheck() inside the task still catches it
++            // rather than letting a cross-region write through.
++            final net.minecraft.core.BlockPos pos = MinecartCommandBlock.this.blockPosition();
++            io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue.queueOrExecuteTickTask(
++                level, pos.getX() >> 4, pos.getZ() >> 4, task
++            );
++        }
++        // Canvas end - vanilla-like experience
+         // Folia end
+     }
+ }
+diff --git a/net/minecraft/world/level/BaseCommandBlock.java b/net/minecraft/world/level/BaseCommandBlock.java
+index afd2d882f9..5f55dfb089 100644
+--- a/net/minecraft/world/level/BaseCommandBlock.java
++++ b/net/minecraft/world/level/BaseCommandBlock.java
+@@ -25,15 +25,31 @@
+     private static final int NO_LAST_EXECUTION = -1;
+     private long lastExecution = -1L;
+     private boolean updateLastExecution = true;
+-    private int successCount;
++    private volatile int successCount; // Canvas - vanilla-like experience - written from the command's region, read by comparators
+     private boolean trackOutput = true;
+-    private @Nullable Component lastOutput;
++    private volatile @Nullable Component lastOutput; // Canvas - vanilla-like experience - written from the command's region, read by the block GUI
+     private String command = "";
+     private @Nullable Component customName;
+     // CraftBukkit start
+     protected abstract org.bukkit.command.CommandSender getBukkitSender(CommandSourceStack wrapper);
+     public abstract ServerLevel getLevel();
+     // CraftBukkit end
++    // Canvas start - vanilla-like experience - apply command output on the owning region
++    /**
++     * Runs {@code task} on the region that owns this command block.
++     *
++     * Command execution is dispatched to the global region (see {@code performCommand}), so command
++     * output arrives on a thread that does not own this command block's chunk. Writing
++     * {@code lastOutput} and calling {@link #onUpdated} from there would violate region ownership and
++     * trip the {@link #threadCheck()} assertion, so both must hop back here first.
++     *
++     * The default implementation runs inline, which is correct for subclasses that are not
++     * region-owned. Region-owned subclasses must override it.
++     */
++    public void runOnOwningRegion(final ServerLevel level, final Runnable task) {
++        task.run();
++    }
++    // Canvas end - vanilla-like experience
+ 
+     public int getSuccessCount() {
+         return this.successCount;
+@@ -91,7 +91,7 @@
+     }
+ 
+     public boolean performCommand(final ServerLevel level) {
+-        if (true) return false; // Folia - region threading
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.commandBlocks) return false; // Canvas - vanilla-like experience
+         if (level.getGameTime() == this.lastExecution) {
+             return false;
+         }
+@@ -107,11 +107,23 @@
+             try {
+                 this.lastOutput = null;
+ 
+-                try (BaseCommandBlock.CloseableCommandBlockSource commandSource = this.createSource(level)) {
++                // Canvas start - vanilla-like experience
++                // Deliberately NOT try-with-resources. executeOnGlobal below only runs the command inline
++                // when this thread already is the global tick thread; a command block is ticked by the
++                // region owning its chunk, so in practice the command is queued and runs later. Closing
++                // the source here would set CloseableCommandBlockSource#closed before the command has run,
++                // and that flag gates acceptsSuccess, acceptsFailure, shouldInformAdmins and the
++                // sendSystemMessage body - which silently discarded every command block's output. The
++                // source holds no resource beyond that flag, so leaving it unclosed is safe; each
++                // execution creates a fresh one.
++                final BaseCommandBlock.CloseableCommandBlockSource commandSource = this.createSource(level);
++                {
+                     CommandSource effectiveCommandSource = Objects.requireNonNullElse(commandSource, CommandSource.NULL);
+                     CommandSourceStack commandSourceStack = this.createCommandSourceStack(level, effectiveCommandSource).withCallback((success, result) -> {
++                        // Canvas - vanilla-like experience - the callback fires on whichever region ran the
++                        // command, so hop back before touching successCount
+                         if (success) {
+-                            this.successCount++;
++                            this.runOnOwningRegion(level, () -> this.successCount++);
+                         }
+                     });
+                     // Paper start - ServerCommandEvent
+@@ -119,9 +119,10 @@
+                     if (!event.callEvent()) {
+                         return true;
+                     }
+-                    level.getServer().getCommands().performPrefixedCommand(commandSourceStack, event.getCommand());
++                    io.canvasmc.canvas.threadedregions.commands.AbstractCommandExecution.executeOnGlobal(() -> { level.getServer().getCommands().performPrefixedCommand(commandSourceStack, event.getCommand()); }, commandSourceStack); // Canvas - vanilla-like experience
+                     // Paper end - ServerCommandEvent
+                 }
++                // Canvas end - vanilla-like experience
+             } catch (Throwable t) {
+                 CrashReport report = CrashReport.forThrowable(t, "Executing command block");
+                 CrashReportCategory category = report.addCategory("Command to be executed");
+@@ -215,9 +215,18 @@
+         public void sendSystemMessage(final Component message) {
+             if (this.trackOutput && !this.closed) { // Paper - add back source when output disabled
+                 org.spigotmc.AsyncCatcher.catchOp("sendSystemMessage to a command block"); // Paper - Don't broadcast messages to command blocks
+-                BaseCommandBlock.this.threadCheck(); // Folia - region threading
+-                BaseCommandBlock.this.lastOutput = Component.literal("[" + TIME_FORMAT.get().format(ZonedDateTime.now()) + "] ").append(message); // Folia - region threading - SDF is not thread-safe
+-                BaseCommandBlock.this.onUpdated(this.level);
++                // Canvas start - vanilla-like experience
++                // Stamp the time on the emitting thread so the timestamp reflects when the command actually
++                // produced output, then apply it on the region that owns this command block. onUpdated reads
++                // and re-sends the block state, which is region-owned work, and threadCheck asserts exactly
++                // that - so both have to happen inside the hop, not here.
++                final Component stamped = Component.literal("[" + TIME_FORMAT.get().format(ZonedDateTime.now()) + "] ").append(message); // Folia - region threading - SDF is not thread-safe
++                BaseCommandBlock.this.runOnOwningRegion(this.level, () -> {
++                    BaseCommandBlock.this.threadCheck(); // Folia - region threading
++                    BaseCommandBlock.this.lastOutput = stamped;
++                    BaseCommandBlock.this.onUpdated(this.level);
++                });
++                // Canvas end - vanilla-like experience
+             }
+         }
+ 
+diff --git a/net/minecraft/world/level/block/CommandBlock.java b/net/minecraft/world/level/block/CommandBlock.java
+index 53507d88a1..df432b71a9 100644
+--- a/net/minecraft/world/level/block/CommandBlock.java
++++ b/net/minecraft/world/level/block/CommandBlock.java
+@@ -92,7 +92,7 @@
+     @Override
+     protected void tick(final BlockState state, final ServerLevel level, final BlockPos pos, final RandomSource random) {
+         // Canvas start - region threading
+-        if (true) {
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.commandBlocks) {
+             return;
+         }
+         // Canvas end - region threading
+@@ -139,7 +139,7 @@
+         final BlockState state, final Level level, final BlockPos pos, final Player player, final BlockHitResult hitResult
+     ) {
+         // Canvas start - region threading
+-        if (true) {
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.commandBlocks) {
+             return InteractionResult.FAIL;
+         }
+         // Canvas end - region threading
+diff --git a/net/minecraft/world/level/block/entity/CommandBlockEntity.java b/net/minecraft/world/level/block/entity/CommandBlockEntity.java
+index 84e18b68c8..3d75cc8f0f 100644
+--- a/net/minecraft/world/level/block/entity/CommandBlockEntity.java
++++ b/net/minecraft/world/level/block/entity/CommandBlockEntity.java
+@@ -74,6 +74,17 @@
+         }
+ 
+         // Folia end - region threading
++        // Canvas start - vanilla-like experience - apply command output on the owning region
++        @Override
++        public void runOnOwningRegion(final ServerLevel level, final Runnable task) {
++            final net.minecraft.core.BlockPos pos = CommandBlockEntity.this.worldPosition;
++            // queueOrExecuteTickTask runs the task inline when this thread already owns the chunk, so a
++            // command that stayed within this region keeps vanilla's same-tick behaviour.
++            io.papermc.paper.threadedregions.RegionizedServer.getInstance().taskQueue.queueOrExecuteTickTask(
++                level, pos.getX() >> 4, pos.getZ() >> 4, task
++            );
++        }
++        // Canvas end - vanilla-like experience
+         @Override
+         public boolean isValid() {
+             return !CommandBlockEntity.this.isRemoved();

@@ -521,10 +521,109 @@ public class GlobalConfiguration extends Part {
                         "behavior). Set false to keep command blocks disabled."
                     )
                 );
+            option("vanillaEndPortalTeleportation")
+                .docs(
+                    Style.wrap(
+                        "Restores vanilla end portal teleportation feel (Kaiiju, via Lophine 0028): preserves entity",
+                        "momentum through end portals, player spawn offset on the platform, and synchronizes end",
+                        "platform generation with the teleport. Default false."
+                    )
+                );
+            option("useLegacyRandomSourceForPlayers")
+                .docs(
+                    Style.wrap(
+                        "Uses a per-entity legacy random source instead of the shared Folia thread-local random",
+                        "for entities (Luminol 0034). Restores pre-Folia vanilla random sequences. Default false."
+                    )
+                );
+            option("tripwireBehavior")
+                .docs(
+                    Style.wrap(
+                        "Modifies tripwire/tripwire-hook behavior (Luminol 0045). OFF = Paper behavior; VANILLA20 =",
+                        "1.20-style tripwire dupe; VANILLA21 = 1.21-style; MIXED = mixed string-farm behavior.",
+                        "Also adjusts end platform generation to avoid tripwire dupes. Default OFF."
+                    )
+                );
+            option("vanillaHopper")
+                .docs(
+                    Style.wrap(
+                        "Restores full vanilla hopper pull semantics (Leaves 0092, via Lophine 0065): per-item",
+                        "movement with vanilla event/count handling instead of Paper's optimized pull. Default false."
+                    )
+                );
+            option("followTickSequenceMerge")
+                .docs(
+                    Style.wrap(
+                        "Item entities merge following tick sequence instead of stack size (Lophine 0093, see",
+                        "Paper#13073). Fixes items never reaching their merge destination at large merge radii.",
+                        "Default false."
+                    )
+                );
+            option("catchUpdateSuppression")
+                .docs(
+                    Style.wrap(
+                        "Catches update suppression crashes (Leaves 0117/0122, via Lophine): StackOverflowError/",
+                        "ClassCastException/IllegalArgumentException during physics or block updates are converted to",
+                        "a logged UpdateSuppressionException instead of crashing the tick loop or connection.",
+                        "Technical redstone gameplay. Default false."
+                    )
+                );
+            option("cceUpdateSuppression")
+                .docs(
+                    Style.wrap(
+                        "Reintroduces the shulker box ClassCastException update suppression vector (Leaves 0118,",
+                        "via Lophine) by reading redstone signal from the container. Requires catchUpdateSuppression",
+                        "to be useful. Default false."
+                    )
+                );
+            option("revertTrapdoorChanges")
+                .docs(
+                    Style.wrap(
+                        "Reverts Paper's trapdoor redstone handling (early redstone breaking + binary redstone",
+                        "event) to vanilla behavior (Lophine 0121). Restores trapdoor-based update suppression",
+                        "setups. Default false."
+                    )
+                );
+            option("oldBlockRemoveBehaviour")
+                .docs(
+                    Style.wrap(
+                        "Restores pre-1.21.2 block onRemove behaviour for containers/redstone components (Leaves",
+                        "0124, via Lophine): blocks drop contents and update neighbours via onRemove overrides",
+                        "instead of affectNeighborsAfterRemoval. Default false."
+                    )
+                );
+            option("noGhastBlockBreaking")
+                .docs(Style.wrap("Ghast fireballs use ExplosionInteraction.NONE (no block breaking). MiniTweaks, via Lophine 0125. Default false."));
+            option("noCreeperBlockBreaking")
+                .docs(Style.wrap("Creeper explosions use ExplosionInteraction.NONE (no block breaking). MiniTweaks, via Lophine 0125. Default false."));
+            option("disableGhastFire")
+                .docs(Style.wrap("Ghast fireballs do not create fire. MiniTweaks, via Lophine 0125. Default false."));
+            option("disableBlazeFire")
+                .docs(Style.wrap("Blaze fireballs do not create fire. MiniTweaks, via Lophine 0125. Default false."));
         }
 
         public boolean enabled = false;
         public boolean commandBlocks = true;
+        public boolean vanillaEndPortalTeleportation = false;
+        public boolean useLegacyRandomSourceForPlayers = false;
+        public TripwireBehavior tripwireBehavior = TripwireBehavior.OFF;
+        public boolean vanillaHopper = false;
+        public boolean followTickSequenceMerge = false;
+        public boolean catchUpdateSuppression = false;
+        public boolean cceUpdateSuppression = false;
+        public boolean revertTrapdoorChanges = false;
+        public boolean oldBlockRemoveBehaviour = false;
+        public boolean noGhastBlockBreaking = false;
+        public boolean noCreeperBlockBreaking = false;
+        public boolean disableGhastFire = false;
+        public boolean disableBlazeFire = false;
+
+        public enum TripwireBehavior {
+            OFF,
+            VANILLA20,
+            VANILLA21,
+            MIXED
+        }
     }
 
     public OldFeature oldFeature = new OldFeature();

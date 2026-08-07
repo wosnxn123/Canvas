@@ -1,0 +1,830 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: wosnxn123 <wosnxn123@users.noreply.github.com>
+Date: Thu, 7 Aug 2026 12:00:00 +0800
+Subject: [PATCH] Leaves: Old Block remove behaviour
+
+Ported from Lophine 0124, originally LeavesMC/Leaves (GPL-3.0, violetc).
+Gated behind vanilla-like-experience.oldBlockRemoveBehaviour.
+
+diff --git a/net/minecraft/world/Containers.java b/net/minecraft/world/Containers.java
+index e9e2ef6..6370f0e 100644
+--- a/net/minecraft/world/Containers.java
++++ b/net/minecraft/world/Containers.java
+@@ -51,4 +51,16 @@ public class Containers {
+     public static void updateNeighboursAfterDestroy(final BlockState state, final Level level, final BlockPos pos) {
+         level.updateNeighbourForOutputSignal(pos, state.getBlock());
+     }
++
++
++    // Leaves start - behaviour 1.21.1-
++    public static void dropContentsOnDestroy(BlockState state, BlockState newState, Level level, BlockPos pos) {
++        if (!state.is(newState.getBlock())) {
++            if (level.getBlockEntity(pos) instanceof Container container) {
++                dropContents(level, pos, container);
++                level.updateNeighbourForOutputSignal(pos, state.getBlock());
++            }
++        }
++    }
++    // Leaves end - behaviour 1.21.1-
+ }
+diff --git a/net/minecraft/world/level/block/AbstractFurnaceBlock.java b/net/minecraft/world/level/block/AbstractFurnaceBlock.java
+index 98561dc..d27e6a7 100644
+--- a/net/minecraft/world/level/block/AbstractFurnaceBlock.java
++++ b/net/minecraft/world/level/block/AbstractFurnaceBlock.java
+@@ -53,6 +53,28 @@ public abstract class AbstractFurnaceBlock extends BaseEntityBlock {
+         return this.defaultBlockState().setValue(FACING, context.getHorizontalDirection().getOpposite());
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.oldBlockRemoveBehaviour) { super.onRemove(state, level, pos, newState, isMoving); return; }
++        if (!state.is(newState.getBlock())) {
++            BlockEntity blockEntity = level.getBlockEntity(pos);
++            if (blockEntity instanceof AbstractFurnaceBlockEntity) {
++                if (level instanceof ServerLevel) {
++                    Containers.dropContents(level, pos, (AbstractFurnaceBlockEntity)blockEntity);
++                    ((AbstractFurnaceBlockEntity)blockEntity).getRecipesToAwardAndPopExperience((ServerLevel)level, net.minecraft.world.phys.Vec3.atCenterOf(pos));
++                }
++
++                super.onRemove(state, level, pos, newState, isMoving);
++                level.updateNeighbourForOutputSignal(pos, this);
++            } else {
++                super.onRemove(state, level, pos, newState, isMoving);
++            }
++        }
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         Containers.updateNeighboursAfterDestroy(state, level, pos);
+diff --git a/net/minecraft/world/level/block/BarrelBlock.java b/net/minecraft/world/level/block/BarrelBlock.java
+index 7bb880b..58e92db 100644
+--- a/net/minecraft/world/level/block/BarrelBlock.java
++++ b/net/minecraft/world/level/block/BarrelBlock.java
+@@ -51,6 +51,15 @@ public class BarrelBlock extends BaseEntityBlock {
+         return InteractionResult.SUCCESS;
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
++        Containers.dropContentsOnDestroy(state, newState, level, pos);
++        super.onRemove(state, level, pos, newState, isMoving);
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         Containers.updateNeighboursAfterDestroy(state, level, pos);
+diff --git a/net/minecraft/world/level/block/BasePressurePlateBlock.java b/net/minecraft/world/level/block/BasePressurePlateBlock.java
+index f2d7c5f..09685ba 100644
+--- a/net/minecraft/world/level/block/BasePressurePlateBlock.java
++++ b/net/minecraft/world/level/block/BasePressurePlateBlock.java
+@@ -133,6 +133,21 @@ public abstract class BasePressurePlateBlock extends Block {
+         }
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.oldBlockRemoveBehaviour) { super.onRemove(state, level, pos, newState, isMoving); return; }
++        if (!isMoving && !state.is(newState.getBlock())) {
++            if (this.getSignalForState(state) > 0) {
++                this.updateNeighbours(level, pos);
++            }
++
++            super.onRemove(state, level, pos, newState, isMoving);
++        }
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         if (!movedByPiston && this.getSignalForState(state) > 0) {
+diff --git a/net/minecraft/world/level/block/BaseRailBlock.java b/net/minecraft/world/level/block/BaseRailBlock.java
+index dff6c78..8e1c765 100644
+--- a/net/minecraft/world/level/block/BaseRailBlock.java
++++ b/net/minecraft/world/level/block/BaseRailBlock.java
+@@ -118,6 +118,25 @@ public abstract class BaseRailBlock extends Block implements SimpleWaterloggedBl
+         return new RailState(level, pos, state).place(level.hasNeighborSignal(pos), first, current).getState();
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.oldBlockRemoveBehaviour) { super.onRemove(state, level, pos, newState, isMoving); return; }
++        if (!isMoving) {
++            super.onRemove(state, level, pos, newState, isMoving);
++            if (state.getValue(this.getShapeProperty()).isSlope()) {
++                level.updateNeighborsAt(pos.above(), this);
++            }
++
++            if (this.isStraight) {
++                level.updateNeighborsAt(pos, this);
++                level.updateNeighborsAt(pos.below(), this);
++            }
++        }
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         if (!movedByPiston) {
+diff --git a/net/minecraft/world/level/block/BrewingStandBlock.java b/net/minecraft/world/level/block/BrewingStandBlock.java
+index 5f14be7..73f1c44 100644
+--- a/net/minecraft/world/level/block/BrewingStandBlock.java
++++ b/net/minecraft/world/level/block/BrewingStandBlock.java
+@@ -81,6 +81,15 @@ public class BrewingStandBlock extends BaseEntityBlock {
+         level.addParticle(ParticleTypes.SMOKE, x, y, z, 0.0, 0.0, 0.0);
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
++        Containers.dropContentsOnDestroy(state, newState, level, pos);
++        super.onRemove(state, level, pos, newState, isMoving);
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         Containers.updateNeighboursAfterDestroy(state, level, pos);
+diff --git a/net/minecraft/world/level/block/ButtonBlock.java b/net/minecraft/world/level/block/ButtonBlock.java
+index 9c859b0..01d4d4d 100644
+--- a/net/minecraft/world/level/block/ButtonBlock.java
++++ b/net/minecraft/world/level/block/ButtonBlock.java
+@@ -131,6 +131,21 @@ public class ButtonBlock extends FaceAttachedHorizontalDirectionalBlock {
+         return pressed ? this.type.buttonClickOn() : this.type.buttonClickOff();
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.oldBlockRemoveBehaviour) { super.onRemove(state, level, pos, newState, isMoving); return; }
++        if (!isMoving && !state.is(newState.getBlock())) {
++            if (state.getValue(POWERED)) {
++                this.updateNeighbours(state, level, pos);
++            }
++
++            super.onRemove(state, level, pos, newState, isMoving);
++        }
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         if (!movedByPiston && state.getValue(POWERED)) {
+diff --git a/net/minecraft/world/level/block/CampfireBlock.java b/net/minecraft/world/level/block/CampfireBlock.java
+index 4a24a36..0a27e7c 100644
+--- a/net/minecraft/world/level/block/CampfireBlock.java
++++ b/net/minecraft/world/level/block/CampfireBlock.java
+@@ -112,6 +112,22 @@ public class CampfireBlock extends BaseEntityBlock implements SimpleWaterloggedB
+         return InteractionResult.TRY_WITH_EMPTY_HAND;
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.oldBlockRemoveBehaviour) { super.onRemove(state, level, pos, newState, isMoving); return; }
++        if (!state.is(newState.getBlock())) {
++            BlockEntity blockEntity = level.getBlockEntity(pos);
++            if (blockEntity instanceof CampfireBlockEntity) {
++                net.minecraft.world.Containers.dropContents(level, pos, ((CampfireBlockEntity)blockEntity).getItems());
++            }
++
++            super.onRemove(state, level, pos, newState, isMoving);
++        }
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void entityInside(
+         final BlockState state,
+diff --git a/net/minecraft/world/level/block/ChestBlock.java b/net/minecraft/world/level/block/ChestBlock.java
+index 6416a71..9b58799 100644
+--- a/net/minecraft/world/level/block/ChestBlock.java
++++ b/net/minecraft/world/level/block/ChestBlock.java
+@@ -275,6 +275,15 @@ public class ChestBlock extends AbstractChestBlock<ChestBlockEntity> implements
+         return this.chestCanConnectTo(state) && state.getValue(TYPE) == ChestType.SINGLE ? state.getValue(FACING) : null;
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
++        Containers.dropContentsOnDestroy(state, newState, level, pos);
++        super.onRemove(state, level, pos, newState, isMoving);
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         Containers.updateNeighboursAfterDestroy(state, level, pos);
+diff --git a/net/minecraft/world/level/block/ChiseledBookShelfBlock.java b/net/minecraft/world/level/block/ChiseledBookShelfBlock.java
+index b7d7f1a..862432b 100644
+--- a/net/minecraft/world/level/block/ChiseledBookShelfBlock.java
++++ b/net/minecraft/world/level/block/ChiseledBookShelfBlock.java
+@@ -171,6 +171,29 @@ public class ChiseledBookShelfBlock extends BaseEntityBlock implements Selectabl
+         SLOT_OCCUPIED_PROPERTIES.forEach(xva$0 -> var2.add(xva$0));
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean movedByPiston) {
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.oldBlockRemoveBehaviour) { super.onRemove(state, level, pos, newState, movedByPiston); return; }
++        if (!state.is(newState.getBlock())) {
++            if (level.getBlockEntity(pos) instanceof ChiseledBookShelfBlockEntity chiseledBookShelfBlockEntity && !chiseledBookShelfBlockEntity.isEmpty()) {
++                for (int i = 0; i < 6; i++) {
++                    ItemStack item = chiseledBookShelfBlockEntity.getItem(i);
++                    if (!item.isEmpty()) {
++                        Containers.dropItemStack(level, pos.getX(), pos.getY(), pos.getZ(), item);
++                    }
++                }
++
++                chiseledBookShelfBlockEntity.clearContent();
++                level.updateNeighbourForOutputSignal(pos, this);
++            }
++
++            super.onRemove(state, level, pos, newState, movedByPiston);
++        }
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         Containers.updateNeighboursAfterDestroy(state, level, pos);
+diff --git a/net/minecraft/world/level/block/CrafterBlock.java b/net/minecraft/world/level/block/CrafterBlock.java
+index f0756f3..0f6d2d3 100644
+--- a/net/minecraft/world/level/block/CrafterBlock.java
++++ b/net/minecraft/world/level/block/CrafterBlock.java
+@@ -131,6 +131,15 @@ public class CrafterBlock extends BaseEntityBlock {
+         }
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean movedByPiston) {
++        Containers.dropContentsOnDestroy(state, newState, level, pos);
++        super.onRemove(state, level, pos, newState, movedByPiston);
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         Containers.updateNeighboursAfterDestroy(state, level, pos);
+diff --git a/net/minecraft/world/level/block/CreakingHeartBlock.java b/net/minecraft/world/level/block/CreakingHeartBlock.java
+index 57292f2..837c2da 100644
+--- a/net/minecraft/world/level/block/CreakingHeartBlock.java
++++ b/net/minecraft/world/level/block/CreakingHeartBlock.java
+@@ -153,6 +153,17 @@ public class CreakingHeartBlock extends BaseEntityBlock {
+         builder.add(AXIS, STATE, NATURAL);
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean movedByPiston) {
++        if (level.getBlockEntity(pos) instanceof CreakingHeartBlockEntity creakingHeartBlockEntity) {
++            creakingHeartBlockEntity.removeProtector(null);
++        }
++        super.onRemove(state, level, pos, newState, movedByPiston);
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         Containers.updateNeighboursAfterDestroy(state, level, pos);
+diff --git a/net/minecraft/world/level/block/DecoratedPotBlock.java b/net/minecraft/world/level/block/DecoratedPotBlock.java
+index 1c13195..b6f18ac 100644
+--- a/net/minecraft/world/level/block/DecoratedPotBlock.java
++++ b/net/minecraft/world/level/block/DecoratedPotBlock.java
+@@ -172,6 +172,15 @@ public class DecoratedPotBlock extends BaseEntityBlock implements SimpleWaterlog
+         return new DecoratedPotBlockEntity(worldPosition, blockState);
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean movedByPiston) {
++        Containers.dropContentsOnDestroy(state, newState, level, pos);
++        super.onRemove(state, level, pos, newState, movedByPiston);
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         Containers.updateNeighboursAfterDestroy(state, level, pos);
+diff --git a/net/minecraft/world/level/block/DiodeBlock.java b/net/minecraft/world/level/block/DiodeBlock.java
+index 2339099..7d1d2b1 100644
+--- a/net/minecraft/world/level/block/DiodeBlock.java
++++ b/net/minecraft/world/level/block/DiodeBlock.java
+@@ -181,6 +181,17 @@ public abstract class DiodeBlock extends HorizontalDirectionalBlock {
+         this.updateNeighborsInFront(level, pos, state);
+     }
+ 
++    // Leaves start - behaviour 1.21.1- (ported, gated)
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.oldBlockRemoveBehaviour) { super.onRemove(state, level, pos, newState, isMoving); return; }
++        if (!isMoving && !state.is(newState.getBlock())) {
++            super.onRemove(state, level, pos, newState, isMoving);
++            this.updateNeighborsInFront(level, pos, state);
++        }
++    }
++    // Leaves end - behaviour 1.21.1-
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         if (!movedByPiston) {
+diff --git a/net/minecraft/world/level/block/DispenserBlock.java b/net/minecraft/world/level/block/DispenserBlock.java
+index 754f2a5..79bb8e3 100644
+--- a/net/minecraft/world/level/block/DispenserBlock.java
++++ b/net/minecraft/world/level/block/DispenserBlock.java
+@@ -161,6 +161,15 @@ public class DispenserBlock extends BaseEntityBlock {
+         return this.defaultBlockState().setValue(FACING, context.getNearestLookingDirection().getOpposite());
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
++        Containers.dropContentsOnDestroy(state, newState, level, pos);
++        super.onRemove(state, level, pos, newState, isMoving);
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         Containers.updateNeighboursAfterDestroy(state, level, pos);
+diff --git a/net/minecraft/world/level/block/HopperBlock.java b/net/minecraft/world/level/block/HopperBlock.java
+index 3932da8..c833d97 100644
+--- a/net/minecraft/world/level/block/HopperBlock.java
++++ b/net/minecraft/world/level/block/HopperBlock.java
+@@ -128,6 +128,15 @@ public class HopperBlock extends BaseEntityBlock {
+         }
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
++        Containers.dropContentsOnDestroy(state, newState, level, pos);
++        super.onRemove(state, level, pos, newState, isMoving);
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         Containers.updateNeighboursAfterDestroy(state, level, pos);
+diff --git a/net/minecraft/world/level/block/JukeboxBlock.java b/net/minecraft/world/level/block/JukeboxBlock.java
+index f202953..b544b95 100644
+--- a/net/minecraft/world/level/block/JukeboxBlock.java
++++ b/net/minecraft/world/level/block/JukeboxBlock.java
+@@ -83,6 +83,20 @@ public class JukeboxBlock extends BaseEntityBlock {
+         return !result.consumesAction() ? InteractionResult.TRY_WITH_EMPTY_HAND : result;
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
++        if (!state.is(newState.getBlock())) {
++            if (level.getBlockEntity(pos) instanceof JukeboxBlockEntity jukeboxBlockEntity) {
++                jukeboxBlockEntity.popOutTheItem();
++            }
++
++            super.onRemove(state, level, pos, newState, isMoving);
++        }
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         Containers.updateNeighboursAfterDestroy(state, level, pos);
+diff --git a/net/minecraft/world/level/block/LecternBlock.java b/net/minecraft/world/level/block/LecternBlock.java
+index b5ac0a0..b1fa698 100644
+--- a/net/minecraft/world/level/block/LecternBlock.java
++++ b/net/minecraft/world/level/block/LecternBlock.java
+@@ -200,6 +200,37 @@ public class LecternBlock extends BaseEntityBlock {
+         changePowered(level, pos, state, false);
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
++        if (!state.is(newState.getBlock())) {
++            if (state.getValue(HAS_BOOK)) {
++                this.popBook(state, level, pos);
++            }
++
++            if (state.getValue(POWERED)) {
++                updateBelow(level, pos, state);
++            }
++            super.onRemove(state, level, pos, newState, isMoving);
++        }
++    }
++
++    private void popBook(BlockState state, Level level, BlockPos pos) {
++        if (level.getBlockEntity(pos) instanceof LecternBlockEntity lecternBlockEntity) { // CraftBukkit - don't validate, type may be changed already // Leaves - the method with validate arg already removed by paper...
++            Direction direction = state.getValue(FACING);
++            ItemStack itemStack = lecternBlockEntity.getBook().copy();
++            if (itemStack.isEmpty()) return; // CraftBukkit - SPIGOT-5500
++            float f = 0.25F * direction.getStepX();
++            float f1 = 0.25F * direction.getStepZ();
++            net.minecraft.world.entity.item.ItemEntity itemEntity = new net.minecraft.world.entity.item.ItemEntity(level, pos.getX() + 0.5 + f, pos.getY() + 1, pos.getZ() + 0.5 + f1, itemStack);
++            itemEntity.setDefaultPickUpDelay();
++            level.addFreshEntity(itemEntity);
++            lecternBlockEntity.clearContent();
++        }
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         if (state.getValue(POWERED)) {
+diff --git a/net/minecraft/world/level/block/LeverBlock.java b/net/minecraft/world/level/block/LeverBlock.java
+index 772a1cb..2a05139 100644
+--- a/net/minecraft/world/level/block/LeverBlock.java
++++ b/net/minecraft/world/level/block/LeverBlock.java
+@@ -127,6 +127,20 @@ public class LeverBlock extends FaceAttachedHorizontalDirectionalBlock {
+         }
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
++        if (!isMoving && !state.is(newState.getBlock())) {
++            if (state.getValue(POWERED)) {
++                this.updateNeighbours(state, level, pos);
++            }
++
++            super.onRemove(state, level, pos, newState, isMoving);
++        }
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         if (!movedByPiston && state.getValue(POWERED)) {
+diff --git a/net/minecraft/world/level/block/LightningRodBlock.java b/net/minecraft/world/level/block/LightningRodBlock.java
+index c2001c9..871a802 100644
+--- a/net/minecraft/world/level/block/LightningRodBlock.java
++++ b/net/minecraft/world/level/block/LightningRodBlock.java
+@@ -123,6 +123,19 @@ public class LightningRodBlock extends RodBlock implements SimpleWaterloggedBloc
+         }
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean movedByPiston) {
++        if (!state.is(newState.getBlock())) {
++            if (state.getValue(POWERED)) {
++                this.updateNeighbours(state, level, pos);
++            }
++            super.onRemove(state, level, pos, newState, movedByPiston);
++        }
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         if (state.getValue(POWERED)) {
+diff --git a/net/minecraft/world/level/block/ObserverBlock.java b/net/minecraft/world/level/block/ObserverBlock.java
+index 680a357..1d68ebf 100644
+--- a/net/minecraft/world/level/block/ObserverBlock.java
++++ b/net/minecraft/world/level/block/ObserverBlock.java
+@@ -133,6 +133,18 @@ public class ObserverBlock extends DirectionalBlock {
+         }
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
++        if (!state.is(newState.getBlock())) {
++            if (state.getValue(POWERED) && level.getBlockTicks().hasScheduledTick(pos, this)) {
++                this.updateNeighborsInFront(level, pos, state.setValue(POWERED, Boolean.FALSE));
++            }
++        }
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         if (state.getValue(POWERED) && level.getBlockTicks().hasScheduledTick(pos, this)) {
+diff --git a/net/minecraft/world/level/block/RedStoneWireBlock.java b/net/minecraft/world/level/block/RedStoneWireBlock.java
+index 8886b5b..ba6da4b 100644
+--- a/net/minecraft/world/level/block/RedStoneWireBlock.java
++++ b/net/minecraft/world/level/block/RedStoneWireBlock.java
+@@ -377,6 +377,28 @@ public class RedStoneWireBlock extends Block {
+         }
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
++        if (!isMoving && !state.is(newState.getBlock())) {
++            super.onRemove(state, level, pos, newState, isMoving);
++            for (Direction direction : Direction.values()) {
++                level.updateNeighborsAt(pos.relative(direction), this);
++            }
++
++            // Paper start - optimize redstone - replace call to updatePowerStrength
++            if (level.paperConfig().misc.redstoneImplementation == io.papermc.paper.configuration.WorldConfiguration.Misc.RedstoneImplementation.ALTERNATE_CURRENT) {
++                level.getWireHandler().onWireRemoved(pos, state); // Alternate Current
++            } else {
++                this.updateSurroundingRedstone(level, pos, state, null, false); // Vanilla/Eigencraft
++            }
++            // Paper end - optimize redstone
++            this.updateNeighborsOfNeighboringWires(level, pos);
++        }
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         if (!movedByPiston) {
+diff --git a/net/minecraft/world/level/block/RedstoneTorchBlock.java b/net/minecraft/world/level/block/RedstoneTorchBlock.java
+index 43d19e1..8a3be0a 100644
+--- a/net/minecraft/world/level/block/RedstoneTorchBlock.java
++++ b/net/minecraft/world/level/block/RedstoneTorchBlock.java
+@@ -54,6 +54,16 @@ public class RedstoneTorchBlock extends BaseTorchBlock {
+         }
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
++        if (!isMoving) {
++            this.notifyNeighbors(level, pos, state);
++        }
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         if (!movedByPiston) {
+diff --git a/net/minecraft/world/level/block/SculkSensorBlock.java b/net/minecraft/world/level/block/SculkSensorBlock.java
+index 10cff0f..cf34908 100644
+--- a/net/minecraft/world/level/block/SculkSensorBlock.java
++++ b/net/minecraft/world/level/block/SculkSensorBlock.java
+@@ -130,6 +130,19 @@ public class SculkSensorBlock extends BaseEntityBlock implements SimpleWaterlogg
+         }
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean movedByPiston) {
++        if (!state.is(newState.getBlock())) {
++            if (getPhase(state) == SculkSensorPhase.ACTIVE) {
++                updateNeighbours(level, pos, state);
++            }
++            super.onRemove(state, level, pos, newState, movedByPiston);
++        }
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         if (getPhase(state) == SculkSensorPhase.ACTIVE) {
+diff --git a/net/minecraft/world/level/block/SculkShriekerBlock.java b/net/minecraft/world/level/block/SculkShriekerBlock.java
+index 5a15671..099a1e7 100644
+--- a/net/minecraft/world/level/block/SculkShriekerBlock.java
++++ b/net/minecraft/world/level/block/SculkShriekerBlock.java
+@@ -69,6 +69,17 @@ public class SculkShriekerBlock extends BaseEntityBlock implements SimpleWaterlo
+         super.stepOn(level, pos, onState, entity);
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean movedByPiston) {
++        if (level instanceof ServerLevel serverLevel && state.getValue(SHRIEKING) && !state.is(newState.getBlock())) {
++            serverLevel.getBlockEntity(pos, BlockEntityTypes.SCULK_SHRIEKER).ifPresent(sculkShrieker -> sculkShrieker.tryRespond(serverLevel));
++        }
++        super.onRemove(state, level, pos, newState, movedByPiston);
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void tick(final BlockState state, final ServerLevel level, final BlockPos pos, final RandomSource random) {
+         if (state.getValue(SHRIEKING)) {
+diff --git a/net/minecraft/world/level/block/ShulkerBoxBlock.java b/net/minecraft/world/level/block/ShulkerBoxBlock.java
+index 6b65a15..456c226 100644
+--- a/net/minecraft/world/level/block/ShulkerBoxBlock.java
++++ b/net/minecraft/world/level/block/ShulkerBoxBlock.java
+@@ -152,6 +152,21 @@ public class ShulkerBoxBlock extends BaseEntityBlock {
+         // Paper end - re-set loot table if it was cleared
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.oldBlockRemoveBehaviour) { super.onRemove(state, level, pos, newState, isMoving); return; }
++        if (!state.is(newState.getBlock())) {
++            BlockEntity blockEntity = level.getBlockEntity(pos);
++            if (blockEntity instanceof ShulkerBoxBlockEntity) {
++                level.updateNeighbourForOutputSignal(pos, state.getBlock());
++            }
++            super.onRemove(state, level, pos, newState, isMoving);
++        }
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         Containers.updateNeighboursAfterDestroy(state, level, pos);
+diff --git a/net/minecraft/world/level/block/TripWireBlock.java b/net/minecraft/world/level/block/TripWireBlock.java
+index e19a82e..76aed7a 100644
+--- a/net/minecraft/world/level/block/TripWireBlock.java
++++ b/net/minecraft/world/level/block/TripWireBlock.java
+@@ -107,6 +107,17 @@ public class TripWireBlock extends Block {
+         }
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
++        if (io.papermc.paper.configuration.GlobalConfiguration.get().blockUpdates.disableTripwireUpdates) return; // Paper - prevent adjacent tripwires from updating
++        if (!isMoving && !state.is(newState.getBlock())) {
++            this.updateSource(level, pos, state.setValue(POWERED, Boolean.TRUE));
++        }
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         if (io.papermc.paper.configuration.GlobalConfiguration.get().blockUpdates.disableTripwireUpdates) return; // Paper - prevent adjacent tripwires from updating
+diff --git a/net/minecraft/world/level/block/TripWireHookBlock.java b/net/minecraft/world/level/block/TripWireHookBlock.java
+index 65634d1..0008db7 100644
+--- a/net/minecraft/world/level/block/TripWireHookBlock.java
++++ b/net/minecraft/world/level/block/TripWireHookBlock.java
+@@ -248,6 +248,27 @@ public class TripWireHookBlock extends Block {
+         level.updateNeighborsAt(pos.relative(front), block, orientation);
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.oldBlockRemoveBehaviour) { super.onRemove(state, level, pos, newState, isMoving); return; }
++        if (!isMoving && !state.is(newState.getBlock())) {
++            boolean attachedValue = state.getValue(ATTACHED);
++            boolean poweredValue = state.getValue(POWERED);
++            if (attachedValue || poweredValue) {
++                calculateState(level, pos, state, true, false, -1, null);
++            }
++
++            if (poweredValue) {
++                notifyNeighbors(this, level, pos, state.getValue(FACING));
++            }
++
++            super.onRemove(state, level, pos, newState, isMoving);
++        }
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         if (!movedByPiston) {
+diff --git a/net/minecraft/world/level/block/entity/BlockEntityType.java b/net/minecraft/world/level/block/entity/BlockEntityType.java
+index 4c91a0c..c2c0bee 100644
+--- a/net/minecraft/world/level/block/entity/BlockEntityType.java
++++ b/net/minecraft/world/level/block/entity/BlockEntityType.java
+@@ -24,7 +24,7 @@ public class BlockEntityType<T extends BlockEntity> {
+     }
+ 
+     public boolean isValid(final BlockState state) {
+-        return this.validBlocks.contains(state.getBlock());
++        return io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.oldBlockRemoveBehaviour || this.validBlocks.contains(state.getBlock()); // Leaves - behaviour 1.21.1-
+     }
+ 
+     @Deprecated
+diff --git a/net/minecraft/world/level/block/piston/MovingPistonBlock.java b/net/minecraft/world/level/block/piston/MovingPistonBlock.java
+index 6138c8b..2e8e24b 100644
+--- a/net/minecraft/world/level/block/piston/MovingPistonBlock.java
++++ b/net/minecraft/world/level/block/piston/MovingPistonBlock.java
+@@ -71,6 +71,20 @@ public class MovingPistonBlock extends BaseEntityBlock {
+         return createTickerHelper(type, BlockEntityTypes.PISTON, PistonMovingBlockEntity::tick);
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.oldBlockRemoveBehaviour) { super.onRemove(state, level, pos, newState, isMoving); return; }
++        if (!state.is(newState.getBlock())) {
++            BlockEntity blockEntity = level.getBlockEntity(pos);
++            if (blockEntity instanceof PistonMovingBlockEntity) {
++                ((PistonMovingBlockEntity)blockEntity).finalTick();
++            }
++        }
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     public void destroy(final LevelAccessor level, final BlockPos pos, final BlockState state) {
+         BlockPos relative = pos.relative(state.getValue(FACING).getOpposite());
+diff --git a/net/minecraft/world/level/block/piston/PistonHeadBlock.java b/net/minecraft/world/level/block/piston/PistonHeadBlock.java
+index f8caa0b..e87bbeb 100644
+--- a/net/minecraft/world/level/block/piston/PistonHeadBlock.java
++++ b/net/minecraft/world/level/block/piston/PistonHeadBlock.java
+@@ -78,6 +78,21 @@ public class PistonHeadBlock extends DirectionalBlock {
+         return super.playerWillDestroy(level, pos, state, player);
+     }
+ 
++    // Leaves start - behaviour 1.21.1-
++    @Override
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.oldBlockRemoveBehaviour) { super.onRemove(state, level, pos, newState, isMoving); return; }
++        if (!state.is(newState.getBlock())) {
++            super.onRemove(state, level, pos, newState, isMoving);
++            BlockPos blockPos = pos.relative(state.getValue(FACING).getOpposite());
++            if (this.isFittingBase(state, level.getBlockState(blockPos))) {
++                level.destroyBlock(blockPos, true);
++            }
++        }
++    }
++    // Leaves end - behaviour 1.21.1-
++
++
+     @Override
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+         BlockPos basePos = pos.relative(state.getValue(FACING).getOpposite());
+diff --git a/net/minecraft/world/level/block/state/BlockBehaviour.java b/net/minecraft/world/level/block/state/BlockBehaviour.java
+index 6f21dac..9120297 100644
+--- a/net/minecraft/world/level/block/state/BlockBehaviour.java
++++ b/net/minecraft/world/level/block/state/BlockBehaviour.java
+@@ -171,6 +171,16 @@ public abstract class BlockBehaviour implements FeatureElement {
+         io.canvasmc.canvas.util.TickGuard.guard(pos, level, "Cannot place block async"); // Canvas - region guards
+     }
+ 
++    // Leaves start - behaviour 1.21.1- (ported, gated)
++    protected void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean movedByPiston) {
++        org.spigotmc.AsyncCatcher.catchOp("block remove"); // Spigot
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.oldBlockRemoveBehaviour) { return; }
++        if (state.hasBlockEntity() && !state.is(newState.getBlock())) {
++            level.removeBlockEntity(pos);
++        }
++    }
++    // Leaves end - behaviour 1.21.1-
++
+     protected void affectNeighborsAfterRemoval(final BlockState state, final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+     }
+ 
+@@ -917,6 +927,12 @@ public abstract class BlockBehaviour implements FeatureElement {
+             // CraftBukkit end
+         }
+ 
++        // Leaves start - behaviour 1.21.1- (ported)
++        public void onRemove(Level level, BlockPos pos, BlockState newState, boolean movedByPiston) {
++            this.getBlock().onRemove(this.asState(), level, pos, newState, movedByPiston);
++        }
++        // Leaves end - behaviour 1.21.1-
++
+         public void affectNeighborsAfterRemoval(final ServerLevel level, final BlockPos pos, final boolean movedByPiston) {
+             this.getBlock().affectNeighborsAfterRemoval(this.asState(), level, pos, movedByPiston);
+         }
+diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
+index a40f35d..a50f36b 100644
+--- a/net/minecraft/world/level/chunk/LevelChunk.java
++++ b/net/minecraft/world/level/chunk/LevelChunk.java
+@@ -429,6 +429,8 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+         boolean blockChanged = !oldState.is(newBlock);
+         boolean movedByPiston = (flags & Block.UPDATE_MOVE_BY_PISTON) != 0;
+         boolean sideEffects = (flags & Block.UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS) == 0;
++        // Leaves start - behaviour 1.21.1-
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.oldBlockRemoveBehaviour) {
+         if (blockChanged && oldState.hasBlockEntity() && !state.shouldChangedStateKeepBlockEntity(oldState)) {
+             if (!this.level.isClientSide() && sideEffects) {
+                 BlockEntity blockEntity = this.level.getBlockEntity(pos);
+@@ -445,6 +447,10 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+             && ((flags & Block.UPDATE_NEIGHBORS) != 0 || movedByPiston)) {
+             oldState.affectNeighborsAfterRemoval(serverLevel, pos, movedByPiston);
+         }
++        } else {
++            oldState.onRemove(this.level, pos, state, movedByPiston);
++        }
++        // Leaves end - behaviour 1.21.1-
+ 
+         if (!section.getBlockState(localX, localY, localZ).is(newBlock)) {
+             return null;

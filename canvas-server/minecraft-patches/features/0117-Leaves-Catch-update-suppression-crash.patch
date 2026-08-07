@@ -1,0 +1,220 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: wosnxn123 <wosnxn123@users.noreply.github.com>
+Date: Thu, 7 Aug 2026 12:00:00 +0800
+Subject: [PATCH] Leaves: Catch update suppression crash
+
+Ported from Lophine 0117, originally LeavesMC/Leaves (GPL-3.0, violetc/Bacteriawa).
+Gated behind vanilla-like-experience.catchUpdateSuppression.
+
+diff --git a/net/minecraft/network/PacketProcessor.java b/net/minecraft/network/PacketProcessor.java
+index 109521f..0c5ec7b 100644
+--- a/net/minecraft/network/PacketProcessor.java
++++ b/net/minecraft/network/PacketProcessor.java
+@@ -82,7 +82,18 @@ public class PacketProcessor implements AutoCloseable {
+             if (this.listener.shouldHandleMessage(this.packet)) {
+                 try {
+                     this.packet.handle(this.listener);
++                } catch (io.canvasmc.canvas.util.UpdateSuppressionException exception) {
++                    if (this.listener instanceof net.minecraft.server.network.ServerGamePacketListenerImpl gamePacketListener) {
++                        exception.providePlayer(gamePacketListener.player);
++                    }
++                    exception.consume();
+                 } catch (Exception e) {
++                    if (e.getCause() instanceof io.canvasmc.canvas.util.UpdateSuppressionException exception) {
++                        if (this.listener instanceof net.minecraft.server.network.ServerGamePacketListenerImpl gamePacketListener) {
++                            exception.providePlayer(gamePacketListener.player);
++                        }
++                        exception.consume();
++                    }
+                     if (e instanceof ReportedException re && re.getCause() instanceof OutOfMemoryError) {
+                         throw PacketUtils.makeReportedException(e, this.packet, this.listener);
+                     }
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index 5abf060..28dce52 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -1857,10 +1857,24 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+ 
+             try {
+                 level.tick(haveTime, region); // Folia - region threading
++            } catch (io.canvasmc.canvas.util.UpdateSuppressionException exception) {
++                exception.provideLevel(level);
++                exception.consume();
+             } catch (Throwable t) {
+-                CrashReport report = CrashReport.forThrowable(t, "Exception ticking world");
+-                level.fillReportDetails(report);
+-                throw new ReportedException(report);
++                io.canvasmc.canvas.util.UpdateSuppressionException updateSuppressionException = null;
++                if (t instanceof io.canvasmc.canvas.util.UpdateSuppressionException exception) {
++                    updateSuppressionException = exception;
++                } else if (t.getCause() instanceof io.canvasmc.canvas.util.UpdateSuppressionException exception) {
++                    updateSuppressionException = exception;
++                }
++                if (updateSuppressionException != null) {
++                    updateSuppressionException.provideLevel(level);
++                    updateSuppressionException.consume();
++                } else {
++                    CrashReport report = CrashReport.forThrowable(t, "Exception ticking world");
++                    level.fillReportDetails(report);
++                    throw new ReportedException(report);
++                }
+             }
+ 
+             regionizedWorldData.explosionDensityCache.clear(); // Paper - Optimize explosions // Folia - region threading
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 60d6fae..d3582db 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -950,7 +950,16 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+                                         entity.stopRiding();
+                                     }
+ 
+-                                    this.guardEntityTick(this::tickNonPassenger, entity);
++                                    if (io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.catchUpdateSuppression) {
++                                        try {
++                                            this.guardEntityTick(this::tickNonPassenger, entity);
++                                        } catch (io.canvasmc.canvas.util.UpdateSuppressionException exception) {
++                                            exception.provideLevel(this);
++                                            exception.consume();
++                                        }
++                                    } else {
++                                        this.guardEntityTick(this::tickNonPassenger, entity);
++                                    }
+                                 }
+                             }
+                         }
+diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
+index e4fec48..7415920 100644
+--- a/net/minecraft/server/level/ServerPlayer.java
++++ b/net/minecraft/server/level/ServerPlayer.java
+@@ -1139,6 +1139,12 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+ 
+             // Folia - region threading - move to main tick loop where we can detect duplicates
+             // CraftBukkit end
++        // Lophine start - catch update suppression crash
++        } catch (io.canvasmc.canvas.util.UpdateSuppressionException exception) {
++            exception.providePlayer(this);
++            exception.provideLevel(this.level());
++            exception.consume();
++        // Lophine end - catch update suppression crash
+         } catch (Throwable t) {
+             CrashReport report = CrashReport.forThrowable(t, "Ticking player");
+             CrashReportCategory category = report.addCategory("Player being ticked");
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index 209ce80..42d6245 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -1500,8 +1500,18 @@ public abstract class Entity
+             }
+ 
+             if (shouldVibrate) {
+-                this.level().gameEvent(GameEvent.STEP, this.position(), GameEvent.Context.of(this, blockState));
+-            }
++                    // Lophine start - catch update suppression crash
++                    try {
++                        this.level().gameEvent(GameEvent.STEP, this.position(), GameEvent.Context.of(this, blockState));
++                    } catch (io.canvasmc.canvas.util.UpdateSuppressionException exception) {
++                        exception.provideBlock(level, pos, blockState.getBlock());
++                        if (this instanceof net.minecraft.server.level.ServerPlayer player) {
++                            exception.providePlayer(player);
++                        }
++                        exception.consume();
++                    }
++                    // Lophine end - catch update suppression crash
++                }
+ 
+             return true;
+         } else {
+diff --git a/net/minecraft/world/level/block/ShulkerBoxBlock.java b/net/minecraft/world/level/block/ShulkerBoxBlock.java
+index ccc3a38..e27413c 100644
+--- a/net/minecraft/world/level/block/ShulkerBoxBlock.java
++++ b/net/minecraft/world/level/block/ShulkerBoxBlock.java
+@@ -183,7 +183,16 @@ public class ShulkerBoxBlock extends BaseEntityBlock {
+ 
+     @Override
+     protected int getAnalogOutputSignal(final BlockState state, final Level level, final BlockPos pos, final Direction direction) {
+-        return AbstractContainerMenu.getRedstoneSignalFromBlockEntity(level.getBlockEntity(pos));
++        // Lophine start - catch update suppression crash
++        try {
++            return AbstractContainerMenu.getRedstoneSignalFromBlockEntity(level.getBlockEntity(pos));
++        } catch (ClassCastException ex) {
++            if (io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.catchUpdateSuppression) {
++                throw new io.canvasmc.canvas.util.UpdateSuppressionException(pos, null, this, null, ex);
++            }
++            throw ex;
++        }
++        // Lophine end - catch update suppression crash
+     }
+ 
+     public @Nullable DyeColor getColor() {
+diff --git a/net/minecraft/world/level/block/state/StateHolder.java b/net/minecraft/world/level/block/state/StateHolder.java
+index 47a4aa4..a63fdba 100644
+--- a/net/minecraft/world/level/block/state/StateHolder.java
++++ b/net/minecraft/world/level/block/state/StateHolder.java
+@@ -117,7 +117,16 @@ public abstract class StateHolder<O, S> implements ca.spottedleaf.moonrise.patch
+         if (ret != null) {
+             return ret;
+         }
+-        throw new IllegalArgumentException("Cannot get property " + property + " as it does not exist in " + this.owner);
++        // Lophine start - catch update suppression crash
++        IllegalArgumentException iae = new IllegalArgumentException("Cannot get property " + property + " as it does not exist in " + this.owner);
++        if (io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.catchUpdateSuppression) {
++            io.canvasmc.canvas.util.UpdateSuppressionException exception = new io.canvasmc.canvas.util.UpdateSuppressionException(null, null, null, null, iae);
++            if (exception.getStackTrace()[1].getClassName().startsWith("net.minecraft")) {
++                throw exception;
++            }
++        }
++        throw iae;
++        // Lophine end - catch update suppression crash
+         // Paper end - optimise blockstate property access
+     }
+ 
+diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
+index aed8730..a40f35d 100644
+--- a/net/minecraft/world/level/chunk/LevelChunk.java
++++ b/net/minecraft/world/level/chunk/LevelChunk.java
+@@ -400,6 +400,8 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+         }
+ 
+         Block newBlock = state.getBlock();
++        // Leaves start - catch update suppression crash (ported)
++        try {
+         // Canvas start - optimize heightmap
+         // LevelChunkMixin -- skipGetHeightmap && skipHeightmapUpdate essentially just
+         // make the following code do nothing, so just comment it out
+@@ -473,6 +475,11 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+ 
+         this.markUnsaved();
+         return oldState;
++        } catch (io.canvasmc.canvas.util.UpdateSuppressionException exception) {
++            exception.provideBlock(this.level, pos, newBlock);
++            throw exception;
++        }
++        // Leaves end - catch update suppression crash
+     }
+ 
+     @Deprecated
+diff --git a/net/minecraft/world/level/redstone/NeighborUpdater.java b/net/minecraft/world/level/redstone/NeighborUpdater.java
+index 041ed95..0bc5eed 100644
+--- a/net/minecraft/world/level/redstone/NeighborUpdater.java
++++ b/net/minecraft/world/level/redstone/NeighborUpdater.java
+@@ -84,9 +84,19 @@ public interface NeighborUpdater {
+             state.handleNeighborChanged(level, pos, changedBlock, orientation, movedByPiston);
+             // Spigot start
+         } catch (StackOverflowError ex) {
++            if (io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.catchUpdateSuppression) {
++                throw new io.canvasmc.canvas.util.UpdateSuppressionException(pos, level, changedBlock, null, ex);
++            }
+             level.lastPhysicsProblem = pos.immutable();
+             // Spigot end
+         } catch (Throwable t) {
++            if (io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.catchUpdateSuppression) {
++                if (t instanceof io.canvasmc.canvas.util.UpdateSuppressionException exception) {
++                    exception.provideBlock(level, pos, changedBlock);
++                    throw exception;
++                }
++                throw new io.canvasmc.canvas.util.UpdateSuppressionException(pos, level, changedBlock, null, t);
++            }
+             CrashReport report = CrashReport.forThrowable(t, "Exception while updating neighbours");
+             CrashReportCategory category = report.addCategory("Block being updated");
+             category.setDetail(

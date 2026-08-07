@@ -1,0 +1,19 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: wosnxn123 <wosnxn123@users.noreply.github.com>
+Date: Thu, 7 Aug 2026 12:00:00 +0800
+Subject: [PATCH] Leaves Old Explosion Damage Calculator
+
+Ported from Lophine 0104, originally LeavesMC/Leaves 0134 (GPL-3.0, MC_XiaoHei).
+
+diff --git a/net/minecraft/world/level/ServerExplosion.java b/net/minecraft/world/level/ServerExplosion.java
+index 23890293ee..f46a834f8f 100644
+--- a/net/minecraft/world/level/ServerExplosion.java
++++ b/net/minecraft/world/level/ServerExplosion.java
+@@ -764,6 +764,7 @@
+     public boolean shouldAffectBlocklikeEntities() {
+         boolean mobGriefingEnabled = this.level.getGameRules().get(GameRules.MOB_GRIEFING);
+         boolean isNotWindCharge = this.source == null || !this.source.is(EntityTypes.BREEZE_WIND_CHARGE) && !this.source.is(EntityTypes.WIND_CHARGE);
++        if (io.canvasmc.canvas.GlobalConfiguration.getInstance().oldFeature.oldExplosionDamageCalculator) isNotWindCharge = isNotWindCharge && (this.source == null || !this.source.isInWater()); // Leaves - Old MC TNT wet explosion no item damage
+         return mobGriefingEnabled ? isNotWindCharge : this.blockInteraction.shouldAffectBlocklikeEntities() && isNotWindCharge;
+     }
+ 

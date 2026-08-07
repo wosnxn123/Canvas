@@ -1,0 +1,21 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: wosnxn123 <wosnxn123@users.noreply.github.com>
+Date: Thu, 7 Aug 2026 12:00:00 +0800
+Subject: [PATCH] Modify merge ItemEntity logic
+
+Ported from Lophine 0093 (GPL-3.0, Helvetica Volubi; see Paper#13073).
+Gated behind vanilla-like-experience.followTickSequenceMerge.
+
+diff --git a/net/minecraft/world/entity/item/ItemEntity.java b/net/minecraft/world/entity/item/ItemEntity.java
+index 7bc9141..6b6f535 100644
+--- a/net/minecraft/world/entity/item/ItemEntity.java
++++ b/net/minecraft/world/entity/item/ItemEntity.java
+@@ -285,7 +285,7 @@ public class ItemEntity extends Entity implements TraceableEntity {
+         ItemStack thisItemStack = this.getItem();
+         ItemStack otherItemStack = other.getItem();
+         if (Objects.equals(this.target, other.target) && areMergable(thisItemStack, otherItemStack)) {
+-            if (otherItemStack.getCount() < thisItemStack.getCount()) {
++            if (io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.followTickSequenceMerge || otherItemStack.getCount() < thisItemStack.getCount()) { // Lophine - add follow Tick Sequence Merge, see Paper#13073
+                 merge(this, thisItemStack, other, otherItemStack);
+             } else {
+                 merge(other, otherItemStack, this, thisItemStack);

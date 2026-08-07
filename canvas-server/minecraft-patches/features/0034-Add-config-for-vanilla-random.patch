@@ -1,0 +1,21 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: wosnxn123 <wosnxn123@users.noreply.github.com>
+Date: Thu, 7 Aug 2026 12:00:00 +0800
+Subject: [PATCH] Add config for vanilla random
+
+Ported from Lophine 0034 (Luminol, MIT). Gated behind
+vanilla-like-experience.useLegacyRandomSourceForPlayers.
+
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index c4c6bbf..209ce80 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -300,7 +300,7 @@ public abstract class Entity
+     public double yOld;
+     public double zOld;
+     public boolean noPhysics;
+-    protected final RandomSource random = SHARED_RANDOM; // Paper - Share random for entities to make them more random
++    protected final RandomSource random = io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.useLegacyRandomSourceForPlayers ? RandomSource.create() : SHARED_RANDOM; // Paper - Share random for entities to make them more random // Luminol - vanilla random (ported)
+     public int tickCount;
+     private int remainingFireTicks;
+     private final EntityFluidInteraction fluidInteraction = new EntityFluidInteraction(Set.of(FluidTags.WATER, FluidTags.LAVA));

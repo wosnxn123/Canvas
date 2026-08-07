@@ -1,0 +1,86 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: wosnxn123 <wosnxn123@users.noreply.github.com>
+Date: Thu, 7 Aug 2026 12:00:00 +0800
+Subject: [PATCH] Kaiiju: Vanilla end portal teleportation
+
+Ported from Lophine 0028 (KaiijuMC/Kaiiju, GPL-3.0, Sofiane H. Djerbi).
+Gated behind vanilla-like-experience.vanillaEndPortalTeleportation.
+
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index 4b759df..c4c6bbf 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -4829,6 +4829,23 @@ public abstract class Entity
+                         targetPos, 16, // load 16 blocks to be safe from block physics
+                         ca.spottedleaf.concurrentutil.util.Priority.HIGH,
+                         (_) -> {
++                            // Kaiiju start - Vanilla end teleportation (ported, gated)
++                            if (io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.vanillaEndPortalTeleportation) {
++                                Vec3 finalPos = this instanceof Player ? Vec3.atBottomCenterOf(targetPos.below()) : Vec3.atBottomCenterOf(targetPos);
++                                portalInfoCompletable.complete(
++                                    new TeleportTransition(
++                                        destination, finalPos, this.getDeltaMovement(), Direction.WEST.toYRot(), 0.0f,
++                                        false, false,
++                                        Set.of(),
++                                        TeleportTransition.PLAY_PORTAL_SOUND.then(TeleportTransition.PLACE_PORTAL_TICKET),
++                                        org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.END_PORTAL,
++                                        TeleportTransition.PassengerTeleportationMode.POSITION_RIDER
++                                    )
++                                );
++                                net.minecraft.world.level.levelgen.feature.EndPlatformFeature.createEndPlatform(destination, targetPos.below(), true, null);
++                                return;
++                            }
++                            // Kaiiju end
+                             net.minecraft.world.level.levelgen.feature.EndPlatformFeature.createEndPlatform(destination, targetPos.below(), true, null);
+ 
+                             // the portal obsidian is placed at targetPos.y - 2, so if we want to place the entity
+@@ -4854,6 +4871,23 @@ public abstract class Entity
+                         (_) -> {
+                             BlockPos adjustedSpawn = destination.getHeightmapPos(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, spawnPos);
+ 
++                            // Kaiiju start - Vanilla end teleportation (ported, gated)
++                            if (io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.vanillaEndPortalTeleportation) {
++                                Vec3 finalPos = this instanceof Player ? Vec3.atBottomCenterOf(adjustedSpawn.below()) : Vec3.atBottomCenterOf(adjustedSpawn);
++                                portalInfoCompletable.complete(
++                                    new TeleportTransition(
++                                        destination, finalPos, this.getDeltaMovement(), 0.0f, 0.0f,
++                                        false, false,
++                                        Relative.union(Relative.DELTA, Relative.ROTATION),
++                                        TeleportTransition.PLAY_PORTAL_SOUND.then(TeleportTransition.PLACE_PORTAL_TICKET),
++                                        org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.END_PORTAL,
++                                        TeleportTransition.PassengerTeleportationMode.POSITION_RIDER
++                                    )
++                                );
++                                return;
++                            }
++                            // Kaiiju end
++
+                             // done
+                             portalInfoCompletable.complete(
+                                 new TeleportTransition(
+@@ -5086,6 +5120,11 @@ public abstract class Entity
+         final ServerLevel finalDestination = destination;
+         // Canvas end - region threading
+ 
++        // Kaiiju start - sync end platform spawning & entity teleportation (ported, gated)
++        final java.util.function.Consumer<Entity> tpComplete = io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.vanillaEndPortalTeleportation && type == PortalType.END && destination.getTypeKey() == net.minecraft.world.level.dimension.LevelStem.END ?
++                e -> {net.minecraft.world.level.levelgen.feature.EndPlatformFeature.createEndPlatform(destination, ServerLevel.END_SPAWN_POINT.below(), true, null); if (teleportComplete != null) {teleportComplete.accept(e);}} : teleportComplete;
++        // Kaiiju end
++
+         Vec3 initialPosition = this.position();
+         ChunkPos initialPositionChunk = new ChunkPos(
+             ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkX(initialPosition),
+@@ -5162,9 +5201,11 @@ public abstract class Entity
+                     this.canvas$teleportingToDimension = null;
+                     this.canvas$lastTeleportOrigin = null;
+                     // Canvas end - region threading
+-                    if (teleportComplete != null) {
+-                        teleportComplete.accept(teleported);
++                    // Kaiiju start - vanilla end teleportation (ported, gated)
++                    if (tpComplete != null) {
++                        tpComplete.accept(teleported);
+                     }
++                    // Kaiiju end
+                     // Canvas start - region threading
+                     if (io.canvasmc.canvas.event.EntityPostPortalAsyncEvent.getHandlerList().getRegisteredListeners().length > 0) {
+                         new io.canvasmc.canvas.event.EntityPostPortalAsyncEvent(

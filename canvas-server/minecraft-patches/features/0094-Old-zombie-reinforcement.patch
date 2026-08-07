@@ -1,0 +1,20 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: wosnxn123 <wosnxn123@users.noreply.github.com>
+Date: Thu, 7 Aug 2026 12:00:00 +0800
+Subject: [PATCH] Old zombie reinforcement
+
+Ported from Lophine 0094 (MIT, Helvetica Volubi).
+
+diff --git a/net/minecraft/world/entity/monster/zombie/Zombie.java b/net/minecraft/world/entity/monster/zombie/Zombie.java
+index 6bde60f759..6feec029a7 100644
+--- a/net/minecraft/world/entity/monster/zombie/Zombie.java
++++ b/net/minecraft/world/entity/monster/zombie/Zombie.java
+@@ -333,7 +333,7 @@
+             int x = Mth.floor(this.getX());
+             int y = Mth.floor(this.getY());
+             int z = Mth.floor(this.getZ());
+-            EntityType<? extends Zombie> type = this.getType();
++            EntityType<? extends Zombie> type = io.canvasmc.canvas.GlobalConfiguration.getInstance().oldFeature.oldZombieReinforcement ? EntityTypes.ZOMBIE : this.getType(); // Canvas - vanilla-like experience (old zombie reinforcement)
+             Zombie reinforcement = type.create(level, EntitySpawnReason.REINFORCEMENT);
+             if (reinforcement == null) {
+                 return true;
