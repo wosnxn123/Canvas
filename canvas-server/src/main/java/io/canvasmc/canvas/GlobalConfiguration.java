@@ -617,13 +617,13 @@ public class GlobalConfiguration extends Part {
         public boolean noCreeperBlockBreaking = false;
         public boolean disableGhastFire = false;
         public boolean disableBlazeFire = false;
+    }
 
-        public enum TripwireBehavior {
-            OFF,
-            VANILLA20,
-            VANILLA21,
-            MIXED
-        }
+    public enum TripwireBehavior {
+        OFF,
+        VANILLA20,
+        VANILLA21,
+        MIXED
     }
 
     public OldFeature oldFeature = new OldFeature();

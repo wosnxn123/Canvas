@@ -63,8 +63,9 @@ index 4b759df..c4c6bbf 100644
          // Canvas end - region threading
  
 +        // Kaiiju start - sync end platform spawning & entity teleportation (ported, gated)
++        final java.util.function.Consumer<Entity> canvas$finalTeleportComplete = teleportComplete;
 +        final java.util.function.Consumer<Entity> tpComplete = io.canvasmc.canvas.GlobalConfiguration.getInstance().vanillaLikeExperience.vanillaEndPortalTeleportation && type == PortalType.END && destination.getTypeKey() == net.minecraft.world.level.dimension.LevelStem.END ?
-+                e -> {net.minecraft.world.level.levelgen.feature.EndPlatformFeature.createEndPlatform(destination, ServerLevel.END_SPAWN_POINT.below(), true, null); if (teleportComplete != null) {teleportComplete.accept(e);}} : teleportComplete;
++                e -> {net.minecraft.world.level.levelgen.feature.EndPlatformFeature.createEndPlatform(destination, ServerLevel.END_SPAWN_POINT.below(), true, null); if (canvas$finalTeleportComplete != null) {canvas$finalTeleportComplete.accept(e);}} : canvas$finalTeleportComplete;
 +        // Kaiiju end
 +
          Vec3 initialPosition = this.position();
