@@ -1,0 +1,469 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: wosnxn123 <wosnxn123@users.noreply.github.com>
+Date: Fri, 7 Aug 2026 20:00:00 +0800
+Subject: [PATCH] Remove Canvas ender pearl persistence
+
+Original to this fork. Removes the Canvas upstream global SavedData pearl
+persistence (canvas:pearls EnderPearls SavedData, savePearls/spawnPearls
+hooks, RegionShutdownThread shutdown collection, RegionizedServer autosave
+entry) so the Lophine vanilla ender pearl loading port (0130) can replace
+it without double-saving or double-spawning pearls. Re-enables the
+Paper/vanilla player-data save path (saveEnderPearls) and the Paper
+quit-removal loop; both are made region-safe again by 0130.
+
+diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
+index 75437ec3454a06e5f3fff6aace371578a9749b93..584e0cdb42a01bfc7b55bce1161dd5ae49b88e76 100644
+--- a/net/minecraft/server/level/ServerPlayer.java
++++ b/net/minecraft/server/level/ServerPlayer.java
+@@ -314,7 +314,7 @@
+         }
+         getBukkitEntity().sendHealthUpdate();
+     }
+-    private final Set<ThrownEnderpearl> enderPearls = com.google.common.collect.Sets.newConcurrentHashSet();
++    private final Set<ThrownEnderpearl> enderPearls = new HashSet<>();
+     // Canvas end - region threading
+     private long timeEntitySatOnShoulder;
+     private CompoundTag shoulderEntityLeft = new CompoundTag();
+@@ -819,7 +819,6 @@
+     }
+ 
+     private void saveEnderPearls(final ValueOutput playerOutput) {
+-        if (true) return; // Canvas - region threading
+         if (!this.enderPearls.isEmpty()) {
+             ValueOutput.ValueOutputList pearlsOutput = playerOutput.childrenList("ender_pearls");
+ 
+@@ -835,30 +834,8 @@
+             }
+         }
+     }
+-    // Canvas start - region threading
+-
+-    public void savePearls(boolean removePearl) {
+-        // shutdown should manually go through pearls
+-        if (ca.spottedleaf.moonrise.common.util.TickThread.isShutdownThread()) {
+-            throw new IllegalStateException("Cannot save pearls through shutdown thread here");
+-        }
+-
+-        for (ThrownEnderpearl thrownEnderpearl : enderPearls) {
+-            if (thrownEnderpearl.level().paperConfig().misc.legacyEnderPearlBehavior) continue;
+-
+-            java.util.function.Consumer<ThrownEnderpearl> task = (pearl) -> {
+-                MinecraftServer.getServer().pearls.addPearl(this.uuid, pearl);
+-                if (removePearl) pearl.setRemoved(Entity.RemovalReason.UNLOADED_WITH_PLAYER, org.bukkit.event.entity.EntityRemoveEvent.Cause.PLAYER_QUIT);
+-            };
+-
+-            thrownEnderpearl.getBukkitEntity().taskScheduler.scheduleOrExecute(task);
+-        }
+-    }
+-    // Canvas end - region threading
+-
+     public void loadAndSpawnEnderPearls(final ValueInput playerInput) {
+         playerInput.childrenListOrEmpty("ender_pearls").forEach(this::loadAndSpawnEnderPearl);
+-        MinecraftServer.getServer().pearls.spawnPearls(this); // Canvas - region threading
+     }
+ 
+     private void loadAndSpawnEnderPearl(final ValueInput pearlInput) {
+@@ -3619,11 +3596,11 @@
+     }
+ 
+     public void registerEnderPearl(final ThrownEnderpearl enderPearl) {
+-        this.enderPearls.add(enderPearl);
++        //this.enderPearls.add(enderPearl); // Folia - region threading - do not track ender pearls
+     }
+ 
+     public void deregisterEnderPearl(final ThrownEnderpearl enderPearl) {
+-        this.enderPearls.remove(enderPearl);
++        //this.enderPearls.remove(enderPearl); // Folia - region threading - do not track ender pearls
+     }
+ 
+     public Set<ThrownEnderpearl> getEnderPearls() {
+diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
+index 9d625d8a95770a4ee61eee079986262ee1325dc4..1ce264e65b462ecda04781d9c28bc7753224fa07 100644
+--- a/net/minecraft/server/players/PlayerList.java
++++ b/net/minecraft/server/players/PlayerList.java
+@@ -559,7 +559,13 @@
+ 
+         player.unRide();
+ 
+-        player.savePearls(true); // Canvas - region threading
++        for (ThrownEnderpearl enderpearl : player.getEnderPearls()) {
++            // Paper start - Allow using old ender pearl behavior
++            if (!enderpearl.level().paperConfig().misc.legacyEnderPearlBehavior) {
++                enderpearl.setRemoved(Entity.RemovalReason.UNLOADED_WITH_PLAYER, org.bukkit.event.entity.EntityRemoveEvent.Cause.PLAYER_QUIT); // CraftBukkit - add Bukkit remove cause
++            }
++            // Paper end - Allow using old ender pearl behavior
++        }
+ 
+         level.removePlayerImmediately(player, Entity.RemovalReason.UNLOADED_WITH_PLAYER);
+         player.retireScheduler(); // Paper - Folia schedulers
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index 28dce529b3d288963b28ce72a91e602b48523261..f147568ecac8604519b5269de6621071e91e52ed 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -316,7 +316,6 @@
+     public boolean isIteratingOverLevels = false; // Paper - Throw exception on world create while being ticked
+     private final Set<String> pluginsBlockingSleep = new java.util.HashSet<>(); // Paper - API to allow/disallow tick sleeping
+     public static final long SERVER_INIT = System.nanoTime(); // Paper - Lag compensation
+-    public final io.canvasmc.canvas.threadedregions.entities.EnderPearls pearls; // Canvas - region threading
+     // Paper start - improve tick loop
+     public final ca.spottedleaf.common.time.TickData tickTimes1s  = new ca.spottedleaf.common.time.TickData(java.util.concurrent.TimeUnit.SECONDS.toNanos(1L));
+     public final ca.spottedleaf.common.time.TickData tickTimes5s  = new ca.spottedleaf.common.time.TickData(java.util.concurrent.TimeUnit.SECONDS.toNanos(5L));
+@@ -577,7 +576,6 @@
+         this.clockManager = this.getDataStorage().computeIfAbsent(ServerClockManager.TYPE);
+         this.clockManager.init(this);
+         this.customBossEvents = this.savedDataStorage.computeIfAbsent(CustomBossEvents.TYPE);
+-        this.pearls = this.savedDataStorage.computeIfAbsent(io.canvasmc.canvas.threadedregions.entities.EnderPearls.TYPE); // Canvas - region threading
+         // Paper - per-level scheduledEvents
+         // CraftBukkit start
+         this.options = options;
+diff --git a/io/papermc/paper/threadedregions/RegionShutdownThread.java b/io/papermc/paper/threadedregions/RegionShutdownThread.java
+index 2dab84a636f8d3a20f4213df63e481540c8a6a31..ab93b2d5e735a6aa27f5c81cf005c91d27d9a55b 100644
+--- a/io/papermc/paper/threadedregions/RegionShutdownThread.java
++++ b/io/papermc/paper/threadedregions/RegionShutdownThread.java
+@@ -189,71 +189,6 @@
+             futures.add(future);
+         }
+ 
+-        // make sure the pearl map is fully set, so this can be picked
+-        // up on the global data save later on during shutdown
+-
+-        final MutableInt savedPearlCount = new MutableInt(0);
+-        final Map<ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData>, List<Pair<UUID, ThrownEnderpearl>>>
+-            region2Pearls = Maps.newHashMap();
+-
+-        for (final ServerPlayer entityPlayer : MinecraftServer.getServer().getPlayerList().getPlayers()) {
+-            final UUID uuid = entityPlayer.getUUID();
+-            final Set<ThrownEnderpearl> toSave = entityPlayer.getEnderPearls();
+-
+-            // we have to save manually like this since technically pearls
+-            // can be anywhere in the world during shutdown, including out of
+-            // the region of the existing player(stasis chambers for example).
+-
+-            // because of that, we need to collect all pearls and make sure we
+-            // save them all with the proper region set
+-
+-            for (final ThrownEnderpearl thrownEnderpearl : toSave) {
+-                if (thrownEnderpearl.level().paperConfig().misc.legacyEnderPearlBehavior) continue;
+-
+-                final int chunkX = thrownEnderpearl.getBlockX() >> 4;
+-                final int chunkZ = thrownEnderpearl.getBlockZ() >> 4;
+-                final ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData>
+-                    regionAtChunk = entityPlayer.level().regioniser.getRegionAtUnsynchronised(chunkX, chunkZ);
+-                if (regionAtChunk == null) {
+-                    // if region isn't loaded, skip
+-                    continue;
+-                }
+-
+-                region2Pearls.computeIfAbsent(
+-                    regionAtChunk,
+-                    (_) -> new ArrayList<>()
+-                ).add(new Pair<>(uuid, thrownEnderpearl));
+-            }
+-        }
+-
+-        region2Pearls.forEach((region, listOfPearls) -> {
+-            ChunkPos center = null;
+-            try {
+-                this.shuttingDown = region;
+-                center = region.getCenterChunk();
+-                for (final Pair<UUID, ThrownEnderpearl> pair : listOfPearls) {
+-                    MinecraftServer.getServer().pearls.addPearl(pair.getFirst(), pair.getSecond());
+-
+-                    // remove the pearl or else we end up with a bug in our system
+-                    // that causes the pearl to be retained in the set until the next
+-                    // login, since the entity UUID exists so it just adds to the
+-                    // pearl set and then never gets removed so it gets caught on save
+-
+-                    pair.getSecond().setRemoved(Entity.RemovalReason.UNLOADED_WITH_PLAYER, EntityRemoveEvent.Cause.PLAYER_QUIT);
+-                    savedPearlCount.increment();
+-                }
+-            } catch (final Throwable thrown) {
+-                LOGGER.error("Failed to save pearls for region around chunk {} in level '{}'", center, region.regioniser.world.getWorld().getName(), thrown);
+-            } finally {
+-                this.shuttingDown = null;
+-            }
+-        });
+-
+-        final int total = savedPearlCount.intValue();
+-        if (total > 0) {
+-            LOGGER.info("Saved {} in-flight pearl{}", total, total > 1 ? "s" : "");
+-        }
+-
+         // now, remove players and wait
+         playerList.removeAll(MinecraftServer.getServer().isRestarting);
+ 
+diff --git a/io/papermc/paper/threadedregions/RegionizedServer.java b/io/papermc/paper/threadedregions/RegionizedServer.java
+index 57ffbbfc4ff59caf3948344c9f0d1f5c644bca4f..0fdfc2b1e2ee36a177a2eee2438ef190f85ba71b 100644
+--- a/io/papermc/paper/threadedregions/RegionizedServer.java
++++ b/io/papermc/paper/threadedregions/RegionizedServer.java
+@@ -5,7 +5,6 @@
+ import ca.spottedleaf.concurrentutil.completable.Completable;
+ import ca.spottedleaf.moonrise.common.util.TickThread;
+ import com.mojang.logging.LogUtils;
+-import io.canvasmc.canvas.threadedregions.entities.EnderPearls;
+ import io.papermc.paper.adventure.providers.ClickCallbackProviderImpl;
+ import io.papermc.paper.configuration.GlobalConfiguration;
+ import io.papermc.paper.threadedregions.scheduler.FoliaGlobalRegionScheduler;
+@@ -369,11 +368,6 @@
+                     toSave.add(Stopwatches.class);
+                 }
+ 
+-                // our pearl rewrite is threadsafe
+-                if (autosaveConfig.autosavePearls) {
+-                    toSave.add(EnderPearls.class);
+-                }
+-
+                 // made threadsafe by Canvas
+                 if (autosaveConfig.autosaveCustomBossEvents) {
+                     toSave.add(CustomBossEvents.class);
+diff --git a/io/canvasmc/canvas/threadedregions/entities/EnderPearls.java b/io/canvasmc/canvas/threadedregions/entities/EnderPearls.java
+deleted file mode 100644
+index c184cc4cc7023e001055499e3d3d93d2152d6d30..0000000
+--- a/io/canvasmc/canvas/threadedregions/entities/EnderPearls.java
++++ /dev/null
+@@ -1,245 +0,0 @@
+-package io.canvasmc.canvas.threadedregions.entities;
+-
+-import ca.spottedleaf.concurrentutil.util.Priority;
+-import com.mojang.logging.LogUtils;
+-import com.mojang.serialization.Codec;
+-import com.mojang.serialization.DataResult;
+-import com.mojang.serialization.codecs.RecordCodecBuilder;
+-import io.canvasmc.canvas.GlobalConfiguration;
+-import io.canvasmc.canvas.util.Codecs;
+-import io.canvasmc.canvas.util.Util;
+-import io.papermc.paper.threadedregions.RegionShutdownThread;
+-import java.util.ArrayList;
+-import java.util.List;
+-import java.util.Map;
+-import java.util.UUID;
+-import java.util.concurrent.ConcurrentHashMap;
+-import java.util.concurrent.CopyOnWriteArrayList;
+-import java.util.function.Function;
+-import net.minecraft.nbt.CompoundTag;
+-import net.minecraft.resources.Identifier;
+-import net.minecraft.server.MinecraftServer;
+-import net.minecraft.server.level.ServerLevel;
+-import net.minecraft.server.level.ServerPlayer;
+-import net.minecraft.util.ProblemReporter;
+-import net.minecraft.util.datafix.DataFixTypes;
+-import net.minecraft.world.entity.Entity;
+-import net.minecraft.world.entity.EntityProcessor;
+-import net.minecraft.world.entity.EntitySpawnReason;
+-import net.minecraft.world.entity.EntityType;
+-import net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl;
+-import net.minecraft.world.level.Level;
+-import net.minecraft.world.level.saveddata.SavedData;
+-import net.minecraft.world.level.saveddata.SavedDataType;
+-import net.minecraft.world.level.storage.TagValueInput;
+-import net.minecraft.world.level.storage.TagValueOutput;
+-import net.minecraft.world.level.storage.ValueInput;
+-import org.apache.commons.lang3.mutable.MutableBoolean;
+-import org.jetbrains.annotations.Contract;
+-import org.jspecify.annotations.NullMarked;
+-import org.slf4j.Logger;
+-
+-@NullMarked
+-public final class EnderPearls extends SavedData {
+-    public static final Codec<Pearl> PEARL_CODEC = CompoundTag.CODEC.comapFlatMap(
+-        (Function<CompoundTag, DataResult<Pearl>>) compoundTag -> DataResult.success(new Pearl(compoundTag)), pearl -> pearl.serialized
+-    );
+-    public static final Codec<EnderPearls> CODEC = RecordCodecBuilder.create(i -> i.group(
+-        Codec.unboundedMap(
+-            Codecs.UUID_CODEC, Codecs.copyOnWriteArrayListCodec(PEARL_CODEC.listOf())
+-        ).optionalFieldOf("Data", new ConcurrentHashMap<>()).forGetter(EnderPearls::pearls)
+-    ).apply(i, EnderPearls::new));
+-
+-    public static final SavedDataType<EnderPearls> TYPE = new SavedDataType<>(
+-        Identifier.fromNamespaceAndPath("canvas", "pearls"),
+-        EnderPearls::new,
+-        CODEC,
+-        DataFixTypes.NONE
+-    );
+-
+-    private static final Logger LOGGER = LogUtils.getClassLogger();
+-
+-    private final Map<UUID, List<Pearl>> pearls;
+-
+-    public EnderPearls() {
+-        this(new ConcurrentHashMap<>());
+-    }
+-
+-    public EnderPearls(final Map<UUID, List<Pearl>> pearls) {
+-        this.pearls = new ConcurrentHashMap<>(pearls);
+-        setDirty(); // the data may be populated with unsaved data
+-    }
+-
+-    @Override
+-    public boolean isDirty() {
+-        // assume dirty in shutdown to ensure that all data is saved correctly
+-        return super.isDirty() || RegionShutdownThread.isShuttingDown();
+-    }
+-
+-    public void spawnPearls(final ServerPlayer player) {
+-        final MutableBoolean setDirty = new MutableBoolean(false);
+-
+-        // if the map has the player UUID, we should spawn pearls
+-        pearls.computeIfPresent(player.getUUID(), (_, enderPearls) -> {
+-            for (final Pearl enderPearl : new ArrayList<>(enderPearls)) {
+-                enderPearl.spawn();
+-                enderPearls.remove(enderPearl);
+-            }
+-            setDirty.setTrue();
+-            return null;
+-        });
+-
+-        // we should only set dirty if we spawned pearls
+-        if (setDirty.isTrue()) {
+-            setDirty();
+-        }
+-    }
+-
+-    public void addPearl(final UUID uuid, final ThrownEnderpearl thrownEnderpearl) {
+-        if (thrownEnderpearl.hasNullCallback()) {
+-            LOGGER.warn("Trying to add pearl with null callback, skipping", new Throwable());
+-            return;
+-        }
+-        else if (thrownEnderpearl.isRemoved()) {
+-            LOGGER.warn("Trying to add removed ({}) ender pearl, skipping", thrownEnderpearl.getRemovalReason(), new Throwable());
+-            return;
+-        }
+-
+-        final List<Pearl> pearlsForUUID = pearls.computeIfAbsent(uuid, (ignored) -> new CopyOnWriteArrayList<>());
+-        final Pearl encoded = Pearl.of(thrownEnderpearl);
+-
+-        // remove if it's already in the list, we don't want duplicates
+-        pearlsForUUID.remove(encoded);
+-        pearlsForUUID.add(encoded);
+-
+-        // mark dirty, we added a pearl(even if the pearl was present already)
+-        setDirty();
+-
+-        if (GlobalConfiguration.getInstance().logs.logEnderPearlRewriteActions) {
+-            LOGGER.info("Saved pearl at [{}] for {}", thrownEnderpearl.blockPosition().toShortString(), uuid);
+-        }
+-    }
+-
+-    private Map<UUID, List<Pearl>> pearls() {
+-        return pearls;
+-    }
+-
+-    @Override
+-    public int hashCode() {
+-        return pearls.hashCode();
+-    }
+-
+-    @Override
+-    public boolean equals(final Object obj) {
+-        return obj == this || obj instanceof EnderPearls other && this.pearls.equals(other.pearls);
+-    }
+-
+-    @Override
+-    public String toString() {
+-        return "EnderPearls[" +
+-            "pearls=" + pearls + ']';
+-    }
+-
+-    /**
+-     * The serializable ender pearl instance, containing a {@link net.minecraft.nbt.CompoundTag} which is the main save
+-     * data, formatted as:
+-     * <pre>{@code
+-     * {
+-     *     "uuid": <the entity uuid>,
+-     *     "data": <the entity data, without the id>,
+-     *     "level": <dimension>
+-     * }
+-     * }</pre>
+-     *
+-     * @param uuid
+-     *     the UUID of the ender pearl
+-     * @param serialized
+-     *     the serialized save data
+-     *
+-     * @author dueris
+-     */
+-    public record Pearl(UUID uuid, CompoundTag serialized) {
+-
+-        public Pearl(final CompoundTag tag) {
+-            this(tag.read("uuid", Codecs.UUID_CODEC).orElseThrow(), tag);
+-        }
+-
+-        @Contract("_ -> new")
+-        public static Pearl of(final ThrownEnderpearl pearl) {
+-            final CompoundTag tag;
+-            try (final ProblemReporter.ScopedCollector problemReporter = new ProblemReporter.ScopedCollector(
+-                () -> "pearl-serialize", LOGGER
+-            )) {
+-                final TagValueOutput tagValueOutput = TagValueOutput.createWithContext(
+-                    problemReporter,
+-                    pearl.registryAccess()
+-                );
+-
+-                tagValueOutput.store("uuid", Codecs.UUID_CODEC, pearl.getUUID());
+-                tagValueOutput.store("level", Level.RESOURCE_KEY_CODEC, pearl.level().dimension());
+-                pearl.save(tagValueOutput.child("data"));
+-
+-                tag = tagValueOutput.buildResult();
+-            }
+-            return new Pearl(pearl.getUUID(), tag);
+-        }
+-
+-        public void spawn() {
+-            final CompoundTag data = serialized.getCompound("data").orElseThrow();
+-            final ServerLevel level = serialized.read("level", Level.RESOURCE_KEY_CODEC)
+-                .map(MinecraftServer.getServer()::getLevel)
+-                .orElse(null);
+-
+-            // the level can be null if the target world gets removed or something
+-            // between runtimes or even during runtime, so we check to be sure it's nonnull
+-
+-            if (level == null) {
+-                LOGGER.error("Level ({}) did not exist, skipping pearl spawn", serialized.getString("level"));
+-                return;
+-            }
+-
+-            final String levelName = Util.getLevelName(level);
+-            try (final ProblemReporter.ScopedCollector problemReporter = new ProblemReporter.ScopedCollector(
+-                () -> "pearl-spawn", LOGGER
+-            )) {
+-                final ValueInput tagValueInput = TagValueInput.create(
+-                    problemReporter,
+-                    MinecraftServer.getServer().registryAccess(),
+-                    data
+-                );
+-                final Entity loadedEntity = EntityType.loadEntityRecursive(tagValueInput, level, EntitySpawnReason.LOAD, EntityProcessor.NOP);
+-
+-                if (loadedEntity != null) {
+-                    level.canvas$loadOrRunAtChunksAsync(loadedEntity.blockPosition(), 16, Priority.NORMAL, () -> {
+-                        if (level.tryAddFreshEntityWithPassengers(loadedEntity)) {
+-                            ServerPlayer.placeEnderPearlTicket(level, loadedEntity.chunkPosition());
+-                            if (GlobalConfiguration.getInstance().logs.logEnderPearlRewriteActions) {
+-                                LOGGER.info("Spawned saved pearl [{}] in level ({})", loadedEntity.blockPosition().toShortString(), levelName);
+-                            }
+-                        }
+-                        else {
+-                            LOGGER.warn("Unable to spawn saved pearl in level ({})", levelName);
+-                        }
+-                    });
+-                }
+-                else {
+-                    LOGGER.warn("Failed to spawn player ender pearl in level ({}), skipping", levelName);
+-                }
+-            } catch (final Throwable thrown) {
+-                LOGGER.error("Failed to spawn player pearl in level ({})", levelName, thrown);
+-            }
+-        }
+-
+-        @Override
+-        public boolean equals(final Object o) {
+-            // if uuids match, same pearl
+-            return o == this || o instanceof Pearl(UUID otherUuid, _) &&
+-                uuid.equals(otherUuid);
+-        }
+-
+-        @Override
+-        public int hashCode() {
+-            return uuid.hashCode();
+-        }
+-    }
+-}
