@@ -58,7 +58,7 @@ index 4b759df..c4c6bbf 100644
                              // done
                              portalInfoCompletable.complete(
                                  new TeleportTransition(
-@@ -5086,6 +5120,11 @@ public abstract class Entity
+@@ -5086,6 +5120,12 @@
          final ServerLevel finalDestination = destination;
          // Canvas end - region threading
  
