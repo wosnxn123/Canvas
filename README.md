@@ -110,6 +110,7 @@ Canvas 上游内置的 `canvas:pearls` 全局 SavedData 珍珠持久化已移除
 
 2026-08-04 复核（Leaves 三项 GPL 来源）：`LeavesMC/Leaves` `master` 上 `0125-Old-wet-tnt-explode-behavior`、`0101-Old-raid-behavior`、`0005-Configurable-void-trade` 三个补丁的最后一次修改均为 1.21.11 rebase `22a763cb`（2026-04-28），此后无改动；与本 fork 固定版本（`3e96b237` / `bda7e406` / `9d2bd3f7`）的差异全部是 rebase 上下文适配（变量重命名、行号偏移），无行为修复，0003 无需重新移植。同日合并上游 Canvas `main`（至 `2c97cca1`），0003 应用无需适配。
 2026-08-07：原单一 `0003-Vanilla-like-experience.patch` 按功能拆为 `0003`（命令方块）/`0128`（vanilla-like 主）/old-feature 六个补丁，并新增移植 11 个机制（§4）。全链回放验证：19 个补丁按序应用逐字节复现拆分前最终态；GitHub Actions（applyAllPatches + compileJava + paperclip）全绿，CNB 远程启动 smoke test 通过（全部新配置项带 docs 生成）。Lophine `ver/26.2@fc3415e6` 已将补丁集重编号为 49 个，且删除了 `0028`/`0034`/`0045`/`0065` 四个来源——移植与复核仍以固定提交 `0724ba3f` 为准，按文件名关键词定位。
+2026-08-09 复核：Lophine `dev/26.2-hardfork` 推进至 `c619486d`，7 个来源补丁（0028/0034/0117/pearl/vanilla-like/0096/0101）仅有 rebase 上下文/hunk 形状变化，+/- 代码行集合与固定版本相同，无行为修复，不需重移植；pearl、vanilla-like 重编号（0130→0129、0129→0128）。`ver/26.2` 与 Leaves `master` 无变化。
 
 **Canvas 自有源码改动**（非 patch）：`canvas-server/src/main/java/io/canvasmc/canvas/GlobalConfiguration.java` 新增 `VanillaLikeExperience` 配置段（`enabled`、`commandBlocks` + 11 个新机制字段 + `TripwireBehavior` 枚举，枚举位于 `GlobalConfiguration` 顶层供 NMS patch 引用）；新增 `util/UpdateSuppressionException.java`。
 
