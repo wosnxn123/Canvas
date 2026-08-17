@@ -7,10 +7,10 @@ Ported from Lophine 0028 (KaiijuMC/Kaiiju, GPL-3.0, Sofiane H. Djerbi).
 Gated behind vanilla-like-experience.vanillaEndPortalTeleportation.
 
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index 4b759df..c4c6bbf 100644
+index ae0a63be87204337133638e27bf740e846be7d5f..ebbb85a951ab01fda2e6e20abe9d63fe7a85c207 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
-@@ -4829,6 +4829,23 @@ public abstract class Entity
+@@ -4987,6 +4987,23 @@ public abstract class Entity
                          targetPos, 16, // load 16 blocks to be safe from block physics
                          ca.spottedleaf.concurrentutil.util.Priority.HIGH,
                          (_) -> {
@@ -34,7 +34,7 @@ index 4b759df..c4c6bbf 100644
                              net.minecraft.world.level.levelgen.feature.EndPlatformFeature.createEndPlatform(destination, targetPos.below(), true, null);
  
                              // the portal obsidian is placed at targetPos.y - 2, so if we want to place the entity
-@@ -4854,6 +4871,23 @@ public abstract class Entity
+@@ -5012,6 +5029,23 @@ public abstract class Entity
                          (_) -> {
                              BlockPos adjustedSpawn = destination.getHeightmapPos(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, spawnPos);
  
@@ -58,8 +58,8 @@ index 4b759df..c4c6bbf 100644
                              // done
                              portalInfoCompletable.complete(
                                  new TeleportTransition(
-@@ -5086,6 +5120,12 @@
-         final ServerLevel finalDestination = destination;
+@@ -5261,6 +5295,12 @@ public abstract class Entity
+             this.canvas$preparePortalTransferContinuation(originWorld, finalDestination, type);
          // Canvas end - region threading
  
 +        // Kaiiju start - sync end platform spawning & entity teleportation (ported, gated)
@@ -71,10 +71,10 @@ index 4b759df..c4c6bbf 100644
          Vec3 initialPosition = this.position();
          ChunkPos initialPositionChunk = new ChunkPos(
              ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkX(initialPosition),
-@@ -5162,9 +5201,11 @@ public abstract class Entity
-                     this.canvas$teleportingToDimension = null;
-                     this.canvas$lastTeleportOrigin = null;
-                     // Canvas end - region threading
+@@ -5382,9 +5422,11 @@ public abstract class Entity
+                     }
+ 
+                     clearRegionTransferState(); // Canvas - region threading
 -                    if (teleportComplete != null) {
 -                        teleportComplete.accept(teleported);
 +                    // Kaiiju start - vanilla end teleportation (ported, gated)
@@ -83,5 +83,5 @@ index 4b759df..c4c6bbf 100644
                      }
 +                    // Kaiiju end
                      // Canvas start - region threading
-                     if (io.canvasmc.canvas.event.EntityPostPortalAsyncEvent.getHandlerList().getRegisteredListeners().length > 0) {
-                         new io.canvasmc.canvas.event.EntityPostPortalAsyncEvent(
+ 
+                     // check if the entity is the same region, since the teleport complete

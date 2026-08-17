@@ -6,10 +6,10 @@ Subject: [PATCH] Leaves Configurable trading with the void
 Ported from Lophine 0101, originally LeavesMC/Leaves 0088 (GPL-3.0, violetc).
 
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index d3582db1f4..8611c74d10 100644
+index 92052c9c406bf670fc78066a878f56c7e44f1d86..ff12863434a8e88fad6befb5c735a04a9c308ca7 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -2969,7 +2969,7 @@
+@@ -2982,7 +2982,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
      }
  
      public boolean isCommandBlockEnabled() {
@@ -18,7 +18,7 @@ index d3582db1f4..8611c74d10 100644
      }
  
      public boolean isSpawnerBlockEnabled() {
-@@ -3086,7 +3086,7 @@
+@@ -3099,7 +3099,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
              // Spigot start
              if (entity.getBukkitEntity() instanceof org.bukkit.inventory.InventoryHolder && (!(entity instanceof ServerPlayer) || entity.getRemovalReason() != Entity.RemovalReason.KILLED)) { // SPIGOT-6876: closeInventory clears death message
                  // Paper start - Fix merchant inventory not closing on entity removal
@@ -28,10 +28,10 @@ index d3582db1f4..8611c74d10 100644
                  }
                  // Paper end - Fix merchant inventory not closing on entity removal
 diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
-index 4e97ff3ae6..9d625d8a95 100644
+index f510811dbe971eac996952ebe42103294db8bb66..25cba4c20fd4c3e2e914c1c92fd5f7c3e1cc02d1 100644
 --- a/net/minecraft/server/players/PlayerList.java
 +++ b/net/minecraft/server/players/PlayerList.java
-@@ -545,7 +545,7 @@
+@@ -545,7 +545,7 @@ public abstract class PlayerList {
                  player.stopRiding();
                  vehicle.getPassengersAndSelf().forEach(e -> {
                      // Paper start - Fix villager boat exploit
@@ -41,10 +41,10 @@ index 4e97ff3ae6..9d625d8a95 100644
                          if (human != null) {
                              villager.setTradingPlayer(null);
 diff --git a/net/minecraft/world/inventory/MerchantMenu.java b/net/minecraft/world/inventory/MerchantMenu.java
-index 5979e3856d..55f6392f85 100644
+index 5979e3856da1287f4513c984c0414952bfeb3ea2..55f6392f8579b2ed9ca0a4d3a31f0625a35a40ec 100644
 --- a/net/minecraft/world/inventory/MerchantMenu.java
 +++ b/net/minecraft/world/inventory/MerchantMenu.java
-@@ -74,6 +74,7 @@
+@@ -74,6 +74,7 @@ public class MerchantMenu extends AbstractContainerMenu {
  
      @Override
      public boolean stillValid(final Player player) {

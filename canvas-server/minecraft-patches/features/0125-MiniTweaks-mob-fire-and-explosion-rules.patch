@@ -7,7 +7,7 @@ Ported from Lophine 0125 (MiniTweaks, GPL-3.0, Bacteriawa).
 Gated behind the four no*/disable* flags.
 
 diff --git a/net/minecraft/world/entity/monster/Creeper.java b/net/minecraft/world/entity/monster/Creeper.java
-index 4a90294..3b8a0c1 100644
+index 4a90294f8d8447bb2f2cef7572119274a1a2c62e..3b8a0c17c2ba8d00e177aa9a6d15e04b38f9c5a9 100644
 --- a/net/minecraft/world/entity/monster/Creeper.java
 +++ b/net/minecraft/world/entity/monster/Creeper.java
 @@ -250,7 +250,8 @@ public class Creeper extends Monster {
@@ -21,7 +21,7 @@ index 4a90294..3b8a0c1 100644
              this.triggerOnDeathMobEffects(level, Entity.RemovalReason.KILLED);
              this.discard(org.bukkit.event.entity.EntityRemoveEvent.Cause.EXPLODE); // CraftBukkit - add Bukkit remove cause
 diff --git a/net/minecraft/world/entity/projectile/hurtingprojectile/LargeFireball.java b/net/minecraft/world/entity/projectile/hurtingprojectile/LargeFireball.java
-index 8195ab5..9984244 100644
+index 8195ab561d12abb33f4359a68b3c1579ce284242..9984244d549ad08a6053fcd74344667f1e1bc4f1 100644
 --- a/net/minecraft/world/entity/projectile/hurtingprojectile/LargeFireball.java
 +++ b/net/minecraft/world/entity/projectile/hurtingprojectile/LargeFireball.java
 @@ -38,7 +38,9 @@ public class LargeFireball extends Fireball {
@@ -36,7 +36,7 @@ index 8195ab5..9984244 100644
              // CraftBukkit end - fire ExplosionPrimeEvent
              this.discard(org.bukkit.event.entity.EntityRemoveEvent.Cause.HIT); // CraftBukkit - add Bukkit remove cause
 diff --git a/net/minecraft/world/entity/projectile/hurtingprojectile/SmallFireball.java b/net/minecraft/world/entity/projectile/hurtingprojectile/SmallFireball.java
-index ea2ed37..64eb290 100644
+index ea2ed37063a5f62ad2ade39e9f39f2c2ba6f1772..64eb290ffd73305054a805a1d698170c18742902 100644
 --- a/net/minecraft/world/entity/projectile/hurtingprojectile/SmallFireball.java
 +++ b/net/minecraft/world/entity/projectile/hurtingprojectile/SmallFireball.java
 @@ -64,7 +64,7 @@ public class SmallFireball extends Fireball {

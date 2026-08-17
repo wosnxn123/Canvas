@@ -7,10 +7,10 @@ Ported from Lophine 0034 (Luminol, MIT). Gated behind
 vanilla-like-experience.useLegacyRandomSourceForPlayers.
 
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index c4c6bbf..209ce80 100644
+index 1bded76bb6efba6c31a273fdc6cafbcfb132bc38..8df822129d49683e701f5c409afff8d5d72032b9 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
-@@ -300,7 +300,7 @@ public abstract class Entity
+@@ -350,7 +350,7 @@ public abstract class Entity
      public double yOld;
      public double zOld;
      public boolean noPhysics;

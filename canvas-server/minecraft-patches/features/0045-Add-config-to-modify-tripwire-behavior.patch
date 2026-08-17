@@ -7,7 +7,7 @@ Ported from Lophine 0045 (Luminol, MIT, Helvetica Volubi).
 Gated behind vanilla-like-experience.tripwireBehavior.
 
 diff --git a/net/minecraft/world/level/block/TripWireHookBlock.java b/net/minecraft/world/level/block/TripWireHookBlock.java
-index 8bcc8b6..65634d1 100644
+index 8bcc8b6f83ab4d5a472741185511b5d84f4974be..65634d14274350881c5d712aa9be09659d2ae4ea 100644
 --- a/net/minecraft/world/level/block/TripWireHookBlock.java
 +++ b/net/minecraft/world/level/block/TripWireHookBlock.java
 @@ -201,10 +201,17 @@ public class TripWireHookBlock extends Block {
@@ -32,7 +32,7 @@ index 8bcc8b6..65634d1 100644
                  }
              }
 diff --git a/net/minecraft/world/level/levelgen/feature/EndPlatformFeature.java b/net/minecraft/world/level/levelgen/feature/EndPlatformFeature.java
-index b67f5f7..e74d010 100644
+index b67f5f7b76037ab77548c37a83e4d0918915223a..e74d0106c4d1507af1444e58caef2da654a6ff8e 100644
 --- a/net/minecraft/world/level/levelgen/feature/EndPlatformFeature.java
 +++ b/net/minecraft/world/level/levelgen/feature/EndPlatformFeature.java
 @@ -28,14 +28,39 @@ public class EndPlatformFeature extends Feature<NoneFeatureConfiguration> {

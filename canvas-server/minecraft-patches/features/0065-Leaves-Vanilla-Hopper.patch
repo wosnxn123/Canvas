@@ -7,10 +7,10 @@ Ported from Lophine 0065/0066 rework (hardfork 2459ff2e), originally LeavesMC/Le
 Gated behind vanilla-like-experience.vanillaHopper.
 
 diff --git a/net/minecraft/world/level/block/entity/HopperBlockEntity.java b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
-index 963372e..405d0a2 100644
+index 1c18d2ba63a5b148dc95ad1f3a57f00cbd6be208..41f38268131f11f145be6046f3cdd40bde64c7a4 100644
 --- a/net/minecraft/world/level/block/entity/HopperBlockEntity.java
 +++ b/net/minecraft/world/level/block/entity/HopperBlockEntity.java
-@@ -308,39 +308,102 @@
+@@ -308,39 +308,101 @@ public class HopperBlockEntity extends RandomizableContainerBlockEntity implemen
  
      private static boolean hopperPull(final Level level, final Hopper hopper, final Container container, ItemStack origItemStack, final int i) {
          final io.papermc.paper.threadedregions.RegionizedWorldData worldData = level.getCurrentWorldData(); // Folia - region threading
@@ -102,7 +102,12 @@ index 963372e..405d0a2 100644
 +            } else {
 +                container.setChanged(); // original logic always marks source inv as changed even if no move happens.
 +                movedItem.setCount(movedItemCount);
-+
+ 
+-            IGNORE_TILE_UPDATES.set(true); // Folia - region threading
+-            container.setItem(i, origItemStack);
+-            IGNORE_TILE_UPDATES.set(false); // Folia - region threading
+-            container.setChanged();
+-            return true;
 +                if (!worldData.skipPullModeEventFire) {
 +                    movedItem = callPullMoveEvent(hopper, container, movedItem);
 +                    if (movedItem == null) { // cancelled
@@ -110,12 +115,7 @@ index 963372e..405d0a2 100644
 +                        return true;
 +                    }
 +                }
-
--            IGNORE_TILE_UPDATES.set(true); // Folia - region threading
--            container.setItem(i, origItemStack);
--            IGNORE_TILE_UPDATES.set(false); // Folia - region threading
--            container.setChanged();
--            return true;
++
 +                final ItemStack remainingItem = addItem(container, hopper, movedItem, null);
 +                final int remainingItemCount = remainingItem.getCount();
 +                if (remainingItemCount != movedItemCount) {

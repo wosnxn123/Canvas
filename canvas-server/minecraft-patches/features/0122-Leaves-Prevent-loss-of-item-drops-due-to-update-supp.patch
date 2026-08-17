@@ -7,7 +7,7 @@ Ported from Lophine 0122, originally LeavesMC/Leaves (GPL-3.0, violetc).
 Active only when catchUpdateSuppression throws.
 
 diff --git a/net/minecraft/server/level/ServerPlayerGameMode.java b/net/minecraft/server/level/ServerPlayerGameMode.java
-index aa4f407..184d393 100644
+index aa4f4071cd58c1cb4f8cb68b9b3556fe6ec48fa9..184d393d67e461c0c5bd9dc93c4b39b967d0ab8e 100644
 --- a/net/minecraft/server/level/ServerPlayerGameMode.java
 +++ b/net/minecraft/server/level/ServerPlayerGameMode.java
 @@ -394,7 +394,18 @@ public class ServerPlayerGameMode {

@@ -7,7 +7,7 @@ Ported from Lophine 0093 (GPL-3.0, Helvetica Volubi; see Paper#13073).
 Gated behind vanilla-like-experience.followTickSequenceMerge.
 
 diff --git a/net/minecraft/world/entity/item/ItemEntity.java b/net/minecraft/world/entity/item/ItemEntity.java
-index 7bc9141..6b6f535 100644
+index 7bc91412ae6f113b08c37b26f4f80d1e8a2729f2..6b6f5357cce5688fcff4c106427db7da51d357fc 100644
 --- a/net/minecraft/world/entity/item/ItemEntity.java
 +++ b/net/minecraft/world/entity/item/ItemEntity.java
 @@ -285,7 +285,7 @@ public class ItemEntity extends Entity implements TraceableEntity {

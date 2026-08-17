@@ -6,10 +6,10 @@ Subject: [PATCH] Leaves Old raid behavior
 Ported from Lophine 0098, originally LeavesMC/Leaves 0114 (GPL-3.0, huanli233).
 
 diff --git a/net/minecraft/world/effect/BadOmenMobEffect.java b/net/minecraft/world/effect/BadOmenMobEffect.java
-index f58b10c7de..8fafdabd86 100644
+index f58b10c7dec0d2b7dc2b3d1198539b74d13038f3..8fafdabd860a90e1a45c6a53d559f4f24389388b 100644
 --- a/net/minecraft/world/effect/BadOmenMobEffect.java
 +++ b/net/minecraft/world/effect/BadOmenMobEffect.java
-@@ -22,6 +22,11 @@
+@@ -22,6 +22,11 @@ class BadOmenMobEffect extends MobEffect {
              && !player.isSpectator()
              && level.getDifficulty() != Difficulty.PEACEFUL
              && level.isVillage(player.blockPosition())) {
@@ -22,10 +22,10 @@ index f58b10c7de..8fafdabd86 100644
              if (raid == null || raid.getRaidOmenLevel() < raid.getMaxRaidOmenLevel()) {
                  player.addEffect(new MobEffectInstance(MobEffects.RAID_OMEN, 600, amplification));
 diff --git a/net/minecraft/world/entity/raid/Raid.java b/net/minecraft/world/entity/raid/Raid.java
-index d1265dff32..7c8fb93b1a 100644
+index d1265dff32548ba10421eca6f044691f489d48bf..7c8fb93b1a5fd2b445147c201832fa40e14b0e51 100644
 --- a/net/minecraft/world/entity/raid/Raid.java
 +++ b/net/minecraft/world/entity/raid/Raid.java
-@@ -269,7 +269,7 @@
+@@ -269,7 +269,7 @@ public class Raid {
      }
  
      public boolean absorbRaidOmen(final ServerPlayer player) {
@@ -34,7 +34,7 @@ index d1265dff32..7c8fb93b1a 100644
          if (effect == null) {
              return false;
          }
-@@ -346,7 +346,13 @@
+@@ -346,7 +346,13 @@ public class Raid {
                          }
  
                          if (shouldTryToFindSpawnPos) {
@@ -49,7 +49,7 @@ index d1265dff32..7c8fb93b1a 100644
                          }
  
                          if (this.raidCooldownTicks == 300 || this.raidCooldownTicks % 20 == 0) {
-@@ -401,7 +401,14 @@
+@@ -401,7 +407,14 @@ public class Raid {
                  int attempt = 0;
  
                  while (this.shouldSpawnGroup()) {
@@ -65,7 +65,7 @@ index d1265dff32..7c8fb93b1a 100644
                      if (spawnPos != null) {
                          this.started = true;
                          this.spawnGroup(level, spawnPos);
-@@ -413,7 +413,7 @@
+@@ -413,7 +426,7 @@ public class Raid {
                          attempt++;
                      }
  
@@ -74,7 +74,7 @@ index d1265dff32..7c8fb93b1a 100644
                          org.bukkit.craftbukkit.event.CraftEventFactory.callRaidStopEvent(level, this, org.bukkit.event.raid.RaidStopEvent.Reason.UNSPAWNABLE); // CraftBukkit
                          this.stop();
                          break;
-@@ -717,7 +717,7 @@
+@@ -717,7 +730,7 @@ public class Raid {
              int spawnX = this.center.getX() + Mth.floor(Mth.cos(angle) * 32.0F * howFar) + this.random.nextInt(3) * Mth.floor(howFar);
              int spawnZ = this.center.getZ() + Mth.floor(Mth.sin(angle) * 32.0F * howFar) + this.random.nextInt(3) * Mth.floor(howFar);
              int spawnY = level.getHeight(Heightmap.Types.WORLD_SURFACE, spawnX, spawnZ);
@@ -83,7 +83,7 @@ index d1265dff32..7c8fb93b1a 100644
                  spawnPos.set(spawnX, spawnY, spawnZ);
                  if (!level.isVillage(spawnPos) || secondsRemaining <= 7) {
                      int delta = 10;
-@@ -900,4 +900,41 @@
+@@ -900,4 +913,41 @@ public class Raid {
              this.spawnsPerWaveBeforeBonus = spawnsPerWaveBeforeBonus;
          }
      }
@@ -126,10 +126,10 @@ index d1265dff32..7c8fb93b1a 100644
 +    // Leaves end - old FindSpawnPosition
  }
 diff --git a/net/minecraft/world/entity/raid/Raider.java b/net/minecraft/world/entity/raid/Raider.java
-index 7e969cd81d..260cbec3f8 100644
+index 7e969cd81d2ac788515f4d9ad7584ade4c684a42..260cbec3f82316c0fa6cdfc54532b8baaf61b238 100644
 --- a/net/minecraft/world/entity/raid/Raider.java
 +++ b/net/minecraft/world/entity/raid/Raider.java
-@@ -129,6 +129,42 @@
+@@ -129,6 +129,42 @@ public abstract class Raider extends PatrollingMonster {
  
                  raidWhenKilled.removeFromRaid(serverLevel, this, false);
              }

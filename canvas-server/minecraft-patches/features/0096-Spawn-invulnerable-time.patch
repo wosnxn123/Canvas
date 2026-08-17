@@ -6,10 +6,10 @@ Subject: [PATCH] Spawn invulnerable time
 Ported from Lophine 0096 (MIT, Helvetica Volubi).
 
 diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
-index 890cd6e15c..75437ec345 100644
+index c19c621b603aab2e85ba9b0fa98e7b270fdf1358..899e224b29d7758df31c6e3a11634b2431d35a98 100644
 --- a/net/minecraft/server/level/ServerPlayer.java
 +++ b/net/minecraft/server/level/ServerPlayer.java
-@@ -243,6 +243,7 @@
+@@ -243,6 +243,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
      private int lastSentFood = -99999999;
      private boolean lastFoodSaturationZero = true;
      public int lastSentExp = -99999999;
@@ -17,7 +17,7 @@ index 890cd6e15c..75437ec345 100644
      private ChatVisiblity chatVisibility = ChatVisiblity.FULL;
      public ParticleStatus particleStatus = ParticleStatus.ALL;
      private boolean canChatColor = true;
-@@ -958,6 +958,7 @@
+@@ -958,6 +959,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
          this.connection.tickClientLoadTimeout();
          this.gameMode.tick();
          this.wardenSpawnTracker.tick();
@@ -25,7 +25,7 @@ index 890cd6e15c..75437ec345 100644
          if (this.invulnerableTime > 0) {
              this.invulnerableTime--;
          }
-@@ -1544,6 +1544,13 @@
+@@ -1538,6 +1540,13 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
              return false;
          }
  

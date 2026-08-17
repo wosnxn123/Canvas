@@ -7,7 +7,7 @@ Ported from Lophine 0117, originally LeavesMC/Leaves (GPL-3.0, violetc/Bacteriaw
 Gated behind vanilla-like-experience.catchUpdateSuppression.
 
 diff --git a/net/minecraft/network/PacketProcessor.java b/net/minecraft/network/PacketProcessor.java
-index 109521f..0c5ec7b 100644
+index 109521f990fde0ae0ea5c7b10acbfcd99349c185..0c5ec7be4ea8c5a6ec16ff3ad6c67892ff257012 100644
 --- a/net/minecraft/network/PacketProcessor.java
 +++ b/net/minecraft/network/PacketProcessor.java
 @@ -82,7 +82,18 @@ public class PacketProcessor implements AutoCloseable {
@@ -30,7 +30,7 @@ index 109521f..0c5ec7b 100644
                          throw PacketUtils.makeReportedException(e, this.packet, this.listener);
                      }
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index 5abf060..28dce52 100644
+index 5abf060a4fcc027dee9eb076133576e4de9e9a57..28dce529b3d288963b28ce72a91e602b48523261 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
 @@ -1857,10 +1857,24 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
@@ -62,7 +62,7 @@ index 5abf060..28dce52 100644
  
              regionizedWorldData.explosionDensityCache.clear(); // Paper - Optimize explosions // Folia - region threading
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index 60d6fae..d3582db 100644
+index ff12863434a8e88fad6befb5c735a04a9c308ca7..df07eb054da2eacf6ef70f86437b2d64e1fdbc40 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
 @@ -950,7 +950,16 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
@@ -84,10 +84,10 @@ index 60d6fae..d3582db 100644
                              }
                          }
 diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
-index e4fec48..7415920 100644
+index 899e224b29d7758df31c6e3a11634b2431d35a98..d91c5fb277f4ebdaad8c9a031bd97743e705e4d8 100644
 --- a/net/minecraft/server/level/ServerPlayer.java
 +++ b/net/minecraft/server/level/ServerPlayer.java
-@@ -1139,6 +1139,12 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -1141,6 +1141,12 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
  
              // Folia - region threading - move to main tick loop where we can detect duplicates
              // CraftBukkit end
@@ -101,10 +101,10 @@ index e4fec48..7415920 100644
              CrashReport report = CrashReport.forThrowable(t, "Ticking player");
              CrashReportCategory category = report.addCategory("Player being ticked");
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index 209ce80..42d6245 100644
+index 8df822129d49683e701f5c409afff8d5d72032b9..ae0a63be87204337133638e27bf740e846be7d5f 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
-@@ -1500,8 +1500,18 @@ public abstract class Entity
+@@ -1549,8 +1549,18 @@ public abstract class Entity
              }
  
              if (shouldVibrate) {
@@ -126,7 +126,7 @@ index 209ce80..42d6245 100644
              return true;
          } else {
 diff --git a/net/minecraft/world/level/block/ShulkerBoxBlock.java b/net/minecraft/world/level/block/ShulkerBoxBlock.java
-index ccc3a38..e27413c 100644
+index ccc3a380f892d1238952a224c7cbb15938cbfd92..e27413c4c448527970a757aef110a97f5691b8be 100644
 --- a/net/minecraft/world/level/block/ShulkerBoxBlock.java
 +++ b/net/minecraft/world/level/block/ShulkerBoxBlock.java
 @@ -183,7 +183,16 @@ public class ShulkerBoxBlock extends BaseEntityBlock {
@@ -148,7 +148,7 @@ index ccc3a38..e27413c 100644
  
      public @Nullable DyeColor getColor() {
 diff --git a/net/minecraft/world/level/block/state/StateHolder.java b/net/minecraft/world/level/block/state/StateHolder.java
-index 47a4aa4..a63fdba 100644
+index 47a4aa4a45978dfec52ea995d197022f4fe32808..a63fdbaf07c7fc2bb78bb03706f1bb9c8c6ecb52 100644
 --- a/net/minecraft/world/level/block/state/StateHolder.java
 +++ b/net/minecraft/world/level/block/state/StateHolder.java
 @@ -117,7 +117,16 @@ public abstract class StateHolder<O, S> implements ca.spottedleaf.moonrise.patch
@@ -170,7 +170,7 @@ index 47a4aa4..a63fdba 100644
      }
  
 diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
-index aed8730..a40f35d 100644
+index aed8730ec0a7b13e7a214212dfe19616555a820e..a40f35d4dc685eaff04525afeec47611c16e1acd 100644
 --- a/net/minecraft/world/level/chunk/LevelChunk.java
 +++ b/net/minecraft/world/level/chunk/LevelChunk.java
 @@ -400,6 +400,8 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
@@ -195,7 +195,7 @@ index aed8730..a40f35d 100644
  
      @Deprecated
 diff --git a/net/minecraft/world/level/redstone/NeighborUpdater.java b/net/minecraft/world/level/redstone/NeighborUpdater.java
-index 041ed95..0bc5eed 100644
+index 041ed95948ff6bb4cf3610ce4522a6ba105b6812..0bc5eed8d629265523eb4545567ed4155a2ffb71 100644
 --- a/net/minecraft/world/level/redstone/NeighborUpdater.java
 +++ b/net/minecraft/world/level/redstone/NeighborUpdater.java
 @@ -84,9 +84,19 @@ public interface NeighborUpdater {

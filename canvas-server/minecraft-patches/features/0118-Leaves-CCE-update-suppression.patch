@@ -7,7 +7,7 @@ Ported from Lophine 0118, originally LeavesMC/Leaves (GPL-3.0, violetc/Bacteriaw
 Gated behind vanilla-like-experience.cceUpdateSuppression.
 
 diff --git a/net/minecraft/world/level/block/ShulkerBoxBlock.java b/net/minecraft/world/level/block/ShulkerBoxBlock.java
-index e27413c..6b65a15 100644
+index e27413c4c448527970a757aef110a97f5691b8be..6b65a15b63cc63416b6409e9b552e95c3e0c2de9 100644
 --- a/net/minecraft/world/level/block/ShulkerBoxBlock.java
 +++ b/net/minecraft/world/level/block/ShulkerBoxBlock.java
 @@ -185,7 +185,9 @@ public class ShulkerBoxBlock extends BaseEntityBlock {

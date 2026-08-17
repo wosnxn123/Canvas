@@ -6,10 +6,10 @@ Subject: [PATCH] Old leader zombie health logic
 Ported from Lophine 0095 (MIT, Helvetica Volubi).
 
 diff --git a/net/minecraft/world/entity/monster/zombie/Zombie.java b/net/minecraft/world/entity/monster/zombie/Zombie.java
-index 6feec029a7..878b869936 100644
+index 6feec029a74902ebcf5156073a5592563206f4ba..878b86993650a6aada77f205dd8db75167d529a7 100644
 --- a/net/minecraft/world/entity/monster/zombie/Zombie.java
 +++ b/net/minecraft/world/entity/monster/zombie/Zombie.java
-@@ -601,7 +601,7 @@
+@@ -601,7 +601,7 @@ public class Zombie extends Monster {
                  .addOrReplacePermanentModifier(
                      new AttributeModifier(LEADER_ZOMBIE_BONUS_ID, this.random.nextDouble() * 3.0 + 1.0, AttributeModifier.Operation.ADD_MULTIPLIED_TOTAL)
                  );

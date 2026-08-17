@@ -7,10 +7,10 @@ Original to this fork: 5 command-block gates routed through
 global region execution (GPL-3.0, wosnxn123).
 
 diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
-index f66b4330ed..9532029f94 100644
+index 7bd499784fec8f89068eba04e2d67c5de3c44876..c3c246d006621d81da34b33351575fdbca70d856 100644
 --- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
 +++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
-@@ -987,7 +987,7 @@
+@@ -1019,7 +1019,7 @@ public class ServerGamePacketListenerImpl
      public void handleSetCommandBlock(final ServerboundSetCommandBlockPacket packet) {
          PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
          // Canvas start - region threading
@@ -19,7 +19,7 @@ index f66b4330ed..9532029f94 100644
              this.player.sendSystemMessage(Component.literal("Command blocks are not enabled with region threading"));
              return;
          }
-@@ -1054,7 +1054,7 @@
+@@ -1086,7 +1086,7 @@ public class ServerGamePacketListenerImpl
      public void handleSetCommandMinecart(final ServerboundSetCommandMinecartPacket packet) {
          PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
          // Canvas start - region threading
@@ -29,10 +29,10 @@ index f66b4330ed..9532029f94 100644
              return;
          }
 diff --git a/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java b/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java
-index 0be598cae2..bd21f4a4d0 100644
+index 0be598cae2a7c0ec34b31d812b56780f3a983e8f..bd21f4a4d0cb4a19c0940701c8d695ba1fdb44c0 100644
 --- a/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java
 +++ b/net/minecraft/world/entity/vehicle/minecart/MinecartCommandBlock.java
-@@ -88,7 +88,7 @@
+@@ -88,7 +88,7 @@ public class MinecartCommandBlock extends AbstractMinecart {
      @Override
      public InteractionResult interact(final Player player, final InteractionHand hand, final Vec3 location) {
          // Canvas start - region threading
@@ -41,7 +41,7 @@ index 0be598cae2..bd21f4a4d0 100644
              return InteractionResult.FAIL;
          }
          // Canvas end - region threading
-@@ -159,6 +159,19 @@
+@@ -159,6 +159,19 @@ public class MinecartCommandBlock extends AbstractMinecart {
          public void threadCheck() {
              ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(MinecartCommandBlock.this, "Asynchronous sendSystemMessage to a command block");
          }
@@ -62,10 +62,10 @@ index 0be598cae2..bd21f4a4d0 100644
      }
  }
 diff --git a/net/minecraft/world/level/BaseCommandBlock.java b/net/minecraft/world/level/BaseCommandBlock.java
-index afd2d882f9..5f55dfb089 100644
+index afd2d882f91ce999bc2a4cd50ca5cd3421de6a94..5f55dfb0893a8a5dd010a60d0c6414c44807eef1 100644
 --- a/net/minecraft/world/level/BaseCommandBlock.java
 +++ b/net/minecraft/world/level/BaseCommandBlock.java
-@@ -25,15 +25,31 @@
+@@ -25,15 +25,31 @@ public abstract class BaseCommandBlock {
      private static final int NO_LAST_EXECUTION = -1;
      private long lastExecution = -1L;
      private boolean updateLastExecution = true;
@@ -99,7 +99,7 @@ index afd2d882f9..5f55dfb089 100644
  
      public int getSuccessCount() {
          return this.successCount;
-@@ -91,7 +91,7 @@
+@@ -91,7 +107,7 @@ public abstract class BaseCommandBlock {
      }
  
      public boolean performCommand(final ServerLevel level) {
@@ -108,7 +108,7 @@ index afd2d882f9..5f55dfb089 100644
          if (level.getGameTime() == this.lastExecution) {
              return false;
          }
-@@ -107,11 +107,23 @@
+@@ -107,11 +123,23 @@ public abstract class BaseCommandBlock {
              try {
                  this.lastOutput = null;
  
@@ -134,7 +134,7 @@ index afd2d882f9..5f55dfb089 100644
                          }
                      });
                      // Paper start - ServerCommandEvent
-@@ -119,9 +119,10 @@
+@@ -119,9 +147,10 @@ public abstract class BaseCommandBlock {
                      if (!event.callEvent()) {
                          return true;
                      }
@@ -146,7 +146,7 @@ index afd2d882f9..5f55dfb089 100644
              } catch (Throwable t) {
                  CrashReport report = CrashReport.forThrowable(t, "Executing command block");
                  CrashReportCategory category = report.addCategory("Command to be executed");
-@@ -215,9 +215,18 @@
+@@ -215,9 +244,18 @@ public abstract class BaseCommandBlock {
          public void sendSystemMessage(final Component message) {
              if (this.trackOutput && !this.closed) { // Paper - add back source when output disabled
                  org.spigotmc.AsyncCatcher.catchOp("sendSystemMessage to a command block"); // Paper - Don't broadcast messages to command blocks
@@ -169,10 +169,10 @@ index afd2d882f9..5f55dfb089 100644
          }
  
 diff --git a/net/minecraft/world/level/block/CommandBlock.java b/net/minecraft/world/level/block/CommandBlock.java
-index 53507d88a1..df432b71a9 100644
+index 53507d88a14b788e096109cb6fec17de3fbaec4e..df432b71a90dfd27358822108bb560cedd95ee2a 100644
 --- a/net/minecraft/world/level/block/CommandBlock.java
 +++ b/net/minecraft/world/level/block/CommandBlock.java
-@@ -92,7 +92,7 @@
+@@ -92,7 +92,7 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
      @Override
      protected void tick(final BlockState state, final ServerLevel level, final BlockPos pos, final RandomSource random) {
          // Canvas start - region threading
@@ -181,7 +181,7 @@ index 53507d88a1..df432b71a9 100644
              return;
          }
          // Canvas end - region threading
-@@ -139,7 +139,7 @@
+@@ -139,7 +139,7 @@ public class CommandBlock extends BaseEntityBlock implements GameMasterBlock {
          final BlockState state, final Level level, final BlockPos pos, final Player player, final BlockHitResult hitResult
      ) {
          // Canvas start - region threading
@@ -191,10 +191,10 @@ index 53507d88a1..df432b71a9 100644
          }
          // Canvas end - region threading
 diff --git a/net/minecraft/world/level/block/entity/CommandBlockEntity.java b/net/minecraft/world/level/block/entity/CommandBlockEntity.java
-index 84e18b68c8..3d75cc8f0f 100644
+index 84e18b68c857cd5ddff45d1f19ffccb2ed42b304..3d75cc8f0f2bfe7992aa2dca30850a10a0200a4c 100644
 --- a/net/minecraft/world/level/block/entity/CommandBlockEntity.java
 +++ b/net/minecraft/world/level/block/entity/CommandBlockEntity.java
-@@ -74,6 +74,17 @@
+@@ -74,6 +74,17 @@ public class CommandBlockEntity extends BlockEntity {
          }
  
          // Folia end - region threading
