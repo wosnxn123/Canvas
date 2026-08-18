@@ -81,6 +81,17 @@
 
 Canvas 上游内置的 `canvas:pearls` 全局 SavedData 珍珠持久化已移除（`0129-Remove-Canvas-ender-pearl-persistence`，本 fork 原创），替换为 Lophine 的原版末影珍珠加载（`0130-Restore-vanilla-ender-pearl-loading`，Bacteriawa，GPL-3.0）：珍珠存入玩家数据 `ender_pearls`（vanilla 布局），珍珠在自身 region 线程更新 volatile 快照保证玩家保存不跨 region 读实体；退出登录时按 Paper 语义经 entity task scheduler 移除珍珠。**行为差异**：珍珠不再跨登停保留，仅在线时跨重启恢复；旧 `canvas:pearls` 存档数据替换后不再读取。
 
+### 6. Linear 区域格式（2026-08-18 移植）
+
+移植自 [Winds-Studio/Leaf](https://github.com/Winds-Studio/Leaf) `ver/26.2@a05f8902`（Luminol 框架 + Abomination Linear V2，均 GPL-3.0-only）：区块存储格式可插拔，支持 **zstd+LZ4 压缩**，官方数据约省 50% 磁盘。
+
+- 配置：`config/canvas-server.yml` → `region-format.format-name`（默认 `MCA`）
+- 可选格式：`MCA`（原版）/ `LINEAR_V2`（`.linear`，**作者自认不稳定、有丢数据风险，仅建议配合备份使用**）/ `B_LINEAR`（`.b_linear`，缓冲写，相对稳定的 Linear 变体）
+- 附带参数：`compression-level`（zstd 1-22，默认 6）、`io-thread-count`、`io-flush-delay`、`linear-use-virtual-thread`
+- **不支持混合格式**：磁盘扩展名与配置不一致会按设计延迟崩溃；已有世界换格式需外部转换器，服务器不做运行时迁移
+- LINEAR_V2/B_LINEAR 文件与原版/Amulet/mcaselector 等工具链不兼容
+
+
 ### 分支
 
 `main` 跟踪 Canvas 上游 `main`，也是服务器构建和部署使用的分支。旧的 `pre-merger/26.2` 说明已经过时，不再作为当前维护基线。
@@ -100,7 +111,9 @@ Canvas 上游内置的 `canvas:pearls` 全局 SavedData 珍珠持久化已移除
 | `0094`/`0095`/`0096`/`0098`/`0101`/`0104` | **本 fork**（移植） | old-feature 六项，与 Lophine `OldFeatureConfig` 对齐，见 §3 |
 | `0028`/`0034`/`0045`/`0065`/`0093`/`0117`/`0118`/`0121`/`0122`/`0124`/`0125` | **本 fork**（移植） | 2026-08-07 新增移植，见 §4；编号对齐 Lophine `dev/26.2-hardfork@0724ba3f` |
 | `0129-Remove-Canvas-ender-pearl-persistence` | **本 fork 原创** | 移除 Canvas 内置 `canvas:pearls` SavedData 珍珠持久化，恢复 Paper 保存/退出路径 |
+| `0107-Luminol-Configurable-region-format-framework` | **本 fork**（移植） | Leaf `0107`@`a05f8902`（Luminol 框架 GPL-3.0 + Abomination Linear V2 GPL-3.0）：区域格式可插拔（MCA/LINEAR_V2/B_LINEAR），见 §6 |
 | `0130-Restore-vanilla-ender-pearl-loading` | **本 fork**（移植） | Lophine `0130`@`0724ba3f`（Bacteriawa，GPL-3.0）：原版珍珠加载，region 安全快照 |
+2026-08-18（Linear）：从 Leaf `ver/26.2@a05f8902` 固定提交移植 Linear 区域格式全家桶（0107 框架补丁 + `io.canvasmc.canvas.regionformat` 包 7 文件 + zstd-jni/zero-allocation-hashing 依赖 + `GlobalConfiguration.RegionFormat` 配置段）。本地验证：MCA/LINEAR_V2/B_LINEAR 三格式新世界启动均生成正确扩展名，B_LINEAR 与 LINEAR_V2 世界重启读取无错。Lophine 的匿名化版本（`0007`）因无不可变来源链接被排除，来源政策见 PROVENANCE。
 
 2026-07-14 已与 `LophineCraft/Lophine` `dev/26.2@f4aea025` 复核：0048 仍覆盖相同的 17 个原版机制；0013 和已更名的 `0014-Old-leader-zombie-health-logic.patch` 与本 fork 的两个 OldFeature 选项语义一致。
 

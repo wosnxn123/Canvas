@@ -110,6 +110,8 @@ The ledger rows below cover the original 0003 groups and the new ports:
 | Old block remove behaviour | Derived/ported | [Lophine `0124-Leaves-Old-Block-remove-behaviour` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0124-Leaves-Old-Block-remove-behaviour.patch), origin LeavesMC/Leaves | Helvetica Volubi, co-authored violetc | **GPL-3.0**, as declared in the patch body | Gated by `oldBlockRemoveBehaviour`. |
 | Mob fire and explosion rules | Derived/ported | [Lophine `0125-MiniTweaks-mob-fire-and-explosion-rules` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0125-MiniTweaks-mob-fire-and-explosion-rules.patch), origin MiniTweaks | Bacteriawa `<A3167717663@hotmail.com>` | **GPL-3.0** (Lophine repository license; no MIT opt-in for this author) | Split into four flags: `noGhastBlockBreaking`, `noCreeperBlockBreaking`, `disableGhastFire`, `disableBlazeFire`. |
 | Vanilla ender pearl loading | Derived/ported | [Lophine `0130-Restore-vanilla-ender-pearl-loading` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0130-Restore-vanilla-ender-pearl-loading.patch) (`0049` on `ver/26.2@fc3415e6`) | Bacteriawa `<A3167717663@hotmail.com>` | **GPL-3.0** (Lophine repository license) | Replaces the Canvas upstream `canvas:pearls` SavedData persistence removed by fork-original `0129`; pearls save into player data (vanilla `ender_pearls` layout) via a region-owned volatile snapshot updated on the pearl's region thread. |
+| Region format framework + Buffered Linear | Derived/ported | [Leaf `0107-Luminol-Configurable-region-format-framework` at `a05f8902`](https://github.com/Winds-Studio/Leaf/blob/a05f8902de772298bbdf28142eef6cef003ea5c7/leaf-server/minecraft-patches/features/0107-Luminol-Configurable-region-format-framework.patch), origin [LuminolMC/Luminol](https://github.com/LuminolMC/Luminol) (framework + B_LINEAR) | Helvetica Volubi relay; framework by LuminolMC | **GPL-3.0-only**, as declared in the patch body | Packages relocated `abomination.*`/`me.earthme.luminol.*` → `io.canvasmc.canvas.regionformat`; Leaf TOML config replaced by `GlobalConfiguration.RegionFormat` with `initFormat()` in `postLoad`. |
+| Linear V2 region format | Derived/ported | [Leaf `abomination/LinearRegionFile.java` at `a05f8902`](https://github.com/Winds-Studio/Leaf/blob/a05f8902de772298bbdf28142eef6cef003ea5c7/leaf-server/src/main/java/abomination/LinearRegionFile.java), origin [xymb-endcrystalme/Abomination](https://github.com/xymb-endcrystalme/Abomination) | Xymb `<xymb@endcrystal.me>` | **GPL-3.0-only** (Abomination) | Repackaged to `io.canvasmc.canvas.regionformat.LinearRegionFile`; upstream marks it unstable (data-loss warning) — B_LINEAR is the recommended Linear variant. |
 
 ### MIT opt-in is personal, not transitive
 
@@ -278,6 +280,35 @@ semantics. Behavioural difference versus the removed mechanism: pearls no
 longer survive player logout (Paper semantics); they survive restarts only
 while the owner is online. Pre-existing `canvas:pearls` save data is ignored
 after the swap.
+
+### Linear region formats ported 2026-08-18
+
+`0107-Luminol-Configurable-region-format-framework.patch` plus the
+`io.canvasmc.canvas.regionformat` package (7 Java files, ~90KB) port the
+pluggable region format framework from Winds-Studio/Leaf
+`ver/26.2@a05f8902` (pinned). Formats: `MCA` (default, vanilla), `LINEAR_V2`
+(`.linear`, Abomination, unstable — author warns of data loss), `B_LINEAR`
+(`.b_linear`, Luminol buffered). Selected via `canvas-server.yml`
+`region-format.*`; `initFormat()` runs from `GlobalConfiguration.postLoad`.
+Dependencies added: `com.github.luben:zstd-jni:1.5.7-9`,
+`net.openhft:zero-allocation-hashing:2026.0`.
+
+Operational invariants a future change must preserve:
+
+1. **No mixed formats.** A world whose on-disk region extension mismatches the
+   configured format delays a crash by design (`RegionFileStorage.createNew`);
+   converting an existing world requires an external converter. Do not "fix"
+   this into silent fallback.
+2. **The Lophine `0007` variant of this framework was NOT used**: it is
+   anonymised (original commit hidden) and carries no immutable source link,
+   failing this ledger's requirements. Leaf `a05f8902` is the pinned source.
+3. **Format init must precede world load** — currently guaranteed by
+   `postLoad`; if config loading moves, re-verify spawn-region files are
+   created in the configured format on a fresh world.
+
+Verified locally 2026-08-18: fresh-world boots create the correct extension
+for all three formats; B_LINEAR and LINEAR_V2 worlds restart and re-read
+cleanly (Done 21s / 48s, no ERROR).
 
 ### License notices
 
