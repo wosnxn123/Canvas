@@ -1,0 +1,185 @@
+
+diff --git a/io/papermc/paper/threadedregions/RegionizedServer.java b/io/papermc/paper/threadedregions/RegionizedServer.java
+index 0fdfc2b1e2ee36a177a2eee2438ef190f85ba71b..e5dfda2c43daadde679690810b41431df48a21e3 100644
+--- a/io/papermc/paper/threadedregions/RegionizedServer.java
++++ b/io/papermc/paper/threadedregions/RegionizedServer.java
+@@ -163,6 +163,11 @@ public final class RegionizedServer {
+ 
+     public static void ensureGlobalTickThread(final String reason) {
+         if (!isGlobalTickThread()) {
++            // Lophinya start - the bootstrap thread owns global state during startup, before any region ticks
++            if (io.canvasmc.canvas.compat.LophinyaStartupGlobalContext.allow(reason)) {
++                return;
++            }
++            // Lophinya end
+             LOGGER.error(reason, new Throwable()); // Canvas - log ts like TickThread does
+             throw new IllegalStateException(reason);
+         }
+@@ -261,6 +266,7 @@ public final class RegionizedServer {
+         final DedicatedServer minecraftServer = (DedicatedServer) MinecraftServer.getServer();
+ 
+         ++this.tickCount;
++        if (io.canvasmc.canvas.GlobalConfiguration.getInstance().pluginCompat.serverCurrentTick) MinecraftServer.currentTick = (int) this.tickCount; // Lophinya - restore currentTick, single writer is this global tick
+ 
+         // expire invalid click command callbacks
+         ClickCallbackProviderImpl.ADVENTURE_CLICK_MANAGER.handleQueue((int)this.tickCount); // Paper // Folia - region threading - moved to global tick
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index f147568ecac8604519b5269de6621071e91e52ed..b0e907fc5d4b1a88e8a066105a18c6a5a0550005 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -299,7 +299,13 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+     public org.bukkit.craftbukkit.CraftServer server;
+     public joptsimple.OptionSet options;
+     public org.bukkit.command.ConsoleCommandSender console;
+-    // public static int currentTick; // Paper - improve tick loop // Folia - region threading
++    // Lophinya start - restore currentTick with global-region semantics
++    // Paper's counter advanced once per main-thread tick and is part of the de-facto plugin
++    // surface: FastAsyncWorldEdit reads it reflectively and its NMS adapter dies on
++    // NoSuchFieldError without it. The global region tick is that loop's successor on this fork
++    // (see RegionizedServer.globalTick, the single writer). volatile: cross-thread readers.
++    public static volatile int currentTick; // Paper - improve tick loop // Folia - region threading
++    // Lophinya end - restore currentTick
+     public java.util.Queue<Runnable> processQueue = new java.util.concurrent.ConcurrentLinkedQueue<Runnable>();
+     public int autosavePeriod;
+     // Paper - don't store the vanilla dispatcher
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index df07eb054da2eacf6ef70f86437b2d64e1fdbc40..4c3f87e0c20839ff97e4133d51dacfa9918f4366 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -734,6 +734,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     // Canvas start - region threading
+     public final io.canvasmc.canvas.util.ticket.TicketHolder<io.canvasmc.canvas.util.ticket.UnloadTicket>
+         canvas$unloadTicket = new io.canvasmc.canvas.util.ticket.TicketHolder<>();
++
++    // Lophinya start - Level hot unload apis (adapter)
++    // Read-reference guard for ported Luminol/Lophinya patches. Backed by Canvas's native
++    // world-stage protection (canvas$worldStageLock + canvas$unloadTicket + joiningPlayers),
++    // NOT by Luminol's SimpleReferenceRWLock - Canvas owns world unloading itself.
++    public final io.canvasmc.canvas.levelscheduler.LevelUnloadStateLockAdapter levelUnloadStateLock =
++        new io.canvasmc.canvas.levelscheduler.LevelUnloadStateLockAdapter(this);
++    // Lophinya end - Level hot unload apis (adapter)
+     // this lock should be used whenever we need to check or modify the unload state of the world
+     private final java.util.concurrent.locks.ReentrantLock canvas$worldStageLock = new java.util.concurrent.locks.ReentrantLock(true);
+     public final java.util.concurrent.CopyOnWriteArrayList<String> canvas$joiningPlayers = new java.util.concurrent.CopyOnWriteArrayList<>();
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index ebbb85a951ab01fda2e6e20abe9d63fe7a85c207..e18dbcec36a72e730c1bb253aa5689d0b3cc5efc 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -4650,6 +4650,12 @@ public abstract class Entity
+         }
+ 
+         if (!this.canTeleportAsync()) {
++            // Lophinya - D-40 diagnostics: print which of canTeleportAsync()'s predicates said no.
++            // Off by default; cannot affect the refusal, which has already been decided.
++            if (io.canvasmc.canvas.GlobalConfiguration.getInstance().pluginCompat.teleportRefusalDiagnostics) {
++                io.canvasmc.canvas.compat.LophinyaTeleportRefusalDiagnostics.reportRefusal(this, destination, pos);
++            }
++            // Lophinya end - D-40 diagnostics
+             throw new TeleportValidationException("Entity not able to teleport async. Is the entity removed or in a bed?");
+         }
+         this.getBukkitEntity(); // force bukkit entity to be created before TPing
+@@ -4776,6 +4782,31 @@ public abstract class Entity
+             canvas$ensureCanTeleportAsync(destination, pos, teleportFlags);
+         }
+ 
++        // Lophinya start - fire the Bukkit teleport events Folia left unimplemented
++        // (PlayerTeleportEvent for players / EntityTeleportEvent otherwise). Placed after Canvas's
++        // own EntityTeleportAsyncEvent and its re-validation: a cancel is a plain return false,
++        // nothing mutated past this point, no lock to unwind. setTo redirection is honoured.
++        if (io.canvasmc.canvas.GlobalConfiguration.getInstance().pluginCompat.teleportEvents) {
++            final io.canvasmc.canvas.compat.LophinyaTeleportEvents.Destination lophinyaDestination =
++                io.canvasmc.canvas.compat.LophinyaTeleportEvents.callTeleportEvent(this, destination, pos, yaw, pitch, cause);
++            if (lophinyaDestination == null) {
++                return false;
++            }
++            destination = lophinyaDestination.level();
++            pos = lophinyaDestination.pos();
++            yaw = lophinyaDestination.yaw();
++            pitch = lophinyaDestination.pitch();
++        }
++        // Lophinya end - fire the Bukkit teleport events
++
++        // Lophinya start - the same events for the passengers this teleport carries along
++        // The tree is still attached here and the vehicle has not moved, so the vehicle's own
++        // from/to is what every node is about to be moved to. No lock held yet.
++        if (io.canvasmc.canvas.GlobalConfiguration.getInstance().pluginCompat.passengerTeleportEvents) {
++            io.canvasmc.canvas.compat.LophinyaPassengerTeleportEvents.callForPassengers(this, destination, pos, yaw, pitch, cause);
++        }
++        // Lophinya end - passenger teleport events
++
+         // verify and set the transfer state
+         final io.canvasmc.canvas.threadedregions.entities.EntityRegionTransferState previousTransferState = getRegionTransferState();
+         if (previousTransferState == null) {
+@@ -4896,6 +4927,14 @@ public abstract class Entity
+             // reset the teleporting fields, we finished the teleport
+             clearRegionTransferState();
+ 
++            // Lophinya start - PlayerChangedWorldEvent; placeInAsync also runs for same-world
++            // cross-region moves, so the world really has to have changed. Fired before
++            // teleportComplete because handlers should run before caller completion.
++            if (originWorld != destination && io.canvasmc.canvas.GlobalConfiguration.getInstance().pluginCompat.teleportEvents) {
++                io.canvasmc.canvas.compat.LophinyaTeleportEvents.callChangedWorld((Entity) entity, originWorld);
++            }
++            // Lophinya end - PlayerChangedWorldEvent
++
+             // we need to check if the entity displayed the loading screen
+             if (entity instanceof ServerPlayer serverPlayer && displayedScreen.isTrue()) {
+                 serverPlayer.refresh(false);
+@@ -6723,6 +6762,13 @@ public abstract class Entity
+ 
+     @Override
+     public void setLevelCallback(final EntityInLevelCallback levelCallback) {
++        // Lophinya - D-40 diagnostics: record when the entity leaves and rejoins the level lookup.
++        // Off by default, prints only on a NULL <-> set transition, and cannot alter the assignment
++        // below. See LophinyaTeleportRefusalDiagnostics.
++        if (io.canvasmc.canvas.GlobalConfiguration.getInstance().pluginCompat.teleportRefusalDiagnostics) {
++            io.canvasmc.canvas.compat.LophinyaTeleportRefusalDiagnostics.reportCallbackTransition(this, this.levelCallback, levelCallback);
++        }
++        // Lophinya end
+         this.levelCallback = levelCallback;
+     }
+ 
+diff --git a/net/minecraft/world/entity/Entity.java.rej b/net/minecraft/world/entity/Entity.java.rej
+new file mode 100644
+index 0000000000000000000000000000000000000000..1b339644b549930b405e105e7a866f8e2d2298bd
+--- /dev/null
++++ b/net/minecraft/world/entity/Entity.java.rej
+@@ -0,0 +1,15 @@
++diff a/java/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java	(rejected hunks)
++@@ -4558,6 +4558,13 @@ public abstract class Entity
++         }
++ 
++         if (!this.canTeleportAsync()) {
+++            // Lophinya - D-40 diagnostics: this return is the silent second teleport. Print which of
+++            // canTeleportAsync()'s four predicates said no, rather than guessing from outside again.
+++            // Off by default; cannot affect the refusal, which has already been decided.
+++            if (io.canvasmc.canvas.GlobalConfiguration.getInstance().pluginCompat.teleportRefusalDiagnostics) {
+++                io.canvasmc.canvas.compat.LophinyaTeleportRefusalDiagnostics.reportRefusal(this, destination, pos);
+++            }
+++            // Lophinya end
++             return false;
++         }
++         this.getBukkitEntity(); // force bukkit entity to be created before TPing
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index aa82f0d0db479b1283339896a5d57de9738fa76d..1a35933ca297389f0f013fbc2c55788c9749b387 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -1,5 +1,6 @@
+ package net.minecraft.world.level;
+ 
++import ca.spottedleaf.moonrise.common.util.TickThread;
+ import com.google.common.collect.Lists;
+ import com.mojang.serialization.Codec;
+ import java.io.IOException;
+@@ -1016,6 +1017,11 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+     @Override
+     @Nullable
+     public final BlockState getBlockStateIfLoaded(BlockPos pos) {
++        // Lophinya start - attribute the off-region read instead of letting it NPE on a field name
++        if (io.canvasmc.canvas.GlobalConfiguration.getInstance().pluginCompat.regionReadDiagnostics && this.getCurrentWorldData() == null) {
++            TickThread.ensureTickThread(this, pos, "Cannot read block state off-region");
++        }
++        // Lophinya end
+         // CraftBukkit start - tree generation
+         if (this.getCurrentWorldData().captureTreeGeneration) { // Folia - region threading
+             CraftBlockState previous = this.getCurrentWorldData().capturedBlockStates.get(pos); // Folia - region threading
