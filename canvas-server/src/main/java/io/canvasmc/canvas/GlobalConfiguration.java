@@ -45,6 +45,9 @@ import net.minecraft.world.level.levelgen.RandomSupport;
 import org.apache.commons.lang3.mutable.MutableInt;
 import org.jetbrains.annotations.UnknownNullability;
 import org.jspecify.annotations.NullMarked;
+import io.canvasmc.canvas.regionformat.BufferedLinearRegionFileFlusher;
+import io.canvasmc.canvas.regionformat.EnumRegionFormat;
+import io.canvasmc.canvas.regionformat.LinearRegionFile;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -164,6 +167,10 @@ public class GlobalConfiguration extends Part {
 
         // validate the configuration so users don't end up doing a stupid
         Validator.validateObject(configuration);
+
+        // initialize the region format (Linear/B_LINEAR machinery) after validation;
+        // format changes require a restart - re-init only happens on clean reload
+        configuration.regionFormat.initFormat();
 
         if (TickRegions.hasStarted()) {
 
@@ -627,6 +634,85 @@ public class GlobalConfiguration extends Part {
     }
 
     public OldFeature oldFeature = new OldFeature();
+
+    public RegionFormat regionFormat = new RegionFormat();
+
+    public static class RegionFormat extends Part {
+
+        {
+            option("formatName")
+                .docs(
+                    Style.wrap(
+                        "Region file format for world storage: MCA (vanilla anvil), LINEAR_V2 (zstd+LZ4,",
+                        "~50% disk savings, unstable - back up worlds; author warns of data loss), or",
+                        "B_LINEAR (buffered zstd, the more stable Linear variant). ALL region files in a",
+                        "world must share the configured format - a mismatched on-disk extension delays a",
+                        "crash by design. Converting an existing world requires an external converter;",
+                        "the server does not migrate formats at runtime. Default MCA. Ported from",
+                        "Winds-Studio/Leaf 0107 (Luminol framework + Abomination Linear V2, GPL-3.0-only)."
+                    )
+                );
+            option("compressionLevel")
+                .docs(
+                    Style.wrap(
+                        "zstd compression level for LINEAR_V2/B_LINEAR, 1-22. Higher saves more disk at",
+                        "more CPU. Values outside 1-22 fall back to 1 with an error log. Default 6."
+                    )
+                );
+            option("ioThreadCount")
+                .docs(
+                    Style.wrap(
+                        "LINEAR_V2 save thread pool size (B_LINEAR flusher thread count). Default 6."
+                    )
+                );
+            option("ioFlushDelay")
+                .docs(
+                    Style.wrap(
+                        "Flush delay in ms; <=0 uses 100 for LINEAR_V2 and 3000 for B_LINEAR. Default -1."
+                    )
+                );
+            option("linearUseVirtualThread")
+                .docs(
+                    Style.wrap(
+                        "LINEAR_V2 save threads use JDK virtual threads. Default true."
+                    )
+                );
+        }
+
+        public String formatName = "MCA";
+        public int compressionLevel = 6;
+        public int ioThreadCount = 6;
+        public int ioFlushDelay = -1;
+        public boolean linearUseVirtualThread = true;
+
+        public transient EnumRegionFormat format = EnumRegionFormat.MCA;
+        public transient BufferedLinearRegionFileFlusher blinearFlusher = null;
+
+        public void initFormat() {
+            this.format = EnumRegionFormat.fromString(this.formatName);
+            if (this.format == EnumRegionFormat.UNKNOWN) {
+                LOGGER.error("Unknown region format type {}! Falling back to MCA format.", this.formatName);
+                this.format = EnumRegionFormat.MCA;
+                this.formatName = "MCA";
+                return;
+            }
+            if (this.compressionLevel > 22 || this.compressionLevel < 1) {
+                LOGGER.error("Region format compression level should be between 1 and 22, but got {}. Falling back to 1.", this.compressionLevel);
+                this.compressionLevel = 1;
+            }
+            if (this.format == EnumRegionFormat.LINEAR_V2) {
+                LOGGER.warn("Linear v2 region format is unstable and not recommended to use, beware of data loss and take backups.");
+                LinearRegionFile.SAVE_DELAY_MS = this.ioFlushDelay <= 0 ? 100 : this.ioFlushDelay;
+                LinearRegionFile.SAVE_THREAD_MAX_COUNT = this.ioThreadCount;
+                LinearRegionFile.USE_VIRTUAL_THREAD = this.linearUseVirtualThread;
+            }
+            if (this.format == EnumRegionFormat.B_LINEAR) {
+                final int delay = this.ioFlushDelay <= 0 ? 3000 : this.ioFlushDelay;
+                this.blinearFlusher = new io.canvasmc.canvas.regionformat.BufferedLinearRegionFileFlusher(this.ioThreadCount, 20, delay);
+                Runtime.getRuntime().addShutdownHook(new Thread(() -> this.blinearFlusher.shutdown(), "blinear-flusher-shutdown"));
+            }
+        }
+    }
     public static class OldFeature extends Part {
 
         {
