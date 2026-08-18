@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: wosnxn123 <wosnxn123@users.noreply.github.com>
-Date: Mon, 18 Aug 2026 21:00:00 +0800
+Date: Mon, 18 Aug 2026 23:30:00 +0800
 Subject: [PATCH] Lecithin: restore blocked plugin APIs at the Bukkit boundary
 
 Ported from LophineLabs/Lecithin dev/26.2@586cd088 paper-patches 0002-0012, 0014
@@ -19,6 +19,14 @@ Restores at the Bukkit/CraftBukkit boundary:
   wait (0010, D-40), adapted to Canvas's PluginTeleportAsyncState flow
 - async task context inheritance (0011); console dispatch to global region (0012)
 - cross-region block read from resident chunk (0014)
+
+Canvas-side hardening (production incident 2026-08-18, TPA double-teleport
+killed a region tick): a PluginTeleportAsyncState left behind by a REFUSED
+teleport was never cleared, and the next teleport's guard then threw
+IllegalStateException straight through EntityScheduler.executeTick. Now:
+stale plugin states are replaced instead of throwing (foreign handoffs still
+throw), failed futures clear their own state, and the scheduled teleport
+lambda resolves the future instead of letting exceptions kill the region.
 
 All behavior gated by canvas-server.yml plugin-compat.* (default true, see
 GlobalConfiguration.PluginCompat). Canvas adaptations: contexts re-anchored
@@ -208,7 +216,7 @@ index 0a8d399ac437201b9077387ed0c409b26a3b66ee..aa55950d996a675d50702896e194d42b
          }
          // Folia end - region threading
 diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
-index 44bb09e644c1b7aa41b2cfcd34e2f0cbc88828af..a389ae97c2858fcd5fc2342b54fa7340ae3d1d09 100644
+index 44bb09e644c1b7aa41b2cfcd34e2f0cbc88828af..5ef3d28cfe2288312226348f1af91c835ffcfed6 100644
 --- a/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
 +++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
 @@ -315,8 +315,13 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
@@ -248,7 +256,7 @@ index 44bb09e644c1b7aa41b2cfcd34e2f0cbc88828af..a389ae97c2858fcd5fc2342b54fa7340
                  ret.complete(Boolean.FALSE);
              }
          };
-@@ -1195,7 +1208,12 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
+@@ -1195,7 +1208,14 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
              );
          // Canvas end - region threading
  
@@ -259,9 +267,70 @@ index 44bb09e644c1b7aa41b2cfcd34e2f0cbc88828af..a389ae97c2858fcd5fc2342b54fa7340
 +        // Take the scheduler path the platform already has for "not ours to move right now".
 +        if (org.bukkit.Bukkit.isOwnedByCurrentRegion(this) && !io.canvasmc.canvas.compat.LophinyaTeleportHandover.isMidHandover(this)) {
 +            // Lophinya end
++            // Lophinya start - leak guard: clear our state when the call resolves without success
++            canvas$cleanupPluginTeleportStateOnFailure(ret);
              setPluginTransferState(transferState); // Canvas - region threading
              run.accept(this.getHandle());
              return ret;
+@@ -1206,8 +1226,19 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
+             // Canvas start - region threading
+             (newEntity) -> {
+                 // set the transfer state first, then teleport
+-                setPluginTransferState(transferState);
+-                run.accept(newEntity);
++                // Lophinya start - production incident 2026-08-18: this lambda runs inside
++                // EntityScheduler.executeTick on the region thread. An IllegalStateException
++                // from the state guard (or a TeleportValidationException from the NMS layer)
++                // used to propagate and kill the whole region tick. Resolve the future instead;
++                // a refused teleport must fail the call, not the server.
++                canvas$cleanupPluginTeleportStateOnFailure(ret);
++                try {
++                    setPluginTransferState(transferState);
++                    run.accept(newEntity);
++                } catch (final Throwable t) {
++                    ret.completeExceptionally(t);
++                }
++                // Lophinya end - production incident 2026-08-18
+             },
+             // Canvas end - region threading
+             // retired
+@@ -1233,11 +1264,35 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
+     ) {
+         final io.canvasmc.canvas.threadedregions.entities.EntityRegionTransferState previousTransferState = getHandleRaw().getRegionTransferState();
+         if (previousTransferState != null) {
+-            throw new IllegalStateException("Cannot teleport async when another region handoff is present! Current: " + previousTransferState);
++            // Lophinya start - stale plugin teleport state hardening (production incident 2026-08-18)
++            // A plugin teleport state is only meaningful while its own call is in flight. If the NMS
++            // teleport was refused or threw after the state was set, Canvas never cleared it, and the
++            // NEXT teleport then died here with IllegalStateException - killing the whole region tick
++            // via EntityScheduler.executeTick. Replace the dead state; only foreign (non-plugin)
++            // handoffs are unrecoverable.
++            if (!(previousTransferState instanceof io.canvasmc.canvas.threadedregions.entities.EntityRegionTransferState.PluginTeleportAsyncState)) {
++                throw new IllegalStateException("Cannot teleport async when another region handoff is present! Current: " + previousTransferState);
++            }
++            getHandleRaw().clearRegionTransferState();
++            // Lophinya end - stale plugin teleport state hardening
+         }
+ 
+         getHandleRaw().setRegionTransferState(setTo);
+     }
++    // Lophinya start - leak guard for refused plugin teleports
++    private void canvas$cleanupPluginTeleportStateOnFailure(final java.util.concurrent.CompletableFuture<Boolean> future) {
++        future.whenComplete((result, error) -> {
++            if (Boolean.TRUE.equals(result)) {
++                return; // success path clears the state itself before completing TRUE
++            }
++            final io.canvasmc.canvas.threadedregions.entities.EntityRegionTransferState state =
++                getHandleRaw().getRegionTransferState();
++            if (state instanceof io.canvasmc.canvas.threadedregions.entities.EntityRegionTransferState.PluginTeleportAsyncState) {
++                getHandleRaw().clearRegionTransferState();
++            }
++        });
++    }
++    // Lophinya end - leak guard for refused plugin teleports
+     // Canvas end - region threading
+     // Paper end - more teleport API / async chunk API
+ 
 diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
 index 3c725f1335f28c786c015c8ec5786c96b9e907dc..c919860478c8b1ae083e00b08fd1b30d23e5b083 100644
 --- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
