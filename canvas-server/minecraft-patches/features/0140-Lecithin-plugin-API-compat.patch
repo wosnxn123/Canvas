@@ -4,21 +4,19 @@ Date: Mon, 18 Aug 2026 20:00:00 +0800
 Subject: [PATCH] Lecithin: plugin API compatibility (NMS layer)
 
 Ported from LophineLabs/Lecithin dev/26.2@586cd088 (TinyYana, GPL-3.0 via
-Lecithin/Lophine/Folia inheritance chain):
-- fire the Bukkit teleport events Folia left unimplemented (nms-0001)
-- make an off-region block read fail attributably (nms-0002)
-- fire teleport events for teleported vehicles' passengers (nms-0003)
-- diagnostics for the same-tick teleport refusal D-40 (nms-0004, default off)
-- restore MinecraftServer.currentTick for FAWE (nms-0005)
-- let the startup bootstrap thread satisfy ensureGlobalTickThread (nms-0006)
+Lecithin/Lophine/Folia inheritance chain): Bukkit teleport events (nms-0001),
+attributable off-region block read failure (nms-0002), passenger teleport
+events (nms-0003), D-40 refusal diagnostics (nms-0004, default off),
+MinecraftServer.currentTick restore for FAWE (nms-0005), startup bootstrap
+global-context allowance (nms-0006).
 
-Canvas adaptations: config gates rewritten to GlobalConfiguration.pluginCompat.*;
+Canvas adaptations: config gates -> GlobalConfiguration.pluginCompat.*;
 unload-lock hooks bridged to Canvas's native canvas$worldStageLock/unloadTicket
-via LevelUnloadStateLockAdapter (Luminol's SimpleReferenceRWLock subsystem NOT
+via LevelUnloadStateLockAdapter (Luminol SimpleReferenceRWLock subsystem NOT
 ported - Canvas owns world unloading); D-40 diagnostics hooked at Canvas's
-TeleportValidationException sites (Canvas throws instead of silently returning
-false); event hooks re-anchored after Canvas's own EntityTeleportAsyncEvent.
-
+TeleportValidationException sites; event hooks re-anchored after Canvas's own
+EntityTeleportAsyncEvent; event-adjusted teleport vars captured as effectively
+final for the completion lambda.
 
 diff --git a/io/papermc/paper/threadedregions/RegionizedServer.java b/io/papermc/paper/threadedregions/RegionizedServer.java
 index 0fdfc2b1e2ee36a177a2eee2438ef190f85ba71b..e5dfda2c43daadde679690810b41431df48a21e3 100644
@@ -83,7 +81,7 @@ index df07eb054da2eacf6ef70f86437b2d64e1fdbc40..4c3f87e0c20839ff97e4133d51dacfa9
      private final java.util.concurrent.locks.ReentrantLock canvas$worldStageLock = new java.util.concurrent.locks.ReentrantLock(true);
      public final java.util.concurrent.CopyOnWriteArrayList<String> canvas$joiningPlayers = new java.util.concurrent.CopyOnWriteArrayList<>();
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
-index ebbb85a951ab01fda2e6e20abe9d63fe7a85c207..e18dbcec36a72e730c1bb253aa5689d0b3cc5efc 100644
+index ebbb85a951ab01fda2e6e20abe9d63fe7a85c207..28101263322a05cf767466a03f92249046e48bf8 100644
 --- a/net/minecraft/world/entity/Entity.java
 +++ b/net/minecraft/world/entity/Entity.java
 @@ -4650,6 +4650,12 @@ public abstract class Entity
@@ -131,14 +129,20 @@ index ebbb85a951ab01fda2e6e20abe9d63fe7a85c207..e18dbcec36a72e730c1bb253aa5689d0
          // verify and set the transfer state
          final io.canvasmc.canvas.threadedregions.entities.EntityRegionTransferState previousTransferState = getRegionTransferState();
          if (previousTransferState == null) {
-@@ -4896,6 +4927,14 @@ public abstract class Entity
+@@ -4892,10 +4923,20 @@ public abstract class Entity
+         final Float finalYaw = yaw;
+         final Float finalPitch = pitch;
+ 
++        final ServerLevel finalEventDestination = destination; // Lophinya - event may redirect; lambda needs effectively final
++        final Vec3 finalEventPos = pos;
+         passengerTree.root.placeInAsync(originWorld, destination, teleportFlags, passengerTree, (entity) -> {
              // reset the teleporting fields, we finished the teleport
              clearRegionTransferState();
  
 +            // Lophinya start - PlayerChangedWorldEvent; placeInAsync also runs for same-world
 +            // cross-region moves, so the world really has to have changed. Fired before
 +            // teleportComplete because handlers should run before caller completion.
-+            if (originWorld != destination && io.canvasmc.canvas.GlobalConfiguration.getInstance().pluginCompat.teleportEvents) {
++            if (originWorld != finalEventDestination && io.canvasmc.canvas.GlobalConfiguration.getInstance().pluginCompat.teleportEvents) {
 +                io.canvasmc.canvas.compat.LophinyaTeleportEvents.callChangedWorld((Entity) entity, originWorld);
 +            }
 +            // Lophinya end - PlayerChangedWorldEvent
@@ -146,7 +150,7 @@ index ebbb85a951ab01fda2e6e20abe9d63fe7a85c207..e18dbcec36a72e730c1bb253aa5689d0
              // we need to check if the entity displayed the loading screen
              if (entity instanceof ServerPlayer serverPlayer && displayedScreen.isTrue()) {
                  serverPlayer.refresh(false);
-@@ -6723,6 +6762,13 @@ public abstract class Entity
+@@ -6723,6 +6764,13 @@ public abstract class Entity
  
      @Override
      public void setLevelCallback(final EntityInLevelCallback levelCallback) {
