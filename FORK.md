@@ -90,6 +90,7 @@ Canvas 上游内置的 `canvas:pearls` 全局 SavedData 珍珠持久化已移除
 - 附带参数：`compression-level`（zstd 1-22，默认 6）、`io-thread-count`、`io-flush-delay`、`linear-use-virtual-thread`
 - **不支持混合格式**：磁盘扩展名与配置不一致会按设计延迟崩溃；已有世界换格式需外部转换器，服务器不做运行时迁移
 - LINEAR_V2/B_LINEAR 文件与原版/Amulet/mcaselector 等工具链不兼容
+- **弱 CPU 服务器注意**：B_LINEAR 的 zstd/LZ4 压缩在无 AVX2/AES 指令集的廉价 vCPU 上开销显著（每次区块写都过压缩）；此类机器建议 `compress-level: 1`~`3`，或维持 MCA。区块写路径逐行核对与 Lophine 上游一致（含每写 flushInternal 的上游设计），性能问题优先排查宿主 CPU steal（`top` 看 `%st`）与 `io-thread-count`（默认 6，小核机器建议 = 物理核数）
 
 
 
