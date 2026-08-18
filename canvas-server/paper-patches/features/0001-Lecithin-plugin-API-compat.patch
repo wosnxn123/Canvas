@@ -1,0 +1,415 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: wosnxn123 <wosnxn123@users.noreply.github.com>
+Date: Mon, 18 Aug 2026 21:00:00 +0800
+Subject: [PATCH] Lecithin: restore blocked plugin APIs at the Bukkit boundary
+
+Ported from LophineLabs/Lecithin dev/26.2@586cd088 paper-patches 0002-0012, 0014
+(TinyYana, GPL-3.0 via inheritance chain). Lecithin 0013 (scoreboard) is NOT
+ported: Canvas upstream already opens the scoreboard API with ensureMainThread
+guards - an equivalent implementation.
+
+Restores at the Bukkit/CraftBukkit boundary:
+- Bukkit async scheduler semantics + diagnostic guard (0002) driven off the
+  global tick (FoliaGlobalRegionScheduler heartbeat)
+- plugin scheduler dispatch rule table for GriefPrevention/Shopkeepers (0003)
+- per-account economy serialization (0004); Entity#teleport at the API
+  boundary (0005); rejected sync task redispatch to caller context (0006);
+  embedded PaperLib environment (0007); PaperPermissionManager locking (0008)
+- riding-target dismount before teleport (0009) and mid-handover teleport
+  wait (0010, D-40), adapted to Canvas's PluginTeleportAsyncState flow
+- async task context inheritance (0011); console dispatch to global region (0012)
+- cross-region block read from resident chunk (0014)
+
+All behavior gated by canvas-server.yml plugin-compat.* (default true, see
+GlobalConfiguration.PluginCompat). Canvas adaptations: contexts re-anchored
+onto Canvas's region-threading code (transfer states, ensureMainThread
+guards); config refs rewritten from Lecithin's Luminol TOML.
+
+diff --git a/src/main/java/io/papermc/paper/command/brigadier/bukkit/BukkitCommandNode.java b/src/main/java/io/papermc/paper/command/brigadier/bukkit/BukkitCommandNode.java
+index 5c52b1563d20d7e977a5bb958c18b19dec5c365a..03a621696e0c40e0cac5141e1df40ebfbfe941dd 100644
+--- a/src/main/java/io/papermc/paper/command/brigadier/bukkit/BukkitCommandNode.java
++++ b/src/main/java/io/papermc/paper/command/brigadier/bukkit/BukkitCommandNode.java
+@@ -80,6 +80,20 @@ public class BukkitCommandNode extends LiteralCommandNode<CommandSourceStack> {
+             String[] args = org.apache.commons.lang3.StringUtils.split(content, ' '); // fix adjacent spaces (from console/plugins) causing empty array elements
+ 
+             // Note: we don't return the result of target.execute as thats success / failure, we return handled (true) or not handled (false)
++            // Lophinya start - economy serialization: this is the single choke point through which
++            // every legacy (plugin.yml) Bukkit command is executed, so it is where the core can put
++            // a guarded plugin's own economy commands under the same lock as its Vault provider.
++            // See io.canvasmc.canvas.compat.LophinyaEconomySerialization; no-op when the switch is off.
++            if (io.canvasmc.canvas.compat.LophinyaEconomySerialization.isGuardedCommand(this.command)) {
++                io.canvasmc.canvas.compat.LophinyaEconomySerialization.beginExclusive();
++                try {
++                    this.command.execute(sender, this.literal, Arrays.copyOfRange(args, 1, args.length));
++                } finally {
++                    io.canvasmc.canvas.compat.LophinyaEconomySerialization.endExclusive();
++                }
++                return 1;
++            }
++            // Lophinya end - economy serialization
+             this.command.execute(sender, this.literal, Arrays.copyOfRange(args, 1, args.length));
+ 
+             // return true as command was handled
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperPermissionManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperPermissionManager.java
+index 9ddbb2d72e11c6abbbdb866f3010f276efceda41..762406a212535b45f8b6084dcd753343f3677194 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/PaperPermissionManager.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/PaperPermissionManager.java
+@@ -77,7 +77,21 @@ abstract class PaperPermissionManager implements PermissionManager {
+     @Override
+     @NotNull
+     public Set<Permission> getDefaultPermissions(boolean op) {
++        // Lophinya start - Folia synchronized the writers of defaultPerms() but not this reader.
++        // ImmutableSet.copyOf sizes the array first and then fills it, so a concurrent add from
++        // another thread's addPermission/recalculatePermissionDefaults aborts the copy with
++        // ArrayIndexOutOfBoundsException. That is not hypothetical: Luminol loads its config on a
++        // ForkJoin thread and registers Leaves command permissions from there while the main thread
++        // is still registering its own, and the server dies during boot roughly one start in four.
++        // Nothing but a set copy runs under the monitor, so this adds no lock-ordering edge - which
++        // is why the writers deliberately call dirtyPermissibles outside their own block.
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().pluginCompat.permissionLocking) {
++            return ImmutableSet.copyOf(this.defaultPerms().get(op)); // stock body, kill switch
++        }
++        synchronized (this) {
+         return ImmutableSet.copyOf(this.defaultPerms().get(op));
++        }
++        // Lophinya end
+     }
+ 
+ 
+@@ -89,7 +103,18 @@ abstract class PaperPermissionManager implements PermissionManager {
+ 
+     @Override
+     public void removePermission(@NotNull String name) {
++        // Lophinya start - the second method Folia's synchronization sweep missed. Every other
++        // mutation of permissions() holds the monitor; this one races getPermissions()'s copy the
++        // same way getDefaultPermissions raced above. No crash observed from it yet - it is fixed
++        // because a class that is synchronized everywhere except one writer is not synchronized.
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().pluginCompat.permissionLocking) {
++            this.permissions().remove(name.toLowerCase(java.util.Locale.ENGLISH)); // stock body, kill switch
++            return;
++        }
++        synchronized (this) {
+         this.permissions().remove(name.toLowerCase(java.util.Locale.ENGLISH));
++        }
++        // Lophinya end
+     }
+ 
+     @Override
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperPluginInstanceManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperPluginInstanceManager.java
+index 455e8c24d98fcd0ae0a349737a0e709a05ed9170..790d9fe065ff00115007f851eb5ccf0b48113dd3 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/PaperPluginInstanceManager.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/PaperPluginInstanceManager.java
+@@ -197,6 +197,10 @@ class PaperPluginInstanceManager {
+                 }
+             } // Paper
+ 
++            // Lophinya start - Folia-aware environment for embedded PaperLib copies
++            io.canvasmc.canvas.compat.LophinyaPaperLibAdapter.install(jPlugin);
++            // Lophinya end
++
+             try {
+                 jPlugin.setEnabled(true);
+             } catch (Throwable ex) {
+@@ -260,6 +264,28 @@ class PaperPluginInstanceManager {
+         }
+ 
+         // Folia - region threading
++        // Lophinya start - restored async scheduler: cancel Bukkit tasks on disable, like Paper does
++        // Folia removed this call because CraftScheduler was fully disabled. With the async path
++        // restored (patch 0024), a disabled plugin's async timers would otherwise keep running its
++        // code forever - the exact bug this call exists to prevent on Paper.
++        if (io.canvasmc.canvas.GlobalConfiguration.getInstance().pluginCompat.restoreAsyncScheduler) {
++            try {
++                this.server.getScheduler().cancelTasks(plugin);
++            } catch (Throwable ex) {
++                this.handlePluginException("Error occurred (in the plugin loader) while cancelling tasks for "
++                    + pluginName + " (Is it up to date?)", ex, plugin); // Paper
++            }
++        }
++        // Lophinya end - restored async scheduler: cancel Bukkit tasks on disable, like Paper does
++
++        // Lophinya start - generic plugin scheduler redispatch: cancel any tasks this plugin had
++        // redispatched via LophinyaPluginSchedulerDispatch, same reasoning as the block above -
++        // otherwise a disabled plugin's redispatched tasks would keep running forever.
++        try {
++            io.canvasmc.canvas.compat.LophinyaPluginSchedulerDispatch.cancelAll(plugin);
++        } catch (Throwable ignored) {
++        }
++        // Lophinya end - generic plugin scheduler redispatch
+ 
+         // Paper start - Folia schedulers
+         try {
+diff --git a/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaGlobalRegionScheduler.java b/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaGlobalRegionScheduler.java
+index 14ffbcb66006878eacf310547dad53718f8308eb..66ec54c3e0dd1194e02d89d00936498fea637220 100644
+--- a/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaGlobalRegionScheduler.java
++++ b/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaGlobalRegionScheduler.java
+@@ -18,6 +18,17 @@ public class FoliaGlobalRegionScheduler implements GlobalRegionScheduler {
+     private final Long2ObjectOpenHashMap<List<GlobalScheduledTask>> tasksByDeadline = new Long2ObjectOpenHashMap<>();
+ 
+     public void tick() {
++        // Lophinya start - drive the restored Bukkit async scheduler off the global tick
++        // Only the async scheduler's counter is advanced here; no plugin code runs on the
++        // global tick thread as a result.
++        if (io.canvasmc.canvas.GlobalConfiguration.getInstance().pluginCompat.restoreAsyncScheduler) {
++            final org.bukkit.scheduler.BukkitScheduler bukkitScheduler = org.bukkit.Bukkit.getScheduler();
++            if (bukkitScheduler instanceof org.bukkit.craftbukkit.scheduler.CraftScheduler craftScheduler) {
++                craftScheduler.lophinya$asyncHeartbeat();
++            }
++        }
++        // Lophinya end - drive the restored Bukkit async scheduler off the global tick
++
+         final List<GlobalScheduledTask> run;
+         synchronized (this.stateLock) {
+             ++this.tickCount;
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+index a12174bbb3717418c405e6653bd98b9fefb37bc5..74a87385d1b4a94b37573152f0a0c8ba2f4fb158 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+@@ -266,7 +266,7 @@ public final class CraftServer implements Server {
+     private final String serverVersion;
+     private final String bukkitVersion = Versioning.getBukkitVersion();
+     private final Logger logger = Logger.getLogger("Minecraft");
+-    private final ServicesManager servicesManager = new SimpleServicesManager();
++    private final ServicesManager servicesManager = new io.canvasmc.canvas.compat.LophinyaServicesManager(); // Lophinya - economy serialization: wrap version-locked economy providers on register (subclass is a no-op when the kill switch is off)
+     private final CraftScheduler scheduler = new CraftScheduler();
+     private final CraftCommandMap commandMap; // Paper - Move down
+     private final SimpleHelpMap helpMap = new SimpleHelpMap(this);
+@@ -935,6 +935,12 @@ public final class CraftServer implements Server {
+         } else if (rawSender instanceof ConsoleCommandSender || rawSender instanceof net.minecraft.server.rcon.RconConsoleSource
+                 || rawSender instanceof org.bukkit.craftbukkit.command.CraftRemoteConsoleCommandSender
+                 || rawSender instanceof io.papermc.paper.commands.FeedbackForwardingSender) {
++            // Lophinya start - hand a console-sender dispatch to the region that sender belongs to
++            if (io.canvasmc.canvas.compat.LophinyaCommandDispatch.shouldHandOff()) {
++                return io.canvasmc.canvas.compat.LophinyaCommandDispatch.handOff(rawSender, commandLine,
++                    () -> this.dispatchCommand(rawSender, commandLine));
++            }
++            // Lophinya end
+             io.papermc.paper.threadedregions.RegionizedServer.ensureGlobalTickThread("Dispatching command async");
+         } else {
+             // huh?
+diff --git a/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java b/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java
+index 0a8d399ac437201b9077387ed0c409b26a3b66ee..aa55950d996a675d50702896e194d42bfcb13f27 100644
+--- a/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java
++++ b/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java
+@@ -82,6 +82,15 @@ public class CraftBlock implements Block {
+     public net.minecraft.world.level.block.state.BlockState getBlockState() {
+         // Folia start - region threading
+         if (this.level instanceof ServerLevel serverWorld) {
++            // Lophinya start - serve a read-only lookup from a resident chunk instead of refusing it
++            if (!ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(serverWorld, this.position)) {
++                final net.minecraft.world.level.block.state.BlockState resident =
++                    io.canvasmc.canvas.compat.LophinyaCrossRegionBlockRead.readIfResident(serverWorld, this.position);
++                if (resident != null) {
++                    return resident;
++                }
++            }
++            // Lophinya end
+             ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(serverWorld, this.position, "Cannot read world asynchronously");
+         }
+         // Folia end - region threading
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
+index 44bb09e644c1b7aa41b2cfcd34e2f0cbc88828af..a389ae97c2858fcd5fc2342b54fa7340ae3d1d09 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
+@@ -315,8 +315,13 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
+ 
+     protected boolean teleport0(Location location, TeleportCause cause, TeleportFlag... flags) {
+         // Folia start - region threading
++        // Lophinya start - restore Paper's Entity#teleport at the API boundary; see LophinyaTeleportCompat
++        if (io.canvasmc.canvas.GlobalConfiguration.getInstance().pluginCompat.teleportSemantics) {
++            return io.canvasmc.canvas.compat.LophinyaTeleportCompat.teleport(this, location, cause, flags);
++        }
++        // Lophinya end
+         if (true) {
+-            throw new UnsupportedOperationException("Must use teleportAsync while in region threading");
++            throw new UnsupportedOperationException(io.canvasmc.canvas.compat.LophinyaTeleportCompat.STOCK_MESSAGE); // Lophinya - same text, one definition
+         }
+         // Folia end - region threading
+         Entity entity = this.getHandle();
+@@ -1167,6 +1172,10 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
+         // Folia start - region threading
+         final java.util.concurrent.CompletableFuture<Boolean> ret = new java.util.concurrent.CompletableFuture<>();
+         final java.util.function.Consumer<Entity> run = (Entity nmsEntity) -> {
++            // Lophinya start - Paper dismounts a riding target before teleporting it; the platform
++            // refuses outright instead. Restores that one semantic here, on the owning thread, and
++            // leaves the vehicle and any other passengers alone.
++            final Entity lophinyaVehicle = io.canvasmc.canvas.compat.LophinyaRidingTeleport.dismountForTeleport(nmsEntity);
+             boolean success = nmsEntity.teleportAsync(
+                 ((CraftWorld)locationClone.getWorld()).getHandle(),
+                 new net.minecraft.world.phys.Vec3(locationClone.getX(), locationClone.getY(), locationClone.getZ()),
+@@ -1176,6 +1185,10 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
+                 (_) -> ret.complete(Boolean.TRUE)
+             );
+             if (!success) {
++                // Lophinya start - the refusal may be a handler cancelling the event; Paper leaves
++                // a cancelled target mounted, so put it back rather than breaking the passenger graph.
++                io.canvasmc.canvas.compat.LophinyaRidingTeleport.restoreMount(nmsEntity, lophinyaVehicle);
++                // Lophinya end
+                 ret.complete(Boolean.FALSE);
+             }
+         };
+@@ -1195,7 +1208,12 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
+             );
+         // Canvas end - region threading
+ 
+-        if (org.bukkit.Bukkit.isOwnedByCurrentRegion(this)) {
++        // Lophinya start - D-40: a previous teleport may still be handing this entity over. It is
++        // still owned by this region (it has not moved, only changed hands), so the inline path
++        // would claim it and the platform would refuse it for having no level callback yet.
++        // Take the scheduler path the platform already has for "not ours to move right now".
++        if (org.bukkit.Bukkit.isOwnedByCurrentRegion(this) && !io.canvasmc.canvas.compat.LophinyaTeleportHandover.isMidHandover(this)) {
++            // Lophinya end
+             setPluginTransferState(transferState); // Canvas - region threading
+             run.accept(this.getHandle());
+             return ret;
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+index 3c725f1335f28c786c015c8ec5786c96b9e907dc..c919860478c8b1ae083e00b08fd1b30d23e5b083 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+@@ -1350,9 +1350,11 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
+     @Override
+     protected boolean teleport0(Location location, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause cause, io.papermc.paper.entity.TeleportFlag... flags) {
+         // Folia start - region threading
+-        if (true) {
+-            throw new UnsupportedOperationException("Must use teleportAsync while in region threading");
++        // Lophinya start - fall through to the checks below and then CraftEntity's shimmed teleport0
++        if (!io.canvasmc.canvas.GlobalConfiguration.getInstance().pluginCompat.teleportSemantics) {
++            throw new UnsupportedOperationException(io.canvasmc.canvas.compat.LophinyaTeleportCompat.STOCK_MESSAGE);
+         }
++        // Lophinya end
+         // Folia end - region threading
+         if (this.getHandle().connection == null) {
+             return false;
+diff --git a/src/main/java/org/bukkit/craftbukkit/scheduler/CraftAsyncTask.java b/src/main/java/org/bukkit/craftbukkit/scheduler/CraftAsyncTask.java
+index e4e2e42d0ca25df7fe9f2dd4275610e45fcb2c84..5c8a8d39a2cecd8fe983acdf8de5bd7a0d13ce6e 100644
+--- a/src/main/java/org/bukkit/craftbukkit/scheduler/CraftAsyncTask.java
++++ b/src/main/java/org/bukkit/craftbukkit/scheduler/CraftAsyncTask.java
+@@ -11,6 +11,12 @@ class CraftAsyncTask extends CraftTask {
+ 
+     private final LinkedList<BukkitWorker> workers = new LinkedList<BukkitWorker>();
+     private final Map<Integer, CraftTask> runners;
++    // Lophinya start - carry the scheduling thread's context into this async task
++    // Captured here, not in run(): the constructor still runs on the thread that asked for the task,
++    // which is the only moment the context is a fact rather than a guess.
++    private final io.canvasmc.canvas.compat.LophinyaCallerContextDispatch.CapturedContext lophinya$schedulingContext =
++        io.canvasmc.canvas.compat.LophinyaCallerContextDispatch.captureCallerContext();
++    // Lophinya end
+ 
+     CraftAsyncTask(final Map<Integer, CraftTask> runners, final Plugin plugin, final Object task, final int id, final long delay) {
+         super(plugin, task, id, delay);
+@@ -54,7 +60,9 @@ class CraftAsyncTask extends CraftTask {
+         }
+         Throwable thrown = null;
+         try {
+-            super.run();
++            // Lophinya start - make the scheduling thread's context visible for this body only
++            io.canvasmc.canvas.compat.LophinyaCallerContextDispatch.runInherited(this.lophinya$schedulingContext, super::run);
++            // Lophinya end
+         } catch (final Throwable t) {
+             thrown = t;
+             this.getOwner().getLogger().log(
+diff --git a/src/main/java/org/bukkit/craftbukkit/scheduler/CraftScheduler.java b/src/main/java/org/bukkit/craftbukkit/scheduler/CraftScheduler.java
+index 8c6892ec60c1841cae45889da764cdd7d314d1f9..74fb7b238d9cd6e0246c1b6b3eb69fe95690b94e 100644
+--- a/src/main/java/org/bukkit/craftbukkit/scheduler/CraftScheduler.java
++++ b/src/main/java/org/bukkit/craftbukkit/scheduler/CraftScheduler.java
+@@ -273,6 +273,15 @@ public class CraftScheduler implements BukkitScheduler {
+         if (task != null) {
+             task.cancel0();
+         }
++        // Lophinya start - restored async scheduler: cancellation must not die on sync-side bookkeeping
++        // The guard task below goes through handle(), which regionised threading rejects - the caller
++        // would get an UnsupportedOperationException *after* the async-side cancel already succeeded.
++        // The sync queues can never contain plugin tasks here (sync submission always throws), so the
++        // bookkeeping is dead code under regionised threading; skip it instead of throwing.
++        if (io.canvasmc.canvas.GlobalConfiguration.getInstance().pluginCompat.restoreAsyncScheduler && !this.isAsyncScheduler) {
++            return;
++        }
++        // Lophinya end - restored async scheduler: cancellation must not die on sync-side bookkeeping
+         task = new CraftTask(
+                 new Runnable() {
+                     @Override
+@@ -316,6 +325,18 @@ public class CraftScheduler implements BukkitScheduler {
+             this.asyncScheduler.cancelTasks(plugin);
+         }
+         // Paper end
++        // Lophinya start - restored async scheduler: same reasoning as cancelTask(int). The async-side
++        // cancel above already did the real work; the sync-side guard task below would throw at the
++        // caller. Keep the runners sweep - it is a plain map walk with no scheduling involved.
++        if (io.canvasmc.canvas.GlobalConfiguration.getInstance().pluginCompat.restoreAsyncScheduler && !this.isAsyncScheduler) {
++            for (final CraftTask runner : this.runners.values()) {
++                if (runner.getOwner().equals(plugin)) {
++                    runner.cancel0();
++                }
++            }
++            return;
++        }
++        // Lophinya end - restored async scheduler: same reasoning as cancelTask(int)
+         final CraftTask task = new CraftTask(
+                 new Runnable() {
+                     @Override
+@@ -514,7 +535,43 @@ public class CraftScheduler implements BukkitScheduler {
+     }
+ 
+     protected CraftTask handle(final CraftTask task, final long delay) { // Paper
+-        if (true) throw new UnsupportedOperationException("Unsupported in region threading"); // Folia - region threading
++        // Lophinya start - restore Bukkit async scheduler semantics + diagnostic guard
++        // Folia replaced this whole method with an unconditional throw. That is correct for *sync*
++        // tasks (there is no main thread to run them on), but it also killed the *async* path,
++        // which never needed a main thread. Restoring it is a return to Paper semantics; any async
++        // task touching world state still hits Folia's thread-ownership checks, loudly.
++        if (!this.isAsyncScheduler && !task.isSync() && io.canvasmc.canvas.GlobalConfiguration.getInstance().pluginCompat.restoreAsyncScheduler) {
++            this.asyncScheduler.handle(task, delay);
++            return task;
++        }
++        if (this.isAsyncScheduler && io.canvasmc.canvas.GlobalConfiguration.getInstance().pluginCompat.restoreAsyncScheduler) {
++            task.setNextRun(this.currentTick + delay);
++            this.addTask(task);
++            return task;
++        }
++        // Lophinya start - generic plugin scheduler redispatch (opt-in, see
++        // LophinyaPluginSchedulerDispatch for scope and rationale). Only reached for sync tasks on
++        // the main (non-async) scheduler - exactly the case stock Folia has no home for.
++        if (!this.isAsyncScheduler && task.isSync()) {
++            CraftTask redispatched = io.canvasmc.canvas.compat.LophinyaPluginSchedulerDispatch.tryDispatch(task, delay, task.getPeriod());
++            if (redispatched == null) {
++                // No researched rule for this task. Fall back to the caller's own execution context,
++                // which needs no per-plugin entry - see LophinyaCallerContextDispatch. Still returns
++                // null, and so still falls through to the throw below, when the calling thread has no
++                // observable context to run the task on.
++                redispatched = io.canvasmc.canvas.compat.LophinyaCallerContextDispatch.tryDispatch(task, delay, task.getPeriod());
++            }
++            if (redispatched != null) {
++                return redispatched;
++            }
++        }
++        // Lophinya end - generic plugin scheduler redispatch
++        throw new UnsupportedOperationException(io.canvasmc.canvas.compat.LophinyaSchedulerDiagnostics.reportRejected(
++            task.getOwner(), delay, task.getPeriod(), !task.isSync()));
++        // Lophinya end - restore Bukkit async scheduler semantics + diagnostic guard
++        /*
++        // Folia - region threading
++        if (true) throw new UnsupportedOperationException("Unsupported in region threading");
+         // Paper start
+         if (!this.isAsyncScheduler && !task.isSync()) {
+             this.asyncScheduler.handle(task, delay);
+@@ -524,6 +581,20 @@ public class CraftScheduler implements BukkitScheduler {
+         task.setNextRun(this.currentTick + delay);
+         this.addTask(task);
+         return task;
++        */ // Folia - region threading
++    }
++
++    /**
++     * Lophinya: advance only the async scheduler's clock.
++     * <p>{@link CraftAsyncScheduler#mainThreadHeartbeat()} increments a counter and hands the work
++     * to its own single management thread - no plugin code runs on the caller. That makes it safe
++     * to drive from Folia's global tick, which is what this exists for. Deliberately <b>not</b>
++     * {@link #mainThreadHeartbeat()}, which would also drain the sync queue.
++     */
++    public void lophinya$asyncHeartbeat() {
++        if (!this.isAsyncScheduler && this.asyncScheduler != null) {
++            this.asyncScheduler.mainThreadHeartbeat();
++        }
+     }
+ 
+     private static void validate(final Plugin plugin, final Object task) {
