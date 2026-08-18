@@ -139,7 +139,16 @@ public final class LophinyaTeleportRefusalDiagnostics {
     }
 
     private static String describeCallback(final Entity entity) {
-        final Object callback = entity.levelCallback;
+        // Canvas adaptation: Entity.levelCallback is private here (Lophine exposes it); read
+        // reflectively - diagnostics-only code, never on a hot path when disabled.
+        final Object callback;
+        try {
+            final java.lang.reflect.Field field = Entity.class.getDeclaredField("levelCallback");
+            field.setAccessible(true);
+            callback = field.get(entity);
+        } catch (final ReflectiveOperationException e) {
+            return "<unavailable: " + e + ">";
+        }
         return callback == net.minecraft.world.level.entity.EntityInLevelCallback.NULL
                 ? "NULL" : callback.getClass().getName();
     }
