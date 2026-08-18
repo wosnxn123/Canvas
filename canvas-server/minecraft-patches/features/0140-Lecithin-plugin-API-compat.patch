@@ -1,3 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: wosnxn123 <wosnxn123@users.noreply.github.com>
+Date: Mon, 18 Aug 2026 20:00:00 +0800
+Subject: [PATCH] Lecithin: plugin API compatibility (NMS layer)
+
+Ported from LophineLabs/Lecithin dev/26.2@586cd088 (TinyYana, GPL-3.0 via
+Lecithin/Lophine/Folia inheritance chain):
+- fire the Bukkit teleport events Folia left unimplemented (nms-0001)
+- make an off-region block read fail attributably (nms-0002)
+- fire teleport events for teleported vehicles' passengers (nms-0003)
+- diagnostics for the same-tick teleport refusal D-40 (nms-0004, default off)
+- restore MinecraftServer.currentTick for FAWE (nms-0005)
+- let the startup bootstrap thread satisfy ensureGlobalTickThread (nms-0006)
+
+Canvas adaptations: config gates rewritten to GlobalConfiguration.pluginCompat.*;
+unload-lock hooks bridged to Canvas's native canvas$worldStageLock/unloadTicket
+via LevelUnloadStateLockAdapter (Luminol's SimpleReferenceRWLock subsystem NOT
+ported - Canvas owns world unloading); D-40 diagnostics hooked at Canvas's
+TeleportValidationException sites (Canvas throws instead of silently returning
+false); event hooks re-anchored after Canvas's own EntityTeleportAsyncEvent.
+
 
 diff --git a/io/papermc/paper/threadedregions/RegionizedServer.java b/io/papermc/paper/threadedregions/RegionizedServer.java
 index 0fdfc2b1e2ee36a177a2eee2438ef190f85ba71b..e5dfda2c43daadde679690810b41431df48a21e3 100644
