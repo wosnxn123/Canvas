@@ -637,6 +637,64 @@ public class GlobalConfiguration extends Part {
 
     public RegionFormat regionFormat = new RegionFormat();
 
+    public PluginCompat pluginCompat = new PluginCompat();
+
+    public static class PluginCompat extends Part {
+
+        {
+            option("restoreAsyncScheduler").docs(Style.wrap("Restores the Bukkit sync scheduler (CraftScheduler) that Folia disables with an unconditional throw; tasks are dispatched per region rules. Ported from LophineLabs/Lecithin paper-0002. Default true."));
+            option("teleportSemantics").docs(Style.wrap("Restores Entity#teleport at the Bukkit API boundary (CraftEntity/CraftPlayer teleport0), which Folia replaces with an unconditional throw. Ported from Lecithin paper-0005. Default true."));
+            option("teleportEvents").docs(Style.wrap("Fires the Bukkit teleport events Folia left unimplemented: PlayerTeleportEvent/EntityTeleportEvent in teleportAsync and PlayerChangedWorldEvent from the destination-region completion. Ported from Lecithin nms-0001. Default true."));
+            option("passengerTeleportEvents").docs(Style.wrap("Fires teleport events for the passengers a teleported vehicle carries. Ported from Lecithin nms-0003. Default true."));
+            option("passengerTeleportCrossWorldOffset").docs(Style.wrap("Applies the cross-world spawn offset for passenger teleport events. Ported from Lecithin. Default true."));
+            option("ridingTeleport").docs(Style.wrap("Dismounts a riding teleport target before teleporting it, like Paper. Ported from Lecithin paper-0009. Default true."));
+            option("teleportHandover").docs(Style.wrap("Lets a teleport wait for the entity's region handover to finish, fixing the same-tick double-teleport silent refusal (D-40). Ported from Lecithin paper-0010. Default true."));
+            option("scoreboardApi").docs(Style.wrap("Opens the five Bukkit scoreboard methods Folia blocks with an unconditional throw, under region rules. Ported from Lecithin paper-0013. Default true."));
+            option("crossRegionBlockRead").docs(Style.wrap("Answers a cross-region block read from a resident chunk instead of failing. Ported from Lecithin paper-0014. Default true."));
+            option("regionReadDiagnostics").docs(Style.wrap("Makes an off-region block read fail with an attributable exception (thread/world/position) instead of a bare NPE. Ported from Lecithin nms-0002. Default true."));
+            option("economySerialization").docs(Style.wrap("Per-account economy serialization at the services and command boundaries, restoring the implicit single-main-thread serialization Paper provided. Ported from Lecithin paper-0004. Default true."));
+            option("pluginSchedulerDispatch").docs(Style.wrap("Generic plugin scheduler dispatch rule table (GriefPrevention, Shopkeepers) routing sync tasks to the correct region. Ported from Lecithin paper-0003. Default true."));
+            option("callerContextDispatch").docs(Style.wrap("Redispatches rejected sync scheduler tasks to the caller's own context. Ported from Lecithin paper-0006. Default true."));
+            option("asyncContextInheritance").docs(Style.wrap("Lets an async task inherit the context it was scheduled from (fixes EssentialsXSpawn join chains). Ported from Lecithin paper-0011. Default true."));
+            option("commandDispatchHandover").docs(Style.wrap("Hands a console-sender command dispatch to the global region. Ported from Lecithin paper-0012. Default true."));
+            option("paperLibEnvironment").docs(Style.wrap("Gives embedded PaperLib copies the platform async environment. Ported from Lecithin paper-0007. Default true."));
+            option("permissionLocking").docs(Style.wrap("Completes Folia's synchronization of PaperPermissionManager (two unsynchronized methods). Ported from Lecithin paper-0008. Default true."));
+            option("serverCurrentTick").docs(Style.wrap("Restores MinecraftServer.currentTick with global-region semantics; FastAsyncWorldEdit reads it reflectively. Ported from Lecithin nms-0005. Default true."));
+            option("commandTick").docs(Style.wrap("Advances the restored currentTick counter for command-sender ticks. Ported from Lecithin nms-0005. Default true."));
+            option("startupGlobalContext").docs(Style.wrap("Lets the startup bootstrap thread satisfy ensureGlobalTickThread. Ported from Lecithin nms-0006. Default true."));
+            option("startupContextDispatch").docs(Style.wrap("Dispatch rule table for startup-context plugin tasks. Ported from Lecithin. Default true."));
+            option("remakeConnections").docs(Style.wrap("Rebuilds broken connection bookkeeping on player rejoin. Ported from Lecithin. Default true."));
+            option("diagnostics").docs(Style.wrap("Enables the runtime access guard diagnostics that name the plugin class when a blocked API is hit. Ported from Lecithin paper-0002. Default true."));
+            option("teleportRefusalDiagnostics").docs(Style.wrap("Prints diagnostics for the same-tick teleport refusal (D-40): the four canTeleportAsync predicates, removal reason, callback class, ownership, chunk states, vehicle graph. Output-only, off by default. Ported from Lecithin nms-0004. Default false."));
+        }
+
+        public boolean restoreAsyncScheduler = true;
+        public boolean teleportSemantics = true;
+        public boolean teleportEvents = true;
+        public boolean passengerTeleportEvents = true;
+        public boolean passengerTeleportCrossWorldOffset = true;
+        public boolean ridingTeleport = true;
+        public boolean teleportHandover = true;
+        public boolean scoreboardApi = true;
+        public boolean crossRegionBlockRead = true;
+        public boolean regionReadDiagnostics = true;
+        public boolean economySerialization = true;
+        public boolean pluginSchedulerDispatch = true;
+        public boolean callerContextDispatch = true;
+        public boolean asyncContextInheritance = true;
+        public boolean commandDispatchHandover = true;
+        public boolean paperLibEnvironment = true;
+        public boolean permissionLocking = true;
+        public boolean serverCurrentTick = true;
+        public boolean commandTick = true;
+        public boolean startupGlobalContext = true;
+        public boolean startupContextDispatch = true;
+        public boolean remakeConnections = true;
+        public boolean diagnostics = true;
+        public boolean teleportRefusalDiagnostics = false;
+    }
+
+
     public static class RegionFormat extends Part {
 
         {
