@@ -1,7 +1,5 @@
 package io.canvasmc.canvas.regionformat;
 
-import IRegionFile;
-
 import java.io.IOException;
 
 @FunctionalInterface

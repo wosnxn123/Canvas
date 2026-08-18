@@ -105,7 +105,7 @@ index b228cd6c54e8c8998923ab332882d99092769c67..060a05c24252594741273ec8b1ad422b
      private static final Logger LOGGER = LogUtils.getLogger();
      private static final String NEW_DIRECTORY_PREFIX = "new_";
 -    private static final Pattern REGEX = Pattern.compile("^r\\.(-?[0-9]+)\\.(-?[0-9]+)\\.mca$");
-+    private static final Pattern REGEX = Pattern.compile("^r\\.(-?[0-9]+)\\.(-?[0-9]+)\\." + io.canvasmc.canvas.GlobalConfiguration.get().regionFormat.format.getExtensionName() + "$"); // Luminol - Configurable region file format
++    private static final Pattern REGEX = Pattern.compile("^r\\.(-?[0-9]+)\\.(-?[0-9]+)\\." + io.canvasmc.canvas.GlobalConfiguration.getInstance().regionFormat.format.getExtensionName() + "$"); // Luminol - Configurable region file format
      private final DataFixer dataFixer;
      private final UpgradeProgress upgradeProgress;
      private final String type;
@@ -115,7 +115,7 @@ index b228cd6c54e8c8998923ab332882d99092769c67..060a05c24252594741273ec8b1ad422b
  
 -                try (RegionFile regionSource = new RegionFile(info, regionFile.toPath(), regionFolder, true)) {
 +                var regionFileInfo = new io.canvasmc.canvas.regionformat.RegionCreatorInfo(info, regionFile.toPath(), regionFolder, true); // Luminol - Configurable region file format
-+                try (io.canvasmc.canvas.regionformat.IRegionFile regionSource = io.canvasmc.canvas.GlobalConfiguration.get().regionFormat.format.getCreator().create(regionFileInfo)) { // Luminol - Configurable region file format
++                try (io.canvasmc.canvas.regionformat.IRegionFile regionSource = io.canvasmc.canvas.GlobalConfiguration.getInstance().regionFormat.format.getCreator().create(regionFileInfo)) { // Luminol - Configurable region file format
                      for (int x = 0; x < 32; x++) {
                          for (int z = 0; z < 32; z++) {
                              ChunkPos pos = new ChunkPos(x + xOffset, z + zOffset);
@@ -181,7 +181,7 @@ index 598facc98fc34e91eef77b1bdf86ddbe5ff86338..af2d80fdc6f0be728a8a97f7e814f103
      }
 +    // Luminol start - Configurable region file format
 +    public static io.canvasmc.canvas.regionformat.IRegionFile createNew(final RegionStorageInfo info, final Path filePath, final Path folder, final boolean sync) throws IOException{
-+        final io.canvasmc.canvas.regionformat.EnumRegionFormat regionFormat = io.canvasmc.canvas.GlobalConfiguration.get().regionFormat.format;
++        final io.canvasmc.canvas.regionformat.EnumRegionFormat regionFormat = io.canvasmc.canvas.GlobalConfiguration.getInstance().regionFormat.format;
 +        final String fullFileName = filePath.getFileName().toString();
 +        final String[] fullNameSplit = fullFileName.split("\\.");
 +        final String extensionName = fullNameSplit[fullNameSplit.length - 1];
@@ -194,7 +194,7 @@ index 598facc98fc34e91eef77b1bdf86ddbe5ff86338..af2d80fdc6f0be728a8a97f7e814f103
 +    }
 +
 +    public static String getExtensionName() {
-+        return "." + io.canvasmc.canvas.GlobalConfiguration.get().regionFormat.format.getExtensionName();
++        return "." + io.canvasmc.canvas.GlobalConfiguration.getInstance().regionFormat.format.getExtensionName();
 +    }
 +    // Luminol end - Configurable region file format
  
