@@ -112,6 +112,8 @@ The ledger rows below cover the original 0003 groups and the new ports:
 | Vanilla ender pearl loading | Derived/ported | [Lophine `0130-Restore-vanilla-ender-pearl-loading` at `0724ba3f`](https://github.com/LophineLabs/Lophine/blob/0724ba3fa9bec83d2dc4b8a68d576a187f7d0067/lophine-server/minecraft-patches/features/0130-Restore-vanilla-ender-pearl-loading.patch) (`0049` on `ver/26.2@fc3415e6`) | Bacteriawa `<A3167717663@hotmail.com>` | **GPL-3.0** (Lophine repository license) | Replaces the Canvas upstream `canvas:pearls` SavedData persistence removed by fork-original `0129`; pearls save into player data (vanilla `ender_pearls` layout) via a region-owned volatile snapshot updated on the pearl's region thread. |
 | Region format framework + Buffered Linear | Derived/ported | [Leaf `0107-Luminol-Configurable-region-format-framework` at `a05f8902`](https://github.com/Winds-Studio/Leaf/blob/a05f8902de772298bbdf28142eef6cef003ea5c7/leaf-server/minecraft-patches/features/0107-Luminol-Configurable-region-format-framework.patch), origin [LuminolMC/Luminol](https://github.com/LuminolMC/Luminol) (framework + B_LINEAR) | Helvetica Volubi relay; framework by LuminolMC | **GPL-3.0-only**, as declared in the patch body | Packages relocated `abomination.*`/`me.earthme.luminol.*` → `io.canvasmc.canvas.regionformat`; Leaf TOML config replaced by `GlobalConfiguration.RegionFormat` with `initFormat()` in `postLoad`. |
 | Linear V2 region format | Derived/ported | [Leaf `abomination/LinearRegionFile.java` at `a05f8902`](https://github.com/Winds-Studio/Leaf/blob/a05f8902de772298bbdf28142eef6cef003ea5c7/leaf-server/src/main/java/abomination/LinearRegionFile.java), origin [xymb-endcrystalme/Abomination](https://github.com/xymb-endcrystalme/Abomination) | Xymb `<xymb@endcrystal.me>` | **GPL-3.0-only** (Abomination) | Repackaged to `io.canvasmc.canvas.regionformat.LinearRegionFile`; upstream marks it unstable (data-loss warning) — B_LINEAR is the recommended Linear variant. |
+| Plugin API compat (NMS) | Derived/ported | [Lecithin `minecraft-patches/features` at `586cd088`](https://github.com/LophineLabs/Lecithin/tree/586cd088839be14084ae30e385496e047d56d506/lecithin-server/minecraft-patches/features) (patches 0001-0006) | TinyYana `<yanasakuranight@gmail.com>` | **GPL-3.0** (Lecithin/Lophine/Folia inheritance) | Consolidated into fork `0140-Lecithin-plugin-API-compat.patch`; config gates → `GlobalConfiguration.pluginCompat`; unload-lock read-guard bridged to Canvas's native world-stage protection via `LevelUnloadStateLockAdapter` (Luminol's `SimpleReferenceRWLock` subsystem deliberately NOT ported); D-40 diagnostics re-hooked at Canvas's `TeleportValidationException` sites; event hooks re-anchored after Canvas's own `EntityTeleportAsyncEvent`. |
+| Plugin API compat (paper layer) | Derived/ported | [Lecithin `paper-patches/features` at `586cd088`](https://github.com/LophineLabs/Lecithin/tree/586cd088839be14084ae30e385496e047d56d506/lecithin-server/paper-patches/features) (0002-0012, 0014) | TinyYana `<yanasakuranight@gmail.com>` | **GPL-3.0** (inheritance) | Consolidated into fork `paper-patches/features/0001-Lecithin-plugin-API-compat.patch` (first fork patch in the Canvas paper layer); Lecithin 0013 (scoreboard) NOT ported — Canvas upstream already opens those APIs behind `ensureMainThread` guards, an equivalent implementation. 0009/0010 re-anchored onto Canvas's `PluginTeleportAsyncState` teleport flow. |
 
 ### MIT opt-in is personal, not transitive
 
@@ -309,6 +311,37 @@ Operational invariants a future change must preserve:
 Verified locally 2026-08-18: fresh-world boots create the correct extension
 for all three formats; B_LINEAR and LINEAR_V2 worlds restart and re-read
 cleanly (Done 21s / 48s, no ERROR).
+
+### Plugin API compatibility layer ported 2026-08-18
+
+Lecithin (`dev/26.2@586cd088`, pinned) restores Folia-broken Bukkit/Paper
+plugin APIs. Ported as: `0140-Lecithin-plugin-API-compat.patch` (NMS, 6
+upstream patches), `paper-patches/features/0001` (12 upstream paper patches),
+16 `io.canvasmc.canvas.compat.Lophinya*` helper classes, and the
+`PluginCompat` config section (23 gated flags).
+
+Decisions a future change must preserve:
+
+1. **The unload-lock bridge is adapter-only.** Lecithin's teleport-event
+   patches depend on Lophine 0026's `levelUnloadStateLock`
+   (`SimpleReferenceRWLock`). Canvas owns world unloading itself
+   (`canvas$worldStageLock` + `canvas$unloadTicket` + `canvas$joiningPlayers`,
+   `WorldShutdownThread`), so porting Luminol's lock subsystem would create two
+   uncoordinated protection systems. `LevelUnloadStateLockAdapter` maps
+   `acquireRead`/`releaseRead` onto Canvas's joining-players reference set.
+   Do not port Lophine 0026 wholesale.
+2. **Lecithin 0013 (scoreboard) is intentionally absent** — Canvas upstream
+   already opens those five methods behind `ensureMainThread`. Porting it
+   would double-cover the same surface.
+3. **Canvas diverges at the same hooks**: Canvas's `EntityTeleportAsyncEvent`
+   (own event, setTo-capable) fires before the ported Bukkit events;
+   Canvas throws `TeleportValidationException` where Folia silently returns
+   false (D-40 diagnostics hook the throw sites instead). Upstream Canvas
+   changes to either site require re-anchoring 0140/paper-0001.
+
+Verified 2026-08-18: applyAllPatches + compile + paperclip green on CI;
+local boot smoke (Done 21.4s, no ERROR) with the `plugin-compat` config
+section generated. Pre-port backup branch: `backup/pre-lecithin-2026-08-18`.
 
 ### License notices
 
