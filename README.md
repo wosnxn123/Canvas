@@ -1,23 +1,24 @@
-# Canvas Fork（wosnxn123）
+![title](./canvas_title.png)
 
-基于 [CraftCanvasMC/Canvas](https://github.com/CraftCanvasMC/Canvas)（Folia 下游）的维护 fork，MC 26.2。
+# Canvas Fork
 
-**所有 fork 特性、补丁清单、配置说明、维护流程见 [`FORK.md`](FORK.md)**（中文）。补丁来源与许可证台账见 [`PROVENANCE.md`](PROVENANCE.md)。
+基于 [CraftCanvasMC/Canvas](https://github.com/CraftCanvasMC/Canvas)（Folia 下游）的维护 fork · Minecraft 26.2
 
-## Fork 能力速览
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![上游](https://img.shields.io/badge/upstream-CraftCanvasMC%2FCanvas-blue)](https://github.com/CraftCanvasMC/Canvas)
 
-| 能力 | 入口 |
-|------|------|
-| 命令方块重新启用（配置门控） | `FORK.md` §1 |
-| Vanilla-like 原版机制还原（17+11 项） | `FORK.md` §2/§4 |
-| Old Feature 旧版机制（6 项） | `FORK.md` §3 |
-| 原版末影珍珠（替换 Canvas 内置） | `FORK.md` §5 |
-| Linear 区域格式（LINEAR_V2/B_LINEAR，省 ~50% 磁盘） | `FORK.md` §6 |
-| 插件 API 兼容层（Lecithin：调度器/传送/记分板等 18 项恢复） | `FORK.md` §7 |
+本 fork 在上游之上维护一组生电向原版机制还原与插件兼容补丁。
 
-## 来源政策
+| | 特性 | 文档 |
+|---|---|---|
+| 🧱 | 命令方块重新启用（配置门控） | [FORK.md §1](FORK.md) |
+| ⚙️ | Vanilla-like 原版机制还原（28 项） | [FORK.md §2 §4](FORK.md) |
+| 🕰️ | Old Feature 旧版机制（6 项） | [FORK.md §3](FORK.md) |
+| 🫧 | 原版末影珍珠（替换 Canvas 内置持久化） | [FORK.md §5](FORK.md) |
+| 💾 | Linear 区域格式（B_LINEAR/LINEAR_V2，省 ~50% 磁盘） | [FORK.md §6](FORK.md) |
+| 🔌 | 插件 API 兼容层（Lecithin，18 项恢复） | [FORK.md §7](FORK.md) |
 
-补丁来源、原作者和许可证是合并与发布的硬性条件。规则、固定 commit 链接与逐补丁台账见 [`PROVENANCE.md`](PROVENANCE.md)；Lophine 匿名化补丁因无不可变来源链接被排除。
+> 补丁来源与许可证为硬性合并条件，逐补丁台账见 [PROVENANCE.md](PROVENANCE.md)。
 
 ---
 
@@ -122,13 +123,6 @@ team unless stated otherwise within the patch itself.
 Canvas incorporates patches inspired by or derived from other Minecraft projects (e.g. **Lithium**, **Leaf**,
 **Luminol**, etc) alongside our own patch sets. Canvas includes a full set of licenses from these sources available in
 the `/canvas-server/src/main/resources/META-INF/licenses/` directory of our repository.
-
-This fork does not claim authorship over inherited or derived work merely
-because a patch was manually reapplied, regenerated, or adapted. Its mandatory
-per-patch source ledger and review requirements are documented in
-[`PROVENANCE.md`](PROVENANCE.md). The ledger includes immutable source commits,
-original authors, licenses, and local adaptation notes for this fork's custom
-patches.
 
 Canvas is also dedicated to trying to showcase our contributors in our software. From a "Contributor" role on our
 Discord to being mentioned by name inside our own software in our version command, we at CanvasMC are always trying to
