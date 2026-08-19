@@ -360,7 +360,12 @@ section generated. Pre-port backup branch: `backup/pre-lecithin-2026-08-18`.
 Verified 2026-08-19 (fd9e884 re-port): full NMS 23-patch chain replay +
 round-trip (`ROUNDTRIP_OK`), clean paper-baseline apply of the regenerated
 paper-0001 (`PAPER_ROUNDTRIP_OK`, all 11 files), config option/field
-closure check exact. Patches carry replay-computed blob indexes.
+closure check exact. Patches carry replay-computed blob indexes. CI green
+(`7c70bf6d`; first attempt failed compile - the CompatConfig adaptation
+dropped the nested `LecithinExecutionProvenance.Owner` import). Local
+35-plugin smoke (fresh world, Done 130.1s, clean stop, zero compat-layer
+errors): config migration confirmed, Vault-interface economy guard hooked
+EssentialsX, PaperLib adapter active on Multiverse/QuickShop.
 
 ### License notices
 
