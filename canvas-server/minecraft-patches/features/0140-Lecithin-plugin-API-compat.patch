@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: wosnxn123 <wosnxn123@users.noreply.github.com>
-Date: Mon, 18 Aug 2026 20:00:00 +0800
+Date: Wed, 19 Aug 2026 22:30:00 +0800
 Subject: [PATCH] Lecithin: plugin API compatibility (NMS layer)
 
 Ported from LophineLabs/Lecithin dev/26.2@586cd088 (TinyYana, GPL-3.0 via
@@ -16,13 +16,14 @@ via LevelUnloadStateLockAdapter (Luminol SimpleReferenceRWLock subsystem NOT
 ported - Canvas owns world unloading); D-40 diagnostics hooked at Canvas's
 TeleportValidationException sites; event hooks re-anchored after Canvas's own
 EntityTeleportAsyncEvent; event-adjusted teleport vars captured as effectively
-final for the completion lambda.
+final for the completion lambda. Rebased 2026-08-19 onto upstream eae884e3
+(end credits refactor) with new blob indexes.
 
 diff --git a/io/papermc/paper/threadedregions/RegionizedServer.java b/io/papermc/paper/threadedregions/RegionizedServer.java
-index 0fdfc2b1e2ee36a177a2eee2438ef190f85ba71b..e5dfda2c43daadde679690810b41431df48a21e3 100644
+index d1d44949c5d06b51c21fcbb373041761c9340b38..fa11f28f13a661d433bac3d8743d3afbe15df006 100644
 --- a/io/papermc/paper/threadedregions/RegionizedServer.java
 +++ b/io/papermc/paper/threadedregions/RegionizedServer.java
-@@ -163,6 +163,11 @@ public final class RegionizedServer {
+@@ -164,6 +164,11 @@ public final class RegionizedServer {
  
      public static void ensureGlobalTickThread(final String reason) {
          if (!isGlobalTickThread()) {
@@ -34,7 +35,7 @@ index 0fdfc2b1e2ee36a177a2eee2438ef190f85ba71b..e5dfda2c43daadde679690810b41431d
              LOGGER.error(reason, new Throwable()); // Canvas - log ts like TickThread does
              throw new IllegalStateException(reason);
          }
-@@ -261,6 +266,7 @@ public final class RegionizedServer {
+@@ -262,6 +267,7 @@ public final class RegionizedServer {
          final DedicatedServer minecraftServer = (DedicatedServer) MinecraftServer.getServer();
  
          ++this.tickCount;
@@ -43,7 +44,7 @@ index 0fdfc2b1e2ee36a177a2eee2438ef190f85ba71b..e5dfda2c43daadde679690810b41431d
          // expire invalid click command callbacks
          ClickCallbackProviderImpl.ADVENTURE_CLICK_MANAGER.handleQueue((int)this.tickCount); // Paper // Folia - region threading - moved to global tick
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index f147568ecac8604519b5269de6621071e91e52ed..b0e907fc5d4b1a88e8a066105a18c6a5a0550005 100644
+index 4041a6d5bf2b0b0220b49caa0ec7d62da892e4c1..17be28b31730afdeaffb63eb6f9a080826f27ef4 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
 @@ -299,7 +299,13 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
@@ -62,11 +63,11 @@ index f147568ecac8604519b5269de6621071e91e52ed..b0e907fc5d4b1a88e8a066105a18c6a5
      public int autosavePeriod;
      // Paper - don't store the vanilla dispatcher
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index df07eb054da2eacf6ef70f86437b2d64e1fdbc40..4c3f87e0c20839ff97e4133d51dacfa9918f4366 100644
+index a2949f971d0033abe5335477f233051099d579d9..c992b794798184d16a6dd4bbc0b176bad2cd9496 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
-@@ -734,6 +734,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
-     // Canvas start - region threading
+@@ -735,6 +735,14 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     // note: *never* pop the unload ticket, EVER.
      public final io.canvasmc.canvas.util.ticket.TicketHolder<io.canvasmc.canvas.util.ticket.UnloadTicket>
          canvas$unloadTicket = new io.canvasmc.canvas.util.ticket.TicketHolder<>();
 +
@@ -164,27 +165,6 @@ index ebbb85a951ab01fda2e6e20abe9d63fe7a85c207..28101263322a05cf767466a03f922490
          this.levelCallback = levelCallback;
      }
  
-diff --git a/net/minecraft/world/entity/Entity.java.rej b/net/minecraft/world/entity/Entity.java.rej
-new file mode 100644
-index 0000000000000000000000000000000000000000..1b339644b549930b405e105e7a866f8e2d2298bd
---- /dev/null
-+++ b/net/minecraft/world/entity/Entity.java.rej
-@@ -0,0 +1,15 @@
-+diff a/java/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java	(rejected hunks)
-+@@ -4558,6 +4558,13 @@ public abstract class Entity
-+         }
-+ 
-+         if (!this.canTeleportAsync()) {
-++            // Lophinya - D-40 diagnostics: this return is the silent second teleport. Print which of
-++            // canTeleportAsync()'s four predicates said no, rather than guessing from outside again.
-++            // Off by default; cannot affect the refusal, which has already been decided.
-++            if (io.canvasmc.canvas.GlobalConfiguration.getInstance().pluginCompat.teleportRefusalDiagnostics) {
-++                io.canvasmc.canvas.compat.LophinyaTeleportRefusalDiagnostics.reportRefusal(this, destination, pos);
-++            }
-++            // Lophinya end
-+             return false;
-+         }
-+         this.getBukkitEntity(); // force bukkit entity to be created before TPing
 diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
 index aa82f0d0db479b1283339896a5d57de9738fa76d..1a35933ca297389f0f013fbc2c55788c9749b387 100644
 --- a/net/minecraft/world/level/Level.java
