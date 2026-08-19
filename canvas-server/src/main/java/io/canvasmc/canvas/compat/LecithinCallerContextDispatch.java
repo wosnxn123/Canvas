@@ -1,6 +1,7 @@
 package io.canvasmc.canvas.compat;
 
 import com.mojang.logging.LogUtils;
+import io.canvasmc.canvas.compat.LecithinExecutionProvenance.Owner;
 import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 import org.bukkit.Bukkit;
 import org.bukkit.craftbukkit.scheduler.CraftTask;
