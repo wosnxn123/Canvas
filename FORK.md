@@ -94,9 +94,9 @@ Canvas 上游内置的 `canvas:pearls` 全局 SavedData 珍珠持久化已移除
 
 
 
-### 7. 插件 API 兼容层（2026-08-18 移植，Lecithin）
+### 7. 插件 API 兼容层（2026-08-18 移植，2026-08-19 跟进 fd9e884，Lecithin）
 
-移植自 [LophineLabs/Lecithin](https://github.com/LophineLabs/Lecithin) `dev/26.2@586cd088`（TinyYana，GPL-3.0 继承链）：修复 Folia 化后失效的 paper/spigot/bukkit 插件 API。全部经 `plugin-compat.*` 配置门控（默认 `true`，诊断类默认 `false`）。
+移植自 [LophineLabs/Lecithin](https://github.com/LophineLabs/Lecithin) `dev/26.2@fd9e884`（TinyYana，GPL-3.0 继承链）：修复 Folia 化后失效的 paper/spigot/bukkit 插件 API。全部经 `plugin-compat.*` 配置门控（默认 `true`，诊断类默认 `false`）。
 
 **NMS 层（feature patch `0140-Lecithin-plugin-API-compat`）**：
 
@@ -109,11 +109,13 @@ Canvas 上游内置的 `canvas:pearls` 全局 SavedData 珍珠持久化已移除
 | `currentTick` 恢复 | FAWE 反射读取所需（否则 WorldEdit 全崩） |
 | 启动线程放行 | bootstrap 线程满足 `ensureGlobalTickThread` |
 
-**paper 层（`paper-patches/features/0001`，12 个补丁合并）**：恢复 Bukkit 异步调度器（Folia throw → 恢复 + 诊断守卫，global tick 驱动心跳）、`Entity#teleport` API 边界、调度器重派规则表（GriefPrevention/Shopkeepers）、经济序列化、PaperLib 环境、权限管理器补锁、骑乘目标先下座、传送 handover 等待（D-40）、async 上下文继承、控制台命令转 global region、跨 region 方块读常驻 chunk 应答。
+**paper 层（`paper-patches/features/0001`，12 个补丁合并）**：恢复 Bukkit 异步调度器（Folia throw → 恢复 + 诊断守卫，global tick 驱动心跳）、`Entity#teleport` API 边界、执行来源派发（execution provenance）、经济序列化、PaperLib 环境、权限管理器补锁、骑乘目标先下座、传送 handover 等待（D-40）、async 上下文继承、控制台命令转 global region、跨 region 方块读常驻 chunk 应答。
+
+**fd9e884 重构（2026-08-19 跟进）**：删除 jar-SHA 调度规则表（`LophinyaPluginSchedulerDispatch`，652 行——EssentialsX 一升级哈希即失配，聊天事件直接中断），改为 `LecithinExecutionProvenance`（REGION/GLOBAL/ENTITY 三态 owner：`TickRegionScheduler`/global tick/启动线程/异步 PlayerEvent 派发），`PaperEventManager` 在异步事件派发全程建立 owner（finally 移除，池化聊天线程不会把上个玩家的 owner 带给下一个）；`LecithinDispatchedTasks` 使 `BukkitTask#cancel` 与调度器 `cancelTask(s)` 真正能取消重派任务（原先静默失效）；经济守卫改按 Vault 服务接口键控（`GUARDED_SERVICES`），不再依赖 jar 哈希。配置：删 `plugin-scheduler-dispatch`，增 `async-event-provenance`、`async-platform-event-global-scope`（均默认 `true`，不可热重载）。
 
 **注意**：Lecithin 0013（记分板开放）**未移植**——Canvas 上游已用 `ensureMainThread` 守卫等效开放。
 
-**适配要点**：Luminol 卸载锁子系统未移植（Canvas 有自有 `canvas$worldStageLock`/`unloadTicket` 机制），以 `LevelUnloadStateLockAdapter` 桥接读引用语义；D-40 诊断挂在 Canvas 的 `TeleportValidationException` 站点；16 个 Lophinya 辅助类重定位到 `io.canvasmc.canvas.compat`。
+**适配要点**：Luminol 卸载锁子系统未移植（Canvas 有自有 `canvas$worldStageLock`/`unloadTicket` 机制），以 `LevelUnloadStateLockAdapter` 桥接读引用语义；D-40 诊断挂在 Canvas 的 `TeleportValidationException` 站点；17 个 Lecithin 辅助类（原 Lophinya*，fd9e884 改名）位于 `io.canvasmc.canvas.compat`。
 
 
 ### 分支
@@ -137,8 +139,9 @@ Canvas 上游内置的 `canvas:pearls` 全局 SavedData 珍珠持久化已移除
 | `0129-Remove-Canvas-ender-pearl-persistence` | **本 fork 原创** | 移除 Canvas 内置 `canvas:pearls` SavedData 珍珠持久化，恢复 Paper 保存/退出路径 |
 | `0107-Luminol-Configurable-region-format-framework` | **本 fork**（移植） | Leaf `0107`@`a05f8902`（Luminol 框架 GPL-3.0 + Abomination Linear V2 GPL-3.0）：区域格式可插拔（MCA/LINEAR_V2/B_LINEAR），见 §6 |
 | `0130-Restore-vanilla-ender-pearl-loading` | **本 fork**（移植） | Lophine `0130`@`0724ba3f`（Bacteriawa，GPL-3.0）：原版珍珠加载，region 安全快照 |
-| `0140-Lecithin-plugin-API-compat` | **本 fork**（移植） | Lecithin `dev/26.2@586cd088` NMS 0001-0006（TinyYana，GPL-3.0）：插件 API 兼容 NMS 层，见 §7 |
-| paper `0001-Lecithin-plugin-API-compat` | **本 fork**（移植） | Lecithin paper 0002-0012/0014 合并（TinyYana，GPL-3.0）：Bukkit 边界 API 恢复，见 §7 |
+| `0140-Lecithin-plugin-API-compat` | **本 fork**（移植） | Lecithin `dev/26.2@fd9e884` NMS 0001-0006（TinyYana，GPL-3.0）：插件 API 兼容 NMS 层，见 §7 |
+| paper `0001-Lecithin-plugin-API-compat` | **本 fork**（移植） | Lecithin paper 0002-0012/0014 合并（fd9e884 重构后版本，TinyYana，GPL-3.0）：Bukkit 边界 API 恢复，见 §7 |
+2026-08-19（Lecithin fd9e884）：跟进上游 execution-provenance 重构——删 jar-SHA 规则表（652 行），新增 `LecithinExecutionProvenance`/`LecithinDispatchedTasks`，`PaperEventManager` 异步事件 owner 作用域，修复 `BukkitTask#cancel` 对重派任务静默失效，经济守卫改按 Vault 接口键控；类更名 Lophinya*→Lecithin*（16→17）。全链重放 + 双树 round-trip 验证。
 2026-08-18（Lecithin）：移植 Lecithin 插件 API 兼容全家桶（NMS 0140 + paper 0001 + compat 16 类 + PluginCompat 23 门控配置）。卸载锁经 `LevelUnloadStateLockAdapter` 桥接 Canvas 自有机制；0013 记分板因 Canvas 上游已等效开放而跳过。CI 全绿 + 本地启动 smoke（Done 21.4s，plugin-compat 配置段生成）。备份分支 `backup/pre-lecithin-2026-08-18`。
 2026-08-18（Linear）：从 Leaf `ver/26.2@a05f8902` 固定提交移植 Linear 区域格式全家桶（0107 框架补丁 + `io.canvasmc.canvas.regionformat` 包 7 文件 + zstd-jni/zero-allocation-hashing 依赖 + `GlobalConfiguration.RegionFormat` 配置段）。本地验证：MCA/LINEAR_V2/B_LINEAR 三格式新世界启动均生成正确扩展名，B_LINEAR 与 LINEAR_V2 世界重启读取无错。Lophine 的匿名化版本（`0007`）因无不可变来源链接被排除，来源政策见 PROVENANCE。
 
