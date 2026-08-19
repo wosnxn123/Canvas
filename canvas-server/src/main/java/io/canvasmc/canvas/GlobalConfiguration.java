@@ -653,7 +653,8 @@ public class GlobalConfiguration extends Part {
             option("crossRegionBlockRead").docs(Style.wrap("Answers a cross-region block read from a resident chunk instead of failing. Ported from Lecithin paper-0014. Default true."));
             option("regionReadDiagnostics").docs(Style.wrap("Makes an off-region block read fail with an attributable exception (thread/world/position) instead of a bare NPE. Ported from Lecithin nms-0002. Default true."));
             option("economySerialization").docs(Style.wrap("Per-account economy serialization at the services and command boundaries, restoring the implicit single-main-thread serialization Paper provided. Ported from Lecithin paper-0004. Default true."));
-            option("pluginSchedulerDispatch").docs(Style.wrap("Generic plugin scheduler dispatch rule table (GriefPrevention, Shopkeepers) routing sync tasks to the correct region. Ported from Lecithin paper-0003. Default true."));
+            option("asyncEventProvenance").docs(Style.wrap("Establishes the executing entity as provenance for legacy sync calls made from async PlayerEvent listeners (EntityScheduler dispatch). Ported from Lecithin fd9e884. Default true."));
+            option("asyncPlatformEventGlobalScope").docs(Style.wrap("Gives platform-defined async events that name no entity (AsyncPlayerConnectionConfigureEvent) the global-region scope, so their listeners' sync calls run instead of aborting. Ported from Lecithin fd9e884. Default true."));
             option("callerContextDispatch").docs(Style.wrap("Redispatches rejected sync scheduler tasks to the caller's own context. Ported from Lecithin paper-0006. Default true."));
             option("asyncContextInheritance").docs(Style.wrap("Lets an async task inherit the context it was scheduled from (fixes EssentialsXSpawn join chains). Ported from Lecithin paper-0011. Default true."));
             option("commandDispatchHandover").docs(Style.wrap("Hands a console-sender command dispatch to the global region. Ported from Lecithin paper-0012. Default true."));
@@ -679,7 +680,8 @@ public class GlobalConfiguration extends Part {
         public boolean crossRegionBlockRead = true;
         public boolean regionReadDiagnostics = true;
         public boolean economySerialization = true;
-        public boolean pluginSchedulerDispatch = true;
+        public boolean asyncEventProvenance = true;
+        public boolean asyncPlatformEventGlobalScope = true;
         public boolean callerContextDispatch = true;
         public boolean asyncContextInheritance = true;
         public boolean commandDispatchHandover = true;
