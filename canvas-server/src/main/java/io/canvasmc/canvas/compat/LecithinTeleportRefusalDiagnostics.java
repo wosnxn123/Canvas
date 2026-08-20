@@ -24,7 +24,7 @@ import net.minecraft.world.entity.Entity;
  * <b>disabled by default</b> and prints only on a refusal or on a callback transition, never per
  * tick.
  *
- * <p>Switch: {@code -Dlecithin.compat.teleportRefusalDiagnostics=true}. Default off.
+ * <p>Switch: {@code plugin-compat.teleport-refusal-diagnostics: true}. Default off.
  */
 public final class LecithinTeleportRefusalDiagnostics {
 

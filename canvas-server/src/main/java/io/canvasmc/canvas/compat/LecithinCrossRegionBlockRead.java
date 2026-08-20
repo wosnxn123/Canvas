@@ -61,7 +61,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * That one is restricted to the bootstrap thread - see that method for why it cannot be fixed in
  * {@code prepareLevel} and why it does not widen the rule above.
  *
- * <p>Kill switch: {@code -Dlecithin.compat.crossRegionBlockRead=false} restores the stock refusal.
+ * <p>Kill switch: {@code plugin-compat.cross-region-block-read: false} restores the stock refusal.
  */
 public final class LecithinCrossRegionBlockRead {
 
@@ -211,9 +211,20 @@ public final class LecithinCrossRegionBlockRead {
         if (io.papermc.paper.threadedregions.TickRegionScheduler.getCurrentRegion() != null) {
             return null;
         }
-        final int chunkX = pos.getX() >> 4;
-        final int chunkZ = pos.getZ() >> 4;
+        // Lecithin f908451a (unload-lock half only) - hold the destination's unload lock for the
+        // whole load: Canvas can unload a level at runtime and its chunk system then stops
+        // answering, which would leave this wait with nothing to wait for. A world that is already
+        // unloading answers no here instead of parking. The rest of f908451a - letting region
+        // threads reach this path - is deliberately NOT ported: the guard above is what keeps this
+        // fork clear of the permanent NON_FULL_CHUNK_LOAD ticket leak that upstream had to add
+        // LecithinForeignWorldTicketUpdates (+ nms-0012) to fix. Widening without that bundle would
+        // hand us the leak.
+        if (!level.levelUnloadStateLock.acquireRead()) {
+            return null;
+        }
         try {
+            final int chunkX = pos.getX() >> 4;
+            final int chunkZ = pos.getZ() >> 4;
             final ChunkAccess loaded = level.moonrise$getChunkTaskScheduler()
                     .syncLoadNonFull(chunkX, chunkZ, ChunkStatus.FULL.getParent());
             if (loaded == null) {
@@ -227,6 +238,8 @@ public final class LecithinCrossRegionBlockRead {
             LOGGER.warn("[Lecithin] Startup chunk load for a block read at {} in {} did not complete; "
                     + "falling through to the stock ownership check", pos, level.getWorld().getName(), failed);
             return null;
+        } finally {
+            level.levelUnloadStateLock.releaseRead();
         }
     }
 
@@ -245,7 +258,7 @@ public final class LecithinCrossRegionBlockRead {
                               scope   : threads that tick no region at all - the bootstrap thread and the global \
                             region thread. A thread ticking a region still refuses, so this does not become a \
                             general off-region chunk load.
-                              disable : -Dlecithin.compat.crossRegionBlockRead=false""",
+                              disable : plugin-compat.cross-region-block-read: false""",
                     where, level.getWorld().getName());
         }
     }
@@ -262,7 +275,7 @@ public final class LecithinCrossRegionBlockRead {
                       safety  : resident chunks only (an absent chunk still throws, so nothing loads here), \
                     reads only (writes are unchanged), and PalettedContainer is already concurrent-read \
                     safe upstream. Worst case is a one-tick-stale block state.
-                      disable : -Dlecithin.compat.crossRegionBlockRead=false""", key);
+                      disable : plugin-compat.cross-region-block-read: false""", key);
         }
     }
 }

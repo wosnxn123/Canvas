@@ -79,7 +79,7 @@ preserved during merges.
 Until 2026-08-07 the groups below shipped as a single
 `0003-Vanilla-like-experience.patch`. They now ship as per-feature patches under
 `canvas-server/minecraft-patches/features/`, numbered to match Lophine
-`dev/26.2-hardfork@0724ba3f` (the pinned port source): `0003` command blocks
+`ver/26.2-hardfork@0724ba3f` (the pinned port source): `0003` command blocks
 (original to this fork), `0128` vanilla-like config, `0094`/`0095`/`0096`/`0098`/
 `0101`/`0104` old-feature ports, and the eleven new ports recorded in the
 2026-08-07 section below. A full-chain replay (base then features in file
@@ -197,12 +197,12 @@ Two upstream changes affect how a reviewer locates these sources today:
    serves the old URLs via HTTP 301, and `f4aea025` remains reachable under the
    new organisation. Old links in git history must not be rewritten.
 2. **Hard fork and patch renumbering.** On 2026-07-17 Lophine hard-forked from
-   Luminol. The default branch became `dev/26.2-hardfork` and the feature patch
+   Luminol. The default branch became `ver/26.2-hardfork` (renamed upstream to `ver/26.2-hardfork` on 2026-08-20; our pin `ba77795f` remains a direct ancestor, verified via merge-base) and the feature patch
    set grew from 49 to 130 files, which renumbered all three sources. The patch
    contents at the new numbers are byte-identical to the revisions ported here
-   (verified 2026-07-26 against `dev/26.2-hardfork@0724ba3f`):
+   (verified 2026-07-26 against `ver/26.2-hardfork@0724ba3f`):
 
-   | Ported source at `f4aea025` | Same patch on `dev/26.2-hardfork` | Content delta |
+   | Ported source at `f4aea025` | Same patch on `ver/26.2-hardfork` | Content delta |
    | --- | --- | --- |
    | `0048-Add-Vanilla-like-experience-Config.patch` | `0129-Add-Vanilla-like-experience-Config.patch` | none (identical) |
    | `0013-Old-zombie-reinforcement.patch` | `0094-Old-zombie-reinforcement.patch` | none (identical) |
@@ -215,11 +215,11 @@ re-verification must locate these sources **by file-name keyword**
 
 The MIT opt-in for Helvetica Volubi `<suisuroru@blue-millennium.fun>` is still
 listed in the current
-[`LICENSE.md`](https://github.com/LophineLabs/Lophine/blob/dev/26.2-hardfork/LICENSE.md),
+[`LICENSE.md`](https://github.com/LophineLabs/Lophine/blob/ver/26.2-hardfork/LICENSE.md),
 whose full license texts now live in
-[`licenses/GPL.md`](https://github.com/LophineLabs/Lophine/blob/dev/26.2-hardfork/licenses/GPL.md)
+[`licenses/GPL.md`](https://github.com/LophineLabs/Lophine/blob/ver/26.2-hardfork/licenses/GPL.md)
 and
-[`licenses/MIT.md`](https://github.com/LophineLabs/Lophine/blob/dev/26.2-hardfork/licenses/MIT.md).
+[`licenses/MIT.md`](https://github.com/LophineLabs/Lophine/blob/ver/26.2-hardfork/licenses/MIT.md).
 
 ### Leaves sources re-verified 2026-08-04
 
@@ -240,7 +240,7 @@ locate these patches by file-name keyword, never by number.
 
 The single `0003-Vanilla-like-experience.patch` was split into per-feature
 patches and eleven further mechanics were ported (ledger rows above). Local
-numbers align with Lophine `dev/26.2-hardfork@0724ba3f`. Lophine's current
+numbers align with Lophine `ver/26.2-hardfork@0724ba3f`. Lophine's current
 `ver/26.2@fc3415e6` renumbered the set again (49 patches); the mapping for
 re-verification is:
 

@@ -135,7 +135,7 @@ Canvas 上游内置的 `canvas:pearls` 全局 SavedData 珍珠持久化已移除
 | `0003-Re-enable-command-blocks` | **本 fork 原创** | 6 个命令方块 gate + global region 执行路由 + owning-region 输出 hop |
 | `0128-Add-Vanilla-like-experience-Config` | **本 fork**（移植） | 17 项 vanilla 机制 + `enabled` 主开关，移植自 [Lophine 0048 固定版本](https://github.com/LophineLabs/Lophine/blob/f4aea025c11c598f285d3c47198c62397a0daba8/lophine-server/minecraft-patches/features/0048-Add-Vanilla-like-experience-Config.patch)（作者 Bacteriawa，GPL-3.0） |
 | `0094`/`0095`/`0096`/`0098`/`0101`/`0104` | **本 fork**（移植） | old-feature 六项，与 Lophine `OldFeatureConfig` 对齐，见 §3 |
-| `0028`/`0034`/`0045`/`0065`/`0093`/`0117`/`0118`/`0121`/`0122`/`0124`/`0125` | **本 fork**（移植） | 2026-08-07 新增移植，见 §4；编号对齐 Lophine `dev/26.2-hardfork@0724ba3f` |
+| `0028`/`0034`/`0045`/`0065`/`0093`/`0117`/`0118`/`0121`/`0122`/`0124`/`0125` | **本 fork**（移植） | 2026-08-07 新增移植，见 §4；编号对齐 Lophine `ver/26.2-hardfork@0724ba3f` |
 | `0129-Remove-Canvas-ender-pearl-persistence` | **本 fork 原创** | 移除 Canvas 内置 `canvas:pearls` SavedData 珍珠持久化，恢复 Paper 保存/退出路径 |
 | `0107-Luminol-Configurable-region-format-framework` | **本 fork**（移植） | Leaf `0107`@`a05f8902`（Luminol 框架 GPL-3.0 + Abomination Linear V2 GPL-3.0）：区域格式可插拔（MCA/LINEAR_V2/B_LINEAR），见 §6 |
 | `0130-Restore-vanilla-ender-pearl-loading` | **本 fork**（移植） | Lophine `0130`@`0724ba3f`（Bacteriawa，GPL-3.0）：原版珍珠加载，region 安全快照 |
@@ -147,13 +147,13 @@ Canvas 上游内置的 `canvas:pearls` 全局 SavedData 珍珠持久化已移除
 
 2026-07-14 已与 `LophineCraft/Lophine` `dev/26.2@f4aea025` 复核：0048 仍覆盖相同的 17 个原版机制；0013 和已更名的 `0014-Old-leader-zombie-health-logic.patch` 与本 fork 的两个 OldFeature 选项语义一致。
 
-2026-07-26 复核（来源仓库已改组 + 硬分叉）：组织更名为 `LophineLabs/Lophine`（旧地址 301 重定向，`f4aea025` 仍可达）；2026-07-17 从 Luminol 硬分叉，默认分支变为 `dev/26.2-hardfork`，feature 补丁由 49 个增至 130 个，三个来源补丁因此被重新编号为 `0129` / `0094` / `0095`——但**内容与 `f4aea025` 逐字节相同**，本 fork 的 0003 无需重新移植。因 Lophine 会随补丁集变动重新编号，后续复核请按文件名关键词定位来源，不要按编号。详见 [`PROVENANCE.md`](PROVENANCE.md)。
+2026-07-26 复核（来源仓库已改组 + 硬分叉）：组织更名为 `LophineLabs/Lophine`（旧地址 301 重定向，`f4aea025` 仍可达）；2026-07-17 从 Luminol 硬分叉，默认分支变为 `ver/26.2-hardfork`，feature 补丁由 49 个增至 130 个，三个来源补丁因此被重新编号为 `0129` / `0094` / `0095`——但**内容与 `f4aea025` 逐字节相同**，本 fork 的 0003 无需重新移植。因 Lophine 会随补丁集变动重新编号，后续复核请按文件名关键词定位来源，不要按编号。详见 [`PROVENANCE.md`](PROVENANCE.md)。
 
 同日补齐 `old-feature` 段剩余 4 个字段（`spawn-invulnerable-time` / `old-explosion-damage-calculator` / `old-raid-behavior` / `villager-void-trade`），至此与 Lophine `OldFeatureConfig` 的 6 字段完全对齐；0003 由 23 个文件扩到 28 个。同时复核确认 0129 未把任何机制拆分到硬分叉新增的其他补丁里——0129 触碰的 17 个文件全部仍在 0003 覆盖范围内，本 fork 没有漏移植。
 
 2026-08-04 复核（Leaves 三项 GPL 来源）：`LeavesMC/Leaves` `master` 上 `0125-Old-wet-tnt-explode-behavior`、`0101-Old-raid-behavior`、`0005-Configurable-void-trade` 三个补丁的最后一次修改均为 1.21.11 rebase `22a763cb`（2026-04-28），此后无改动；与本 fork 固定版本（`3e96b237` / `bda7e406` / `9d2bd3f7`）的差异全部是 rebase 上下文适配（变量重命名、行号偏移），无行为修复，0003 无需重新移植。同日合并上游 Canvas `main`（至 `2c97cca1`），0003 应用无需适配。
 2026-08-07：原单一 `0003-Vanilla-like-experience.patch` 按功能拆为 `0003`（命令方块）/`0128`（vanilla-like 主）/old-feature 六个补丁，并新增移植 11 个机制（§4）。全链回放验证：19 个补丁按序应用逐字节复现拆分前最终态；GitHub Actions（applyAllPatches + compileJava + paperclip）全绿，CNB 远程启动 smoke test 通过（全部新配置项带 docs 生成）。Lophine `ver/26.2@fc3415e6` 已将补丁集重编号为 49 个，且删除了 `0028`/`0034`/`0045`/`0065` 四个来源——移植与复核仍以固定提交 `0724ba3f` 为准，按文件名关键词定位。
-2026-08-09 复核：Lophine `dev/26.2-hardfork` 推进至 `c619486d`，7 个来源补丁（0028/0034/0117/pearl/vanilla-like/0096/0101）仅有 rebase 上下文/hunk 形状变化，+/- 代码行集合与固定版本相同，无行为修复，不需重移植；pearl、vanilla-like 重编号（0130→0129、0129→0128）。`ver/26.2` 与 Leaves `master` 无变化。
+2026-08-09 复核：Lophine `ver/26.2-hardfork` 推进至 `c619486d`，7 个来源补丁（0028/0034/0117/pearl/vanilla-like/0096/0101）仅有 rebase 上下文/hunk 形状变化，+/- 代码行集合与固定版本相同，无行为修复，不需重移植；pearl、vanilla-like 重编号（0130→0129、0129→0128）。`ver/26.2` 与 Leaves `master` 无变化。
 2026-08-18：合并上游 23 提交（`2499b002..a1943fae`）后 sources 补丁变化导致 feature 补丁 blob index 失效，整套 21 个补丁在干净基线（上游补丁全量应用后的 dump 树）上重新生成：0028 适配 teleport 状态重构，0129 删除 hunk 重生成，0130 补 EnderpearlItem 钩子，0065 同时吸收 Lophine 0066 vanilla hopper 重写（`movedItemCount==1` 快路径 + `removeOriginalItem` 实例比较 + 部分移动计数语义，hardfork `2459ff2e`）。全链重放逐字节验证 + Actions 全绿 + 本地启动 smoke（Done 44.7s）。同日复核：Lophine hardfork 其余 6 个来源补丁仅重编号无行为变化；Leaves 三个 GPL 来源仅变量重命名。上游同时引入 `0003-Leaf-Flush-location-while-knockback`（上游维护，与本 fork 补丁无文件冲突，已在补丁清单但归 Canvas 上游）。
 
 **Canvas 自有源码改动**（非 patch）：`canvas-server/src/main/java/io/canvasmc/canvas/GlobalConfiguration.java` 新增 `VanillaLikeExperience` 配置段（`enabled`、`commandBlocks` + 11 个新机制字段 + `TripwireBehavior` 枚举，枚举位于 `GlobalConfiguration` 顶层供 NMS patch 引用）；新增 `util/UpdateSuppressionException.java`。

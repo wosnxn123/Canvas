@@ -35,7 +35,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * configuring server state from {@code onEnable} - a very common Bukkit idiom - is covered, and any
  * call made after startup still fails exactly as before.
  *
- * <p>Kill switch: {@code -Dlecithin.compat.startupGlobalContext=false} restores the stock rejection.
+ * <p>Kill switch: {@code plugin-compat.startup-global-context: false} restores the stock rejection.
  */
 public final class LecithinStartupGlobalContext {
 
@@ -77,7 +77,7 @@ public final class LecithinStartupGlobalContext {
                               why     : during startup the bootstrap thread is the sole owner of this state, which \
                             is what Paper's main thread is at the same point. Bukkit.isPrimaryThread() already \
                             reports true on this thread. Calls made after startup are rejected exactly as before.
-                              disable : -Dlecithin.compat.startupGlobalContext=false""",
+                              disable : plugin-compat.startup-global-context: false""",
                     reason, Thread.currentThread().getName());
         }
         return true;

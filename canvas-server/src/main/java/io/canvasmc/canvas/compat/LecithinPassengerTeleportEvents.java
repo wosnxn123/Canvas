@@ -77,9 +77,9 @@ import org.bukkit.event.player.PlayerTeleportEvent.TeleportCause;
  * Grouped by API symbol, not by plugin: the gap is {@code Entity#teleport} /
  * {@code Entity#teleportAsync} on a vehicle, and nothing here knows what plugins exist.
  *
- * <p>Kill switch: {@code -Dlecithin.compat.passengerTeleportEvents=false} restores stock behaviour,
+ * <p>Kill switch: {@code plugin-compat.passenger-teleport-events: false} restores stock behaviour,
  * which is that carried passengers produce no event. Independent of
- * {@code lecithin.compat.teleportEvents}, which governs the root entity's event.
+ * {@code plugin-compat.teleport-events}, which governs the root entity's event.
  */
 public final class LecithinPassengerTeleportEvents {
 

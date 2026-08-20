@@ -70,7 +70,7 @@ package io.canvasmc.canvas.compat;
  * restore: all four single-target cases (same region, cross region, {@code teleportAsync},
  * cancelled) match Paper.
  *
- * <p>Kill switch: {@code -Dlecithin.compat.ridingTeleport=false} restores the stock refusal, and was
+ * <p>Kill switch: {@code plugin-compat.riding-teleport: false} restores the stock refusal, and was
  * measured to roll all four back to their pre-patch answers exactly.
  */
 public final class LecithinRidingTeleport {
