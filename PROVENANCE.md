@@ -367,6 +367,55 @@ dropped the nested `LecithinExecutionProvenance.Owner` import). Local
 errors): config migration confirmed, Vault-interface economy guard hooked
 EssentialsX, PaperLib adapter active on Multiverse/QuickShop.
 
+Follow-up review 2026-08-20 of Lecithin `dev/26.2` `fd9e8840..35e9ad78` (19
+commits). Nothing follows up the execution-provenance refactor itself -
+`LecithinExecutionProvenance`, `LecithinDispatchedTasks` and
+`LecithinCallerContextDispatch` are untouched upstream, and our ported
+paper-patches 0002-0014 do not appear in the changed-file set at all. Three
+items were ported:
+
+1. **`c63f47f4` end-gateway parity (bugfix).** `LecithinTeleportEvents` now
+   fires `PlayerTeleportEndGatewayEvent` / `EntityTeleportEndGatewayEvent` with
+   a `CraftEndGateway` for `END_GATEWAY`. The subclasses share the parent's
+   `HandlerList`, so parent listeners always fired, but a listener declared on
+   the subclass - the only way to reach `getGateway()` - never did. The new
+   `gatewayAt(Entity)` resolves the block entity through
+   `entity.portalProcess` + `isSamePortal`, and adds a `TickThread` ownership
+   check this platform needs and Paper does not, so a non-owned block-entity
+   read falls back to the plain event instead of throwing out of an event hook.
+2. **`f908451a` unload-lock half ONLY (bugfix).**
+   `readByLoadingDuringStartup` now holds `level.levelUnloadStateLock` across
+   `syncLoadNonFull`. The other half of that commit - letting region threads
+   reach the load path - is deliberately NOT ported: our
+   `getCurrentRegion() != null` refusal is precisely what keeps this fork clear
+   of the permanent `NON_FULL_CHUNK_LOAD` ticket leak upstream had to add
+   `LecithinForeignWorldTicketUpdates` + nms-0012 to fix (`syncLoadNonFull`
+   has no `finally`, so the "World check failed" throw escapes before
+   `removeTicketAtLevel`, pinning a chunk holder and a region section for the
+   life of the server). Taking the widening without that bundle would import
+   the leak; a future port must take all three together or none.
+3. **`d0872f23` kill-switch text (doc correctness, adapted).** All 18 mentions
+   across 13 compat classes named `-Dlecithin.compat.*` JVM properties that no
+   code reads - four of them in operator-facing runtime log lines. Rewritten to
+   the real `canvas-server.yml` keys (`plugin-compat.<kebab-case>`), each
+   verified against `GlobalConfiguration.PluginCompat`. Runtime-verified in the
+   2026-08-20 smoke: the PaperLib line now prints
+   `disable with plugin-compat.paper-lib-environment: false`.
+
+Everything else in that range is new feature scope beyond our ported patches
+(end-gateway exit adjustment, move rollback, respawn events,
+`PlayerSpawnLocationEvent` in the config phase, `getTPS`/`getRespawnLocation`
+off-region, vanilla portal events, a `/lecithin` command tree) or rebase/docs
+noise: `fb7561f4` shifted the index lines of all six ported nms patches by
++1/-1 with no content change.
+
+Lophine renamed `dev/26.2-hardfork` to `ver/26.2-hardfork` on 2026-08-20; our
+pin `ba77795f` is still a direct ancestor (merge-base verified) and the patch
+directory had zero changes in that window, so all 21 ported items remain
+byte-identical. Links in this file were updated because GitHub does not
+redirect renamed branches. Leaves `master` and Leaf `ver/26.2` are
+byte-identical to their pins (0 commits).
+
 ### License notices
 
 - Repository license: [`LICENSE`](LICENSE)
